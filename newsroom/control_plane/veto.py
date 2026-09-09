@@ -20,6 +20,10 @@ class VetoError(ValueError):
     """The deterministic boundary refused a public or production effect."""
 
 
+class OperatorDrainRequested(RuntimeError):
+    """The operator requested a clean stop between settled work items."""
+
+
 def refuse_public_effect(intent: str) -> None:
     if intent in FORBIDDEN_INTENTS:
         raise VetoError(f"public effect refused: {intent}")

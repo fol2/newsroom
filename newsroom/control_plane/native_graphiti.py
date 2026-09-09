@@ -31,7 +31,7 @@ from .graphiti_admission_integration import compose_existing_graphiti_admission_
 from .model_usage import ModelUsageService
 from .native_cycle import _uuid4_for
 from .store import append_ledger, graphiti_failure_state
-from .veto import VetoError
+from .veto import OperatorDrainRequested, VetoError
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,11 +52,13 @@ class NativeGraphitiProcessor:
         rights_for: Callable[[CorpusIngestUnit], Mapping[str, object] | None],
         stop_check: Callable[[], None],
         dispatch_fence: Callable[[], ContextManager[None]],
+        operator_drain_requested: Callable[[], bool] = lambda: False,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         self._system, self._connection, self._usage = system, connection, usage
         self._proof, self._rights_for = proof, rights_for
         self._stop_check, self._dispatch_fence, self._clock = stop_check, dispatch_fence, clock
+        self._operator_drain_requested = operator_drain_requested
         self._cohorts: dict[str, tuple[str, ...]] = {}
         self._completed: set[str] = set()
         for raw, digest in connection.execute(
@@ -140,8 +142,11 @@ class NativeGraphitiProcessor:
             max_graphiti=len(units), rights_check=self._rights,
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
+            operator_drain_requested=self._operator_drain_requested,
         )
         self._settle_missing_subscription_usage(units)
+        if self._operator_drain_requested():
+            raise OperatorDrainRequested
         route_held = bool(graphiti_required_route_holds(self._usage))
         outcomes = []
         complete = []
@@ -193,6 +198,8 @@ class NativeGraphitiProcessor:
                 continue
             pending.append((cohort_id, exact))
         if pending:
+            if self._operator_drain_requested():
+                raise OperatorDrainRequested
             self._stop_check()
             admission_ready = []
             queued = {}
@@ -232,6 +239,8 @@ class NativeGraphitiProcessor:
                 limit=max(1, sum(queued.values())),
                 ingest_ids=combined,
             )
+            if self._operator_drain_requested():
+                raise OperatorDrainRequested
             ready = []
             units_by_ingest = {unit.ingest_id: unit for unit in units}
             with self._dispatch_fence():
@@ -315,6 +324,8 @@ class NativeGraphitiProcessor:
                         statuses[ingest].receipt_digest,
                         None,
                     )
+            if self._operator_drain_requested():
+                raise OperatorDrainRequested
         return tuple(statuses[unit.ingest_id] for unit in units)
 
     def _settle_missing_subscription_usage(

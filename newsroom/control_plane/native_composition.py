@@ -7,6 +7,7 @@ import secrets
 import shlex
 import sqlite3
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
@@ -179,6 +180,7 @@ def deployed_native_service(args):
         raise ValueError("native service must use its canonical singleton lock")
     check = lambda: assert_no_owner_emergency_stop(str(CANONICAL_PROVING_STORE))
     fence = lambda: owner_emergency_stop_fence(str(CANONICAL_PROVING_STORE))
+    service_event = threading.Event()
 
     def preflight():
         _native_deployment_preflight(
@@ -279,6 +281,7 @@ def deployed_native_service(args):
             neo4j_config=broker.neo4j_projector_config(), embedding_key=broker.openrouter_api_key(),
             embedding_policy=embedding, assessment_policy=assessment, source_definition_ids=bindings,
             licence=None, stop_check=check, stop_fence=fence, implementation_worktree_clean=clean,
+            service_event=service_event,
         ) as composed:
             composed.runtime_identity_digest = identity()
             if qualified_identity is not None and composed.runtime_identity_digest != qualified_identity:
@@ -291,6 +294,7 @@ def deployed_native_service(args):
         failure_backoff_seconds=args.failure_backoff,
         qualify_once=record_qualification,
         preflight=preflight,
+        service_event=service_event,
     )
 
 
@@ -305,6 +309,7 @@ def open_native_pipeline(
     licence: GovUkLicenceEvidence | NativePortfolioRights | None,
     stop_check: Callable[[], None], stop_fence: Callable,
     implementation_worktree_clean: bool,
+    service_event: threading.Event | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ):
     """Open one real runtime; qualification policies must already be retained.
@@ -313,6 +318,9 @@ def open_native_pipeline(
     fixture rights renewal, historical campaign or public target is composed.
     """
     stop_check()
+    operator_drain_requested = (
+        (lambda: False) if service_event is None else service_event.is_set
+    )
     if not implementation_worktree_clean:
         raise ValueError("native provider composition requires its reviewed clean implementation")
     principal, domain = OPERATOR_PRINCIPAL_ID, OPERATOR_AUTHORITY_DOMAIN
@@ -646,6 +654,7 @@ def open_native_pipeline(
             graphiti=NativeGraphitiProcessor(
                 system=runtime.authority, connection=private, usage=usage, proof=proof,
                 rights_for=rights_for_unit, stop_check=stop_check, dispatch_fence=stop_fence,
+                operator_drain_requested=operator_drain_requested,
                 clock=clock,
             ), discovery=NativeDiscovery(
                 sources=runtime.authority.sources, checks=runtime.authority.checks,
@@ -654,5 +663,6 @@ def open_native_pipeline(
             ), retrieval_for=lambda _: retrieval, collision=components["collision"],
             publish=Publication(), actor_identity_digest=runtime.actor_identity_digest,
             stop_check=stop_check, stop_fence=stop_fence, clock=now,
+            operator_drain_requested=operator_drain_requested,
             refresh_rights=refresh_rights,
         )

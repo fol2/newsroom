@@ -11,7 +11,7 @@ import pytest
 from newsroom.control_plane import native_graphiti as n
 from newsroom.control_plane import cycle
 from newsroom.control_plane.store import connect, insert_graphiti_ingest
-from newsroom.control_plane.veto import VetoError
+from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 from newsroom.tests.test_graphiti_operational_readiness import _unit
 from newsroom.projection.models import ProjectionGenerationState
 
@@ -76,6 +76,65 @@ def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, 
         processor.advance(units, cycle_id="native-cycle:2")
         assert len([entry for entry in calls if entry[0] == "empty-cohort-build"]) == 1
         assert connection.execute("SELECT count(*) FROM unpublished_graphiti_ingest").fetchone()[0] == 2
+    finally:
+        connection.close()
+
+
+def test_native_graphiti_propagates_operator_drain_after_settled_ingest(
+    tmp_path, monkeypatch,
+):
+    drain = threading.Event()
+
+    def settle_then_drain(connection, **kwargs):
+        assert kwargs["operator_drain_requested"]() is False
+        _complete(connection, **kwargs)
+        drain.set()
+
+    processor, connection, calls = _open(
+        tmp_path, monkeypatch, ingest=settle_then_drain,
+    )
+    processor._operator_drain_requested = drain.is_set
+    unit = _native()
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            processor.advance((unit,), cycle_id="native-cycle:drain")
+        assert connection.execute(
+            "SELECT outcome FROM unpublished_graphiti_ingest WHERE ingest_id=?",
+            (unit.ingest_id,),
+        ).fetchone() == ("COMPLETE",)
+        assert not any(name in {"enqueue", "drain", "finalise"} for name, _ in calls)
+    finally:
+        connection.close()
+
+
+def test_native_graphiti_records_completed_cohort_before_post_projection_drain(
+    tmp_path, monkeypatch,
+):
+    drain = threading.Event()
+    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=_complete)
+
+    def finalise(**kwargs):
+        calls.append(("finalise", kwargs))
+        drain.set()
+
+    processor._admission.finalise_decided_cohort = finalise
+    processor._operator_drain_requested = drain.is_set
+    unit = _native()
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            processor.advance((unit,), cycle_id="native-cycle:projection-drain")
+        retained = [
+            json.loads(row[0]) for row in connection.execute(
+                "SELECT payload_json FROM ledger "
+                "WHERE kind='NATIVE_GRAPHITI_COHORT' ORDER BY seq"
+            )
+        ]
+        assert [item["state"] for item in retained] == ["STARTED", "COMPLETE"]
+
+        drain.clear()
+        result = processor.advance((unit,), cycle_id="native-cycle:restart")
+        assert result[0].state == "GRAPHITI_COMPLETE"
+        assert len([name for name, _ in calls if name == "finalise"]) == 1
     finally:
         connection.close()
 

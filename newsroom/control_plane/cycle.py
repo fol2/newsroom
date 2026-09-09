@@ -1172,6 +1172,7 @@ def _ingest(
     on_systemic_failure: Callable[[str, bool], None] | None = None,
     model_usage: ModelUsageService | None = None,
     cycle_id: str | None = None,
+    operator_drain_requested: Callable[[], bool] = lambda: False,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1233,6 +1234,11 @@ def _ingest(
         _ingest_id,
         unit,
     ) in _queue(unpublished, units, model_usage=model_usage):
+        # A routine operator drain is distinct from the signed owner stop.  It
+        # is observed only here, between fully settled ingest attempts, so it
+        # cannot turn an in-flight provider effect into an ambiguous attempt.
+        if operator_drain_requested():
+            break
         if attempted >= max_graphiti:
             break
         if isinstance(graphiti, GovernedRealGraphitiPort) and (
