@@ -235,6 +235,59 @@ def test_checked_call_shape_refuses_an_arbitrary_runtime_schema(
     ] == []
 
 
+@pytest.mark.parametrize("clean", [True, False])
+def test_graphiti_software_identity_is_metadata_but_dirty_deployment_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean: bool,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-software-update",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0, admission_decision_id=None, candidate_id=None,
+        hypothesis_digest=None, evidence_package_digest=None,
+        ingest_id="ingest-software-update", graphiti_attempt_id="ingest-software-update:1",
+    )
+    service.open_envelope(envelope)
+    actual_digest = digest_canonical({"compatible_implementation": "new"})
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_transport_implementation_revision",
+        lambda leaf_class: actual_digest,
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("b" * 40, clean),
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service, envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=1), owner_stop_check=lambda: None,
+    )
+    def invoke():
+        return observer.before_cli_invocation(
+            provider="cursor-agent-cli", model="composer-2.5",
+            prompt="compatible update", schema=None,
+        )
+    if not clean:
+        with pytest.raises(ModelUsageAdmissionError, match="command contract"):
+            invoke()
+        assert service.graphiti_request_records(envelope_id=envelope.envelope_id)[
+            "requests"
+        ] == []
+        return
+    allocation = invoke()
+    assert allocation is not None
+    policy = observer._policies[allocation.invocation_id]
+    assert policy.implementation_revision == actual_digest
+    qualified_revision = observer._shape.route_for(
+        GraphitiLeafClass.PRIMARY
+    ).implementation_revision
+    assert qualified_revision != actual_digest
+    with pytest.raises(ModelUsageAdmissionError, match="route differs"):
+        observer.before_cli_invocation(
+            provider="cursor-agent-cli", model="unqualified-model", prompt="route drift",
+            schema=None,
+        )
+
+
 def test_internal_request_identity_binds_semantics_without_source_expression() -> None:
     policy = GraphitiCallShapePolicy.create(
         policy_id="fixture-policy",

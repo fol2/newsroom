@@ -541,9 +541,16 @@ class NativePublicationContinuation:
                 and pre_dispatch.governing_manifest_digest
                 == version.governing_manifest.canonical_digest
             ):
+                attempt_count = facts.get("acquisition_attempt_count", 0)
+                if type(attempt_count) is not int or attempt_count < 0:
+                    raise NativePublicationError(
+                        "native acquisition attempt differs"
+                    )
                 facts.update(
                     reason="ASSESSOR_PRE_DISPATCH_HOLD",
-                    acquisition_retryable=False,
+                    acquisition_retryable=(
+                        attempt_count < _MAX_ACQUISITION_ATTEMPTS
+                    ),
                     assessment_pre_dispatch_candidate_id=(
                         pre_dispatch.candidate_id
                     ),

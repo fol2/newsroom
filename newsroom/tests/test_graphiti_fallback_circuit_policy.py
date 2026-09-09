@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from newsroom.control_plane.graphiti import (
-    _graphiti_transport_implementation_revision,
-)
 from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
     GraphitiFallbackClass,
@@ -113,8 +110,9 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         "GRAPHITI_EMBEDDING",
     }
     for leaf_class in GraphitiLeafClass:
-        assert call_shape.route_for(leaf_class).implementation_revision == (
-            _graphiti_transport_implementation_revision(leaf_class)
+        # Qualified software identity is retained provenance, not a runtime pin.
+        assert call_shape.route_for(leaf_class).implementation_revision.startswith(
+            "sha256:"
         )
     primary = call_shape.route_for(GraphitiLeafClass.PRIMARY)
     assert primary.config_identity == "cursor-sdk-api-key-composer-floor-v2"

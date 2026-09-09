@@ -470,11 +470,20 @@ def test_retained_assessor_contract_failure_becomes_typed_hold(tmp_path) -> None
 
 
 @pytest.mark.parametrize(
-    ("proof_candidate_id", "expected_state"),
-    (("candidate", "EVIDENCE_HOLD"), ("other-candidate", "ASSESSMENT_INTERRUPTED")),
+    ("proof_candidate_id", "attempt_count", "expected_state", "retryable"),
+    (
+        ("candidate", 0, "EVIDENCE_HOLD", True),
+        ("candidate", 3, "EVIDENCE_HOLD", False),
+        ("other-candidate", 0, "ASSESSMENT_INTERRUPTED", False),
+    ),
 )
 def test_retained_zero_dispatch_assessor_failure_requires_exact_candidate(
-    tmp_path, proof_candidate_id, expected_state,
+    tmp_path,
+    monkeypatch,
+    proof_candidate_id,
+    attempt_count,
+    expected_state,
+    retryable,
 ) -> None:
     unit = _native()
     connection = connect(str(tmp_path / "private.sqlite3"))
@@ -485,20 +494,28 @@ def test_retained_zero_dispatch_assessor_failure_requires_exact_candidate(
         "candidate_version_id": "candidate-version",
         "failure_class": "NativeEvidenceError",
         "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+        "acquisition_attempt_count": attempt_count,
     })
-    calls = []
+    calls, acquisitions = [], []
     retained = RetainedAssessorPreDispatchFailure(
         proof_candidate_id, "candidate-version", _DIGEST, _DIGEST,
     )
 
+    evidence = object.__new__(NativeEvidenceController)
+
+    def acquire(_self, **_request):
+        acquisitions.append("attempted")
+        raise NativeEvidenceHold("SOURCE_AUTHORITY_HOLD", "source")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
     continuation = NativePublicationContinuation(
         journal=journal,
         runtime=SimpleNamespace(
             authority=_Authority(), ingress=object(), publication=_Publication(),
             proof=proof(), policies=SimpleNamespace(publication=object()),
         ),
-        evidence_controller=object.__new__(NativeEvidenceController),
-        sources={},
+        evidence_controller=evidence,
+        sources={unit.revision_id: (_source(unit),)},
         assessment_pre_dispatch_failure=lambda _version: (
             calls.append("checked") or retained
         ),
@@ -519,7 +536,19 @@ def test_retained_zero_dispatch_assessor_failure_requires_exact_candidate(
     assert facts["assessment_pre_dispatch_candidate_version_id"] == "candidate-version"
     assert facts["assessment_pre_dispatch_manifest_digest"] == _DIGEST
     assert facts["assessment_pre_dispatch_inventory_digest"] == _DIGEST
-    assert facts["acquisition_retryable"] is False
+    assert facts["acquisition_retryable"] is retryable
+    second = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    assert second.state == "EVIDENCE_HOLD"
+    assert acquisitions == (["attempted"] if retryable else [])
+    if retryable:
+        assert second.reason == "SOURCE_AUTHORITY_HOLD"
+        assert journal.progress[unit.revision_id]["facts"][
+            "acquisition_attempt_count"
+        ] == 1
+    else:
+        assert second.reason == "ASSESSOR_PRE_DISPATCH_HOLD"
     connection.close()
 
 
