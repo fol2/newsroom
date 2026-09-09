@@ -658,6 +658,59 @@ def test_unresolved_mentions_use_one_ordered_embedding_batch() -> None:
         mention.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
         for mention in mentions
     )
+    assert canonical.name_embedding == [1.0, 0.0]
+    assert all(not hasattr(mention, "name_embedding") for mention in mentions)
+
+
+@pytest.mark.parametrize("canonical_embedding", ([1.0, 0.0], [0.0, 0.0]))
+def test_unresolved_new_mention_reuses_validated_name_embedding(
+    canonical_embedding: list[float],
+) -> None:
+    new = SimpleNamespace(
+        uuid="mention:new",
+        name="New Agency",
+        attributes={"entity_type_id": 2},
+    )
+    known = SimpleNamespace(
+        uuid="mention:known",
+        name="Existing Agency",
+        attributes={"entity_type_id": 2},
+    )
+    canonical = SimpleNamespace(
+        uuid="canonical:agency",
+        name="Existing Agency",
+        name_embedding=canonical_embedding,
+        attributes={
+            "entity_type_id": 2,
+            "permitted_source_ids": ("source:legco",),
+        },
+    )
+    calls: list[list[str]] = []
+
+    async def embed_names(names: list[str]) -> list[list[float]]:
+        calls.append(names)
+        return [[0.0, 1.0]]
+
+    resolved, uuid_map, _extra = asyncio.run(
+        resolve_nodes_with_optional_embeddings(
+            [new, known],
+            (canonical,),
+            source_id="source:legco",
+            embed_names=embed_names,
+        )
+    )
+
+    assert calls == [["New Agency"]]
+    assert resolved == [new, known]
+    assert uuid_map == {
+        "mention:new": "mention:new",
+        "mention:known": "canonical:agency",
+    }
+    assert new.attributes["resolution"] == "DETERMINISTIC_NEW_NODE"
+    assert new.name_embedding == [0.0, 1.0]
+    assert known.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
+    assert canonical.name_embedding == canonical_embedding
+    assert not hasattr(known, "name_embedding")
 
 
 @pytest.mark.parametrize(
@@ -700,6 +753,7 @@ def test_unresolved_mention_embedding_batch_rejects_malformed_output(
                 embed_names=embed_names,
             )
         )
+    assert all(not hasattr(mention, "name_embedding") for mention in mentions)
 
 
 def test_similar_distinct_and_low_margin_mentions_are_not_forced_to_merge() -> None:

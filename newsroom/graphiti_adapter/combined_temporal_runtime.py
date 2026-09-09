@@ -301,14 +301,27 @@ async def resolve_nodes_with_optional_embeddings(
             if ppm is None:
                 continue
             similarities[(local_id, str(candidate.uuid))] = ppm
-    if not similarities:
-        return resolved, uuid_map, extra
-    return resolve_nodes_locally(
-        nodes,
-        existing_nodes,
-        source_id=source_id,
-        similarities_ppm=similarities,
-    )
+    if similarities:
+        resolved, uuid_map, extra = resolve_nodes_locally(
+            nodes,
+            existing_nodes,
+            source_id=source_id,
+            similarities_ppm=similarities,
+        )
+    embeddings_by_id = {
+        str(node.uuid): embedding
+        for node, embedding in zip(retry_nodes, mention_embeddings, strict=True)
+    }
+    for node in resolved:
+        attributes = getattr(node, "attributes", {}) or {}
+        embedding = embeddings_by_id.get(str(node.uuid))
+        if (
+            attributes.get("resolution") == "DETERMINISTIC_NEW_NODE"
+            and embedding is not None
+            and getattr(node, "name_embedding", None) is None
+        ):
+            node.name_embedding = embedding
+    return resolved, uuid_map, extra
 
 
 async def _complete_failure(
