@@ -27,6 +27,7 @@ from newsroom.sources.record_models import (
     SourceRevision,
 )
 from newsroom.sources.types import (
+    DiscoveryRepresentationId,
     ObservationModel,
     PortfolioFunction,
     SourceDefinitionId,
@@ -869,6 +870,35 @@ class _SourceRegistryReadMixin:
                 )
             )
 
+    def latest_source_revision(self, item_id: SourceItemId) -> SourceRevision | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT r.* FROM source_revisions r "
+                "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+                "WHERE r.item_id=? ORDER BY e.ledger_seq DESC LIMIT 1",
+                (str(item_id),),
+            ).fetchone()
+            return None if row is None else self._source_revision_from_row(
+                self._connection, row, replayed=False
+            )
+
+    def discovery_representation(
+        self, representation_id: DiscoveryRepresentationId
+    ) -> DiscoveryRepresentation | None:
+        with self._lock:
+            row = self._row_by_id(
+                self._connection,
+                table="discovery_representations",
+                column="representation_id",
+                identifier=str(representation_id),
+            )
+            return (
+                None
+                if row is None
+                else self._representation_from_row(
+                    self._connection, row, replayed=False
+                )
+            )
     def occurrences_for_revision(
         self, revision_id: SourceRevisionId, *, limit: int
     ) -> tuple[DiscoveryOccurrence, ...]:

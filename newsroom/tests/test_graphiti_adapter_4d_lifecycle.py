@@ -11,14 +11,18 @@ from newsroom.authority._graphiti_adapter_store_commit import (
     _GraphitiAdapterCommitMixin,
 )
 from newsroom.authority.object_policy import merge_authority_registries
+from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.extraction.types import ExtractionFailureCode
 from newsroom.graphiti_adapter import (
     DeterministicFakeGraphitiAdapter,
     GraphitiAdapterOutcome,
+    GraphitiInputManifest,
     GraphitiAdapterRightsDenied,
     GraphitiCleanupReason,
 )
+from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for_body
 from newsroom.graphiti_adapter.policy import (
     merge_graphiti_adapter_authority_registries,
 )
@@ -294,6 +298,107 @@ def test_authority_measured_timeout_discards_output_replays_and_can_retry(
         GraphitiAdapterOutcome.COMPLETE,
         GraphitiAdapterOutcome.TIMEOUT,
     ]
+
+
+def test_native_retry_versions_are_retained_as_one_exact_extraction_chain(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = seed_graphiti_authority_fixture(tmp_path / "authority")
+    workspace_root = (tmp_path / "workspace").resolve()
+    passage = state.input_binding.passages[0]
+    authority_ids = (
+        str(passage.admission_id), str(passage.access_decision_id),
+        str(state.input_binding.definition_id),
+        str(state.input_binding.definition_version_id),
+        str(state.input_binding.item_id), str(state.input_binding.revision_id),
+        str(state.input_binding.representation_id),
+    )
+    effective = EffectiveRevisionIdentity(
+        source_id="UK-01", item_key="native-item",
+        revision_digest=digest_canonical({"native": "revision"}),
+        first_observed_at="2026-09-08T00:00:00.000000Z",
+    )
+
+    def generated(attempt_number: int):
+        return evaluation_attempt_for_body(
+            episode_body=passage.require_text(), ingest_id="native-ingest",
+            proving_run_id="native-source:" + digest_canonical({"raw": "page"}),
+            source_id="UK-01", item_key="native-item",
+            observation_digest=digest_canonical({"raw": "page"}),
+            published_at=None, updated_at=None, effective_revision=effective,
+            canonical_url="https://www.gov.uk/native-item",
+            authority_ids=authority_ids, attempt_number=attempt_number,
+        )
+
+    def with_native_identity(base, native):
+        request = replace(
+            base.extraction_request,
+            run_id=native.extraction_request.run_id,
+            run_version_id=native.extraction_request.run_version_id,
+            version_number=native.extraction_request.version_number,
+            expected_previous_version_id=(
+                native.extraction_request.expected_previous_version_id
+            ),
+            idempotency_key=native.extraction_request.idempotency_key,
+        )
+        manifest = GraphitiInputManifest.from_run_request(
+            manifest_id=native.manifest.manifest_id,
+            configuration=base.configuration,
+            contract=base.extraction_contract,
+            request=request,
+        )
+        return replace(
+            base, attempt_id=native.attempt_id,
+            attempt_number=native.attempt_number,
+            expected_previous_attempt_id=native.expected_previous_attempt_id,
+            workspace_id=native.workspace_id,
+            cleanup_receipt_id=native.cleanup_receipt_id,
+            manifest=manifest, extraction_request=request,
+            idempotency_key=native.idempotency_key,
+        )
+
+    first = with_native_identity(fake_attempt(state, timeout_ms=10), generated(1))
+    original_execute = DeterministicFakeGraphitiAdapter.execute
+    current = [SOURCE_NOW]
+
+    def slow_execute(self, *, attempt, workspace_root):
+        execution = original_execute(self, attempt=attempt, workspace_root=workspace_root)
+        ended_at = replace(
+            execution.ended_at,
+            value=execution.ended_at.value + timedelta(milliseconds=11),
+        )
+        current[0] = ended_at
+        return replace(
+            execution, ended_at=ended_at,
+            cleanup_receipt=replace(execution.cleanup_receipt, recorded_at=ended_at),
+        )
+
+    monkeypatch.setattr(DeterministicFakeGraphitiAdapter, "execute", slow_execute)
+    with open_graphiti_system(
+        state, workspace_root=workspace_root, clock=lambda: current[0]
+    ) as system:
+        system.graphiti.register_configuration(first.configuration, proof=extraction_proof())
+        timed_out = system.graphiti.execute_attempt(first, proof=extraction_proof())
+    assert timed_out.outcome is GraphitiAdapterOutcome.TIMEOUT
+
+    monkeypatch.setattr(DeterministicFakeGraphitiAdapter, "execute", original_execute)
+    second_base = retry_fake_attempt(state, timed_out, timeout_ms=10)
+    second = with_native_identity(second_base, generated(2))
+    with open_graphiti_system(
+        state, workspace_root=workspace_root, clock=lambda: current[0]
+    ) as system:
+        completed = system.graphiti.execute_attempt(second, proof=extraction_proof())
+        history = system.graphiti.attempt_history(
+            first.extraction_request.run_id, limit=10, proof=extraction_proof()
+        )
+    assert completed.outcome is GraphitiAdapterOutcome.COMPLETE
+    assert [item.run_version_id for item in reversed(history)] == [
+        first.extraction_request.run_version_id,
+        second.extraction_request.run_version_id,
+    ]
+    assert second.extraction_request.expected_previous_version_id == (
+        first.extraction_request.run_version_id
+    )
 
 
 def test_tombstone_blocks_attempt_replay_and_reads_without_deleting_history(

@@ -54,6 +54,7 @@ _HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
         "cont-writer-grok-hermetic-command-v2",
         "cont-writer-grok-hermetic-command-v3",
         "cont-writer-cursor-hermetic-command-v2",
+        "native-evidence-assessor-grok-hermetic-command-v1",
     }
 )
 DAILY_USAGE_ALERT_TOKENS = 500_000
@@ -77,6 +78,8 @@ class ModelUsageAdmissionError(RuntimeError):
 
 
 class WorkloadClass(StrEnum):
+    NATIVE_EVIDENCE_ASSESSOR = "NATIVE_EVIDENCE_ASSESSOR"
+    NATIVE_RETRIEVAL_EMBEDDING = "NATIVE_RETRIEVAL_EMBEDDING"
     CONT_WRITER_PRIMARY = "CONT_WRITER_PRIMARY"
     CONT_WRITER_FALLBACK = "CONT_WRITER_FALLBACK"
     CONT_ROUTE_HEALTH_PROBE = "CONT_ROUTE_HEALTH_PROBE"
@@ -739,6 +742,12 @@ class WorkEnvelope:
 
     def _validate(self) -> None:
         _token(self.cycle_id, field="cycle_id")
+        native_assessor = (
+            self.workload_class is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+        )
+        native_embedding = (
+            self.workload_class is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+        )
         cont = self.workload_class in {
             WorkloadClass.CONT_WRITER_PRIMARY,
             WorkloadClass.CONT_WRITER_FALLBACK,
@@ -749,6 +758,29 @@ class WorkEnvelope:
             WorkloadClass.GRAPHITI_CHAT_FALLBACK,
             WorkloadClass.GRAPHITI_EMBEDDING,
         }
+        if (
+            native_assessor
+            and (
+                not all(
+                    (
+                        self.candidate_id,
+                        self.hypothesis_digest,
+                        self.evidence_package_digest,
+                    )
+                )
+                or any(
+                    value is not None
+                    for value in (
+                        self.admission_decision_id,
+                        self.ingest_id,
+                        self.graphiti_attempt_id,
+                    )
+                )
+            )
+        ):
+            raise ModelUsageIntegrityError(
+                "native assessor envelope lacks acquired evidence identities"
+            )
         if (
             cont
             and self.workload_class is not WorkloadClass.CONT_ROUTE_HEALTH_PROBE
@@ -764,6 +796,12 @@ class WorkEnvelope:
             raise ModelUsageIntegrityError("CONT envelope lacks editorial identities")
         if graphiti and not self.ingest_id:
             raise ModelUsageIntegrityError("Graphiti envelope lacks ingest identity")
+        if native_embedding and (
+            not self.ingest_id or self.graphiti_attempt_id is not None
+        ):
+            raise ModelUsageIntegrityError(
+                "native embedding envelope lacks passage identity"
+            )
         _utc_text(self.admitted_at)
 
     def as_record(self) -> dict[str, object]:
@@ -1233,6 +1271,10 @@ class ModelUsageService:
             for record in policy_records
             if str(record.get("reasoning")) == reasoning
         ]
+        if workload_class is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING:
+            policies = [policy for policy in policies
+                        if implementation_revision is not None
+                        and policy.implementation_revision == implementation_revision]
         if config_identity is not None:
             policies = [
                 policy
@@ -2217,6 +2259,45 @@ class ModelUsageService:
         finally:
             connection.close()
 
+    def terminal(self, invocation_id: str) -> InvocationTerminal | None:
+        """Read one exact retained terminal without weakening its validation."""
+        invocation_id = _token(invocation_id, field="invocation id")
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT terminal_digest,record_json FROM model_invocation_terminals "
+                "WHERE invocation_id=?", (invocation_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        try:
+            record = _object(row[1])
+            values = dict(record)
+            schema = values.pop("schema_version")
+            retained_digest = values.pop("terminal_digest")
+            values["usage_status"] = UsageStatus(values["usage_status"])
+            values["components"] = UsageComponents(**values["components"])
+            values["dispatch_at"] = (
+                None if values["dispatch_at"] is None
+                else _instant(values["dispatch_at"])
+            )
+            values["completed_at"] = _instant(values["completed_at"])
+            values["observed_at"] = _instant(values["observed_at"])
+            terminal = InvocationTerminal.create(**values)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelUsageIntegrityError("invocation terminal record differs") from exc
+        if (
+            schema != MODEL_USAGE_SCHEMA_VERSION
+            or terminal.invocation_id != invocation_id
+            or retained_digest != row[0]
+            or terminal.terminal_digest != row[0]
+            or terminal.as_record() != record
+        ):
+            raise ModelUsageIntegrityError("invocation terminal record differs")
+        return terminal
+
     def _validate_terminal(
         self,
         terminal: InvocationTerminal,
@@ -2258,7 +2339,10 @@ class ModelUsageService:
             and total is not None
         ):
             raise ModelUsageIntegrityError("unresolved usage must not invent a total")
-        if workload is WorkloadClass.GRAPHITI_EMBEDDING:
+        if workload in {
+            WorkloadClass.GRAPHITI_EMBEDDING,
+            WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING,
+        }:
             if not terminal.od_011_reference:
                 raise ModelUsageIntegrityError("embedding usage lacks OD-011 linkage")
         elif not terminal.subscription_cli_chat_not_cash_debited:
@@ -2445,7 +2529,10 @@ class ModelUsageService:
             connection.close()
         for row in rows:
             workload = WorkloadClass(str(row[2]))
-            embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
+            embedding = workload in {
+                WorkloadClass.GRAPHITI_EMBEDDING,
+                WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING,
+            }
             graphiti_pre_dispatch = bool(row[5]) and row[3] is None
             dispatch_at = (
                 None

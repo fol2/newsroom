@@ -3,7 +3,7 @@ from __future__ import annotations
 # fmt: off - preserve legacy layout and bounded addition within the line cap
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from threading import get_ident
 from typing import Any
 
@@ -113,11 +113,12 @@ _DISCOVERY_RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
 }
 
 class _DiscoveryGoverningProducerReader:
-    __slots__ = ("_connection", "_owner")
+    __slots__ = ("_connection", "_owner", "_object_payload_validator")
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, object_payload_validator=None) -> None:
         self._connection = connection
         self._owner = get_ident()
+        self._object_payload_validator = object_payload_validator
 
     def _require_transaction(self) -> None:
         if (
@@ -141,7 +142,7 @@ class _DiscoveryGoverningProducerReader:
         ):
             raise DiscoveryContractError("Lead IDs must be exact ordered unique values")
         connection = self._connection
-        _validate_discovery_reads_in_transaction(connection)
+        _validate_discovery_reads_in_transaction(connection, self._object_payload_validator)
         result: list[tuple[NewsLead, DiscoverySignal, GateDecision]] = []
         for lead_id in lead_ids:
             lead_row = _DiscoveryAuthorityStore._row(
@@ -186,9 +187,12 @@ class _DiscoveryGoverningProducerReader:
         return tuple(result)
 
 
-def _validate_discovery_reads_in_transaction(connection: sqlite3.Connection) -> None:
+def _validate_discovery_reads_in_transaction(connection: sqlite3.Connection, object_payload_validator=None) -> None:
     _DiscoveryAuthorityStore._validate_relational_invariants(connection)
-    _DiscoveryAuthorityStore._validate_immutable_records(object.__new__(_DiscoveryAuthorityStore), connection)
+    verifier = object.__new__(_DiscoveryAuthorityStore)
+    if object_payload_validator is not None:
+        verifier._validate_object_admission_payload_record = object_payload_validator
+    verifier._validate_immutable_records(connection)
     for row in connection.execute(
         "SELECT c.*,p.mode,p.schema_version,p.schema_contract_version,p.schema_contract_digest,"
         "p.canonicalizer_implementation_version,p.payload_digest,p.payload_bytes,p.object_admission_id,"
@@ -287,6 +291,8 @@ def _validate_discovery_reads_in_transaction(connection: sqlite3.Connection) -> 
 
 def _create_discovery_governing_producer_read_port(
     connection: sqlite3.Connection,
+    *,
+    object_admission_payload_validator: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
 ):
     try:
         if (
@@ -302,7 +308,7 @@ def _create_discovery_governing_producer_read_port(
             raise DiscoveryContractError(
                 "Discovery read-port factory requires an exact active checked connection"
             )
-        reader = _DiscoveryGoverningProducerReader(connection)
+        reader = _DiscoveryGoverningProducerReader(connection, object_admission_payload_validator)
         return _compose_discovery_governing_producer_read_port(
             reader.require_current_governing_producers
         )

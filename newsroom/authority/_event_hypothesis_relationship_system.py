@@ -35,6 +35,7 @@ from newsroom.increment6.relationships import (
     verify_relationship_assessment_replay,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
+from newsroom.increment6.dispositions import CurrentCandidateCitationReadPort
 
 from ._capability import _CapabilityIssuer
 from ._event_hypothesis_system import _HypothesisStore
@@ -139,6 +140,8 @@ def _load_retained_relationship_receipt_in_transaction(
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
     assessment_digest: str,
+    *,
+    verified_versions: dict[str, EventHypothesisVersion] | None = None,
 ) -> RetainedRelationshipDecisionReceipt:
     if not connection.in_transaction:
         raise RelationshipContractError(
@@ -152,14 +155,19 @@ def _load_retained_relationship_receipt_in_transaction(
     evidence = tuple(
         ComparatorEvidence.from_canonical_bytes(item) for item in evidence_bytes
     )
-    with _transaction_hypothesis_rows(connection):
-        subject = hypotheses.require_retained_version_in_transaction(
-            str(row["subject_version_id"])
-        )
+    if verified_versions is None:
+        with _transaction_hypothesis_rows(connection):
+            verified_versions = hypotheses._verify()
+    try:
+        subject = verified_versions[str(row["subject_version_id"])]
         comparators = tuple(
-            hypotheses.require_retained_version_in_transaction(item.version_id)
+            verified_versions[item.version_id]
             for item in assessment.comparator_manifest.comparators
         )
+    except KeyError as exc:
+        raise RelationshipContractError(
+            "retained relationship Hypothesis Version is absent"
+        ) from exc
     verified = verify_relationship_assessment_replay(
         assessment.canonical_bytes,
         subject_version=subject,
@@ -243,21 +251,32 @@ def _verify_relationship_reads_in_transaction(
     hypotheses: _HypothesisStore,
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
-) -> None:
+) -> tuple[
+    dict[str, EventHypothesisVersion],
+    dict[str, RetainedRelationshipDecisionReceipt],
+]:
     if not connection.in_transaction:
         raise RelationshipContractError(
             "relationship verification requires an active transaction"
         )
     with _transaction_hypothesis_rows(connection):
-        hypotheses._verify()
+        versions = hypotheses._verify()
+    receipts: dict[str, RetainedRelationshipDecisionReceipt] = {}
     rows = connection.execute(
         "SELECT decision_id FROM "
         "event_hypothesis_relationship_decisions ORDER BY decision_id"
     )
     for row in rows:
-        _load_retained_relationship_receipt_in_transaction(
-            connection, hypotheses, command_registry, payload_schemas, str(row[0])
+        receipt = _load_retained_relationship_receipt_in_transaction(
+            connection,
+            hypotheses,
+            command_registry,
+            payload_schemas,
+            str(row[0]),
+            verified_versions=versions,
         )
+        receipts[receipt.assessment.canonical_digest] = receipt
+    return versions, receipts
 
 
 class _RelationshipEventStore(_EventAuthorityStore):
@@ -714,16 +733,44 @@ class _EventHypothesisRelationshipReadAuthority:
         self, assessment_digest: str
     ) -> RetainedRelationshipDecisionReceipt:
         def value() -> RetainedRelationshipDecisionReceipt:
-            _verify_relationship_reads_in_transaction(
+            _, receipts = _verify_relationship_reads_in_transaction(
                 self.__connection, self.__hypotheses, *self.__registries
             )
             _verify_relationship_event_coverage(self.__connection)
-            return _load_retained_relationship_receipt_in_transaction(
-                self.__connection,
-                self.__hypotheses,
-                *self.__registries,
-                assessment_digest,
+            try:
+                return receipts[assessment_digest]
+            except KeyError as exc:
+                raise RelationshipContractError(
+                    "unknown relationship decision"
+                ) from exc
+
+        return self.__read(value)
+
+    def require_retained_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+    ]:
+        def value() -> tuple[
+            tuple[RetainedRelationshipDecisionReceipt, ...],
+            tuple[EventHypothesisVersion, ...],
+        ]:
+            versions, receipts = _verify_relationship_reads_in_transaction(
+                self.__connection, self.__hypotheses, *self.__registries
             )
+            _verify_relationship_event_coverage(self.__connection)
+            try:
+                return (
+                    tuple(receipts[item] for item in assessment_digests),
+                    tuple(versions[item] for item in version_ids),
+                )
+            except KeyError as exc:
+                raise RelationshipContractError(
+                    "unknown retained relationship input"
+                ) from exc
 
         return self.__read(value)
 
@@ -752,6 +799,7 @@ def _create_event_hypothesis_relationship_read_port(
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
 ) -> EventHypothesisRelationshipReadPort:
     """Bind the private owner reads to one exact idle checked connection."""
 
@@ -771,7 +819,11 @@ def _create_event_hypothesis_relationship_read_port(
         )
         with _transaction_hypothesis_rows(connection):
             hypotheses = _HypothesisStore(
-                connection, retrieval_authority, authenticator, clock
+                connection,
+                retrieval_authority,
+                authenticator,
+                clock,
+                current_candidate_citations,
             )
         _require_checked_connection(connection, active=False)
         private = _EventHypothesisRelationshipReadAuthority(

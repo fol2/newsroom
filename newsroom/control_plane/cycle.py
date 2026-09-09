@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
+import threading
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -357,13 +359,25 @@ def _assert_owner_emergency_stop_clear(connection: sqlite3.Connection) -> None:
         raise VetoError("owner emergency stop is active or unproved")
 
 
+_OWNER_STOP_FENCES = threading.local()
+
+
 @contextmanager
 def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
     """Hold the owner-stop authority stable across one provider dispatch."""
 
+    store = os.path.realpath(os.path.abspath(os.path.expanduser(proving_store)))
+    # A forked child does not inherit ownership of the parent's SQLite lock.
+    key = (os.getpid(), store)
+    active = getattr(_OWNER_STOP_FENCES, "active", None)
+    if active is None:
+        active = _OWNER_STOP_FENCES.active = set()
+    if key in active:
+        yield
+        return
     timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
     connection = sqlite3.connect(
-        proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
+        store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
     )
     apply_control_plane_sqlite_profile(
         connection, wal=None, busy_timeout_ms=timeout_ms
@@ -374,11 +388,15 @@ def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
             _assert_owner_emergency_stop_clear(connection)
         except sqlite3.OperationalError as exc:
             raise VetoError("owner emergency stop authority is unavailable") from exc
+        active.add(key)
         yield
     finally:
-        if connection.in_transaction:
-            connection.rollback()
-        connection.close()
+        try:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.close()
+        finally:
+            active.discard(key)
 
 
 def _dispatch_valid_until(evaluated_at: datetime) -> str:
@@ -1099,6 +1117,20 @@ def _reconcile_result_spend(
     }
 
 
+def _graphiti_usage_cycle_id(
+    unit: CorpusIngestUnit, *, attempt_number: int, requested_cycle_id: str | None
+) -> str:
+    if unit.proving_run_id == f"native-source:{unit.observation_digest}":
+        return digest_canonical(
+            {
+                "namespace": "native-graphiti-model-usage-attempt-v1",
+                "ingest_id": unit.ingest_id,
+                "attempt_number": attempt_number,
+            }
+        )
+    return requested_cycle_id or unit.proving_run_id
+
+
 def _ingest(
     unpublished: sqlite3.Connection,
     *,
@@ -1153,11 +1185,13 @@ def _ingest(
         failure = raw.get("setup_failure") or raw.get("producer_failure")
         return str(failure) if isinstance(failure, str) and failure else None
 
+    usage_cycle_id: str | None = cycle_id
+
     def result_proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
         if (
             model_usage is not None
-            and cycle_id is not None
-            and model_usage.has_committed_provider_dispatch(cycle_id=cycle_id)
+            and usage_cycle_id is not None
+            and model_usage.has_committed_provider_dispatch(cycle_id=usage_cycle_id)
         ):
             return False
         return _proves_no_provider_dispatch(result)
@@ -1202,6 +1236,12 @@ def _ingest(
         unpublished.commit()
         attempt_number = next_graphiti_attempt_number(unpublished, unit.ingest_id)
         unit = replace(unit, attempt_number=attempt_number)
+        native_dispatch = (
+            unit.proving_run_id == f"native-source:{unit.observation_digest}"
+        )
+        usage_cycle_id = _graphiti_usage_cycle_id(
+            unit, attempt_number=attempt_number, requested_cycle_id=cycle_id
+        )
         if unit.authority is None:
             raise ValueError("corpus ingest requires retained authority records")
         retain_graphiti_authority_records(unpublished, unit.authority.records)
@@ -1215,7 +1255,11 @@ def _ingest(
                 proving_run_id=unit.proving_run_id,
                 generation_id=GRAPHITI_GENERATION_ID,
                 reserved_gbp_microunits=GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS,
-                ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
+                ceiling_gbp_microunits=(
+                    None
+                    if native_dispatch
+                    else OD_011_CASH_CEILING_GBP * 1_000_000
+                ),
             )
         except GraphitiSpendCeilingExceeded:
             append_ledger(
@@ -1251,7 +1295,11 @@ def _ingest(
                     "chat": GRAPHITI_CHAT_MODEL,
                     "chat_fallback": GRAPHITI_CHAT_FALLBACK,
                     "chat_subscription_not_debited": True,
-                    "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
+                    **(
+                        {"native_cash_ceiling": "OWNER_WAIVED_UNLIMITED"}
+                        if native_dispatch
+                        else {"od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP}
+                    ),
                     "prespent": False,
                     "hosts": ["openrouter.ai"],
                     "generation_id": GRAPHITI_GENERATION_ID,
@@ -1330,7 +1378,7 @@ def _ingest(
                 if model_usage is not None and callable(ingest_with_usage):
                     usage_arguments: dict[str, object] = {
                         "model_usage": model_usage,
-                        "cycle_id": cycle_id or unit.proving_run_id,
+                        "cycle_id": usage_cycle_id,
                         "deadline": (
                             dispatch_authority.deadline
                             if isinstance(graphiti, GovernedRealGraphitiPort)

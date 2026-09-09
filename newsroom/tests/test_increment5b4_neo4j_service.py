@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Iterator
 
 import pytest
 
+from newsroom.authority.canonical import digest_bytes
 from newsroom.authority.neo4j_admitted_graph_reader import Neo4jAdmittedGraphReadPort
+from newsroom.authority.types import AggregateId, ObjectAdmissionId
 from newsroom.increment5.admitted_graph_retriever import canonical_node_digest
+from newsroom.increment5.native_retrieval import (
+    NATIVE_VECTOR_DIMENSIONS,
+    NativeDocumentReceipt,
+    NativePassageDocument,
+    NativeRetrievalError,
+)
+from newsroom.increment5.neo4j_native_retrieval import (
+    Neo4jNativeRetrievalProjection,
+)
 
 
 neo4j = pytest.importorskip("neo4j")
@@ -51,6 +64,45 @@ def _cleanup(driver: object, database: str | None, generations: list[str]) -> No
             "MATCH (n) WHERE n.generation_id IN $generations DETACH DELETE n",
             generations=generations,
         ).consume()
+
+
+def _native_document(
+    *, generation: str, marker: str,
+) -> tuple[NativeDocumentReceipt, NativePassageDocument]:
+    text = f"Native projection common evidence {marker}."
+    document = NativePassageDocument(
+        generation_id=generation,
+        passage_id=str(uuid.uuid4()),
+        dependency_root_id=f"event:{marker}",
+        source_id=f"source.{marker}",
+        revision_id=f"revision.{marker}",
+        representation_id=f"representation.{marker}",
+        language="en-GB",
+        text=text,
+        text_digest=digest_bytes(text.encode()),
+        rights_digest=digest_bytes(f"rights:{marker}".encode()),
+        provenance_digest=digest_bytes(f"provenance:{marker}".encode()),
+        vector_digest=digest_bytes(f"vector:{marker}".encode()),
+        vector_admission_id=str(ObjectAdmissionId.new()),
+        embedding_receipt_digest=digest_bytes(f"receipt:{marker}".encode()),
+        embedding_receipt_admission_id=str(ObjectAdmissionId.new()),
+        embedding_model_digest=digest_bytes(b"native-model"),
+    )
+    receipt = NativeDocumentReceipt(
+        f"event-{marker}",
+        f"command-{marker}",
+        AggregateId.new(),
+        1,
+        ObjectAdmissionId.new(),
+        document.digest,
+        ObjectAdmissionId.parse(document.vector_admission_id),
+        ObjectAdmissionId.parse(document.embedding_receipt_admission_id),
+    )
+    return receipt, document
+
+
+def _receipt_ids(rows) -> set[str]:
+    return {str(row["aggregate_id"]) for row in rows}
 
 
 def test_increment5b4_fixed_port_reads_only_exact_generation_and_allowed_state() -> None:
@@ -223,3 +275,93 @@ def test_increment5b4_fixed_port_excludes_future_observations() -> None:
             assert edges == ()
         finally:
             _cleanup(driver, database, [generation])
+
+
+def test_native_projection_reconciles_actual_fulltext_and_vector_membership() -> None:
+    with actual_driver() as (driver, database):
+        generation = str(uuid.uuid4())
+        other_generation = str(uuid.uuid4())
+        suffix = uuid.uuid4().hex
+        fulltext_index = f"native_fulltext_{suffix}"
+        vector_index = f"native_vector_{suffix}"
+        constraint = (
+            "native_retrieval_passage_"
+            f"{hashlib.sha256(generation.encode()).hexdigest()[:16]}"
+        )
+        projection = Neo4jNativeRetrievalProjection(
+            driver,
+            database=database,
+            generation_id=generation,
+            fulltext_index=fulltext_index,
+            vector_index=vector_index,
+            driver_version=neo4j.__version__,
+        )
+        receipt_a, document_a = _native_document(
+            generation=generation, marker="alpha",
+        )
+        receipt_b, document_b = _native_document(
+            generation=generation, marker="beta",
+        )
+        vector = (1.0,) + (0.0,) * (NATIVE_VECTOR_DIMENSIONS - 1)
+        expected = {str(receipt_a.aggregate_id), str(receipt_b.aggregate_id)}
+        try:
+            projection.bootstrap()
+            with _session(driver, database) as session:
+                session.run("CALL db.awaitIndexes(30)").consume()
+                session.run(
+                    f"CREATE (n:`{projection.document_label}` "
+                    "{generation_id:$generation_id,passage_id:$passage_id})",
+                    generation_id=other_generation,
+                    passage_id=str(uuid.uuid4()),
+                ).consume()
+            projection.upsert(receipt_a, document_a, vector)
+            projection.upsert(receipt_b, document_b, vector)
+
+            fulltext, vector_hits = projection.retrieve(
+                query_text="common", query_vector=vector,
+            )
+            assert _receipt_ids(fulltext) == expected
+            assert _receipt_ids(vector_hits) == expected
+
+            corrupt_b = replace(
+                receipt_b, document_digest=digest_bytes(b"corrupt-document"),
+            )
+            with pytest.raises(
+                NativeRetrievalError, match="retained document differs",
+            ):
+                projection.reconcile_membership((corrupt_b,))
+            with _session(driver, database) as session:
+                assert session.run(
+                    f"MATCH (n:`{projection.document_label}` "
+                    "{generation_id:$generation_id}) RETURN count(n) AS count",
+                    generation_id=generation,
+                ).single()["count"] == 2
+
+            assert projection.reconcile_membership((receipt_b,)) == ()
+            fulltext, vector_hits = projection.retrieve(
+                query_text="common", query_vector=vector,
+            )
+            assert _receipt_ids(fulltext) == {str(receipt_b.aggregate_id)}
+            assert _receipt_ids(vector_hits) == {str(receipt_b.aggregate_id)}
+
+            assert projection.reconcile_membership(
+                (receipt_a, receipt_b),
+            ) == (receipt_a,)
+            projection.upsert(receipt_a, document_a, vector)
+            fulltext, vector_hits = projection.retrieve(
+                query_text="common", query_vector=vector,
+            )
+            assert _receipt_ids(fulltext) == expected
+            assert _receipt_ids(vector_hits) == expected
+            with _session(driver, database) as session:
+                assert session.run(
+                    f"MATCH (n:`{projection.document_label}` "
+                    "{generation_id:$generation_id}) RETURN count(n) AS count",
+                    generation_id=other_generation,
+                ).single()["count"] == 1
+        finally:
+            _cleanup(driver, database, [generation, other_generation])
+            with _session(driver, database) as session:
+                session.run(f"DROP INDEX `{fulltext_index}` IF EXISTS").consume()
+                session.run(f"DROP INDEX `{vector_index}` IF EXISTS").consume()
+                session.run(f"DROP CONSTRAINT `{constraint}` IF EXISTS").consume()

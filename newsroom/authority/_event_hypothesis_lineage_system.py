@@ -38,6 +38,7 @@ from newsroom.increment6.relationships import (
     merge_relationship_authority_registries,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
+from newsroom.increment6.dispositions import CurrentCandidateCitationReadPort
 
 from ._capability import _CapabilityIssuer
 from ._event_hypothesis_relationship_system import (
@@ -47,11 +48,6 @@ from ._event_store import _EventAuthorityStore
 
 _TOKEN = object()
 _LINEAGE_AGGREGATE_DOMAIN = b"newsroom.event-hypothesis-lineage.aggregate.v1"
-_VERIFY_RETAINED_RELATIONSHIP_INTEGRITY = (
-    EventHypothesisRelationshipReadPort.verify_retained_integrity_in_transaction
-)
-
-
 def _lineage_aggregate_id(lineage_id: str) -> AggregateId:
     digest = hashlib.sha256(
         _LINEAGE_AGGREGATE_DOMAIN + b"\0" + lineage_id.encode("ascii")
@@ -303,31 +299,53 @@ class _LineageStore(_EventAuthorityStore):
         UtcTimestamp.parse(str(row["recorded_at"]))
         return receipt
 
-    def _replay_inputs(self, receipts: tuple[HypothesisLineageReceipt, ...]):
+    def _replay_inputs(
+        self,
+        receipts: tuple[HypothesisLineageReceipt, ...],
+        required_relationship_digests: tuple[str, ...] = (),
+    ):
         nodes = {
             node.version_id: node
             for receipt in receipts
             for node in (*receipt.inputs, *receipt.outputs)
         }
+        relationship_digests = tuple(
+            sorted(
+                {
+                    binding.assessment_digest
+                    for receipt in receipts
+                    for binding in receipt.relationships
+                }
+                | set(required_relationship_digests)
+            )
+        )
+        retained_relationships, retained_versions = (
+            self._port._require_retained_inputs_in_transaction(
+                relationship_digests, tuple(sorted(nodes))
+            )
+        )
         versions = []
-        for version_id in sorted(nodes):
-            version = self._port.require_retained_version_in_transaction(version_id)
+        for version_id, version in zip(
+            sorted(nodes), retained_versions, strict=True
+        ):
             _exact_version(version, nodes[version_id])
             versions.append(version)
-        proofs = []
-        for digest in sorted(
-            {
-                binding.assessment_digest
-                for receipt in receipts
-                for binding in receipt.relationships
-            }
-        ):
-            retained = self._port.require_retained_receipt_in_transaction(digest)
-            proofs.append(
-                HypothesisLineageRelationshipProof.from_assessment(
-                    retained.assessment, retained.evidence
-                )
+        relationships = dict(
+            zip(relationship_digests, retained_relationships, strict=True)
+        )
+        proofs = [
+            HypothesisLineageRelationshipProof.from_assessment(
+                relationships[digest].assessment,
+                relationships[digest].evidence,
             )
+            for digest in sorted(
+                {
+                    binding.assessment_digest
+                    for receipt in receipts
+                    for binding in receipt.relationships
+                }
+            )
+        ]
         output_ids = {
             node.version_id for receipt in receipts for node in receipt.outputs
         }
@@ -338,10 +356,10 @@ class _LineageStore(_EventAuthorityStore):
                 - output_ids
             )
         )
-        return roots, tuple(versions), tuple(proofs)
+        return roots, tuple(versions), tuple(proofs), relationships
 
     def _full_replay(self, receipts: tuple[HypothesisLineageReceipt, ...]):
-        roots, versions, proofs = self._replay_inputs(receipts)
+        roots, versions, proofs, _ = self._replay_inputs(receipts)
         return replay_hypothesis_lineage(
             receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs
         )
@@ -354,8 +372,7 @@ class _LineageStore(_EventAuthorityStore):
             )
         )
 
-    def _verify(self):
-        _VERIFY_RETAINED_RELATIONSHIP_INTEGRITY(self._port)
+    def _verify(self, required_relationship_digests: tuple[str, ...] = ()):
         self._validate_relational_invariants(self._connection)
         self._validate_immutable_records(self._connection)
         self._validate_registry_coverage(self._connection)
@@ -366,7 +383,9 @@ class _LineageStore(_EventAuthorityStore):
         if orphan is not None:
             raise AuthoritySchemaError("lineage event coverage differs")
         history = self._history_rows()
-        roots, versions, proofs = self._replay_inputs(history)
+        roots, versions, proofs, relationships = self._replay_inputs(
+            history, required_relationship_digests
+        )
         replay = replay_hypothesis_lineage(
             history,
             initial_heads=roots,
@@ -410,7 +429,7 @@ class _LineageStore(_EventAuthorityStore):
         )
         if actual != expected:
             raise AuthoritySchemaError("lineage materialised heads differ")
-        return history, roots, versions, proofs, replay
+        return history, roots, versions, proofs, replay, relationships
 
     def _rebuild_heads(self, replay: object) -> None:
         from newsroom.increment6.lineage import HypothesisLineageReplay
@@ -688,27 +707,37 @@ def _open_unlocked_lineage_authority_for_test(
 # fmt: off
 def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *,
     retrieval_authority: RetrievalContextAuthority, authenticator: object, command_registry: CommandRegistry,
-    payload_schemas: PayloadSchemaRegistry, clock: Callable[[], UtcTimestamp] = UtcTimestamp.now):
+    payload_schemas: PayloadSchemaRegistry, clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    object_admission_payload_validator: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None):
     """Compose exact D1/D2/D3 producer reads on the caller's transaction."""
     if connection.in_transaction: raise HypothesisLineageContractError("Candidate lineage port requires idle open")
     port = _create_event_hypothesis_relationship_read_port(connection, retrieval_authority=retrieval_authority,
-        authenticator=authenticator, command_registry=command_registry, payload_schemas=payload_schemas, clock=clock)
+        authenticator=authenticator, command_registry=command_registry,
+        payload_schemas=payload_schemas, clock=clock,
+        current_candidate_citations=current_candidate_citations)
     verifier = object.__new__(_LineageStore); verifier._conn = connection; verifier._closed = False; verifier._port = port
+    if object_admission_payload_validator is not None:
+        verifier._validate_object_admission_payload_record = object_admission_payload_validator
     relationship_commands, relationship_schemas = merge_relationship_authority_registries(command_registry, payload_schemas)
     verifier._command_registry, verifier._payload_schemas = merge_lineage_authority_registries(relationship_commands, relationship_schemas)
 
-    def verified():
+    def verified(required_relationship_digests: tuple[str, ...] = ()):
         if not connection.in_transaction: raise HypothesisLineageContractError("lineage producer transaction is absent")
-        return verifier._verify()
+        return verifier._verify(required_relationship_digests)
 
     class _ReadAuthority:
         def verify_retained_integrity_in_transaction(self) -> None: verified()
 
         def require_retained_relationship_in_transaction(self, digest: str):
-            verified(); return port.require_retained_receipt_in_transaction(digest)
+            return self.require_retained_relationships_in_transaction((digest,))[0]
+
+        def require_retained_relationships_in_transaction(self, digests: tuple[str, ...]):
+            *_, relationships = verified(digests)
+            return tuple(relationships[digest] for digest in digests)
 
         def require_producers_in_transaction(self, version_id: str, *, proof: object):
-            receipts, roots, versions, proofs, replay = verified()
+            receipts, roots, versions, proofs, replay, _ = verified()
             current = port.require_current_version_in_transaction(version_id, proof=proof)
             if current.version_id not in {item.version_id for item in versions}:
                 versions += (current,); roots += (HypothesisLineageHead.from_version(current),)

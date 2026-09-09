@@ -5,6 +5,7 @@ from enum import StrEnum
 from fractions import Fraction
 import math
 import re
+import uuid
 from typing import Iterable
 
 from newsroom.authority.canonical import (
@@ -37,6 +38,19 @@ _MAX_NAMED_TOOL_ELAPSED_MS = 5_000
 
 class RetrievalContractError(ValueError):
     """A bounded retrieval contract or retained record is malformed."""
+
+
+def _require_passage_identity(value: str, *, field: str) -> None:
+    try:
+        require_token(value, field=field)
+    except ValueError:
+        try:
+            if str(uuid.UUID(value)) != value:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise RetrievalContractError(
+                f"{field} is not a valid authority token or canonical UUID"
+            ) from exc
 
 
 class RetrievalStateError(RuntimeError):
@@ -297,7 +311,9 @@ class RetrievalBranchHit:
         for field_name in ("result_key", "dependency_root_id", "source_identity"):
             _bounded_text(getattr(self, field_name), field=field_name, maximum_bytes=256)
         if self.passage_id is not None:
-            require_token(self.passage_id, field="retrieval_passage_id")
+            _require_passage_identity(
+                self.passage_id, field="retrieval_passage_id"
+            )
         if self.trust_scope not in {TrustScope.OBSERVED, TrustScope.ADMITTED}:
             raise RetrievalContractError("retrieval hit trust scope is not permitted")
         require_token(self.source_kind, field="retrieval_source_kind")
@@ -504,7 +520,7 @@ class HydratedRetrievalPassage:
     trust_scope: TrustScope
 
     def __post_init__(self) -> None:
-        require_token(self.passage_id, field="hydrated_passage_id")
+        _require_passage_identity(self.passage_id, field="hydrated_passage_id")
         if not isinstance(self.admission_id, ObjectAdmissionId):
             raise RetrievalContractError("hydrated passage admission must be typed")
         for field_name in (

@@ -879,6 +879,55 @@ class EventHypothesisRelationshipReadPort:
             RetainedRelationshipDecisionReceipt,
         )
 
+    def _require_retained_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+    ]:
+        if (
+            type(assessment_digests) is not tuple
+            or type(version_ids) is not tuple
+            or any(type(item) is not str for item in assessment_digests)
+            or any(type(item) is not str for item in version_ids)
+        ):
+            raise RelationshipContractError(
+                "retained relationship input batch differs"
+            )
+        value = self.__authority.require_retained_inputs_in_transaction(
+            assessment_digests, version_ids
+        )
+        try:
+            differs = (
+                type(value) is not tuple
+                or len(value) != 2
+                or type(value[0]) is not tuple
+                or type(value[1]) is not tuple
+                or len(value[0]) != len(assessment_digests)
+                or len(value[1]) != len(version_ids)
+                or any(
+                    type(item) is not RetainedRelationshipDecisionReceipt
+                    for item in value[0]
+                )
+                or any(
+                    type(item) is not EventHypothesisVersion for item in value[1]
+                )
+                or tuple(item.assessment.canonical_digest for item in value[0])
+                != assessment_digests
+                or tuple(item.version_id for item in value[1]) != version_ids
+            )
+        except Exception as exc:
+            raise RelationshipContractError(
+                "retained relationship inputs transaction read differs"
+            ) from exc
+        if differs:
+            raise RelationshipContractError(
+                "retained relationship inputs transaction read differs"
+            )
+        return value
+
     def require_retained_version_in_transaction(
         self, version_id: str
     ) -> EventHypothesisVersion:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import re
+import uuid
 
 from newsroom.authority.canonical import (
     MAX_SAFE_INTEGER,
@@ -73,6 +74,7 @@ class FullTextIndexState(StrEnum):
 class FullTextProfile(StrEnum):
     FIXTURE_REPLAY = "FIXTURE_REPLAY"
     PRODUCTION_SHAPED_QUALIFICATION = "PRODUCTION_SHAPED_QUALIFICATION"
+    NATIVE_RUNTIME = "NATIVE_RUNTIME"
 
 
 def _bounded_text(
@@ -458,7 +460,16 @@ class FullTextDocumentBinding:
     trust_scope: TrustScope = TrustScope.OBSERVED
 
     def __post_init__(self) -> None:
-        require_token(self.passage_id, field="fulltext_passage_id")
+        try:
+            require_token(self.passage_id, field="fulltext_passage_id")
+        except ValueError:
+            try:
+                if str(uuid.UUID(self.passage_id)) != self.passage_id:
+                    raise ValueError
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError(
+                    "fulltext_passage_id is not a valid authority token or canonical UUID"
+                ) from exc
         for field_name in (
             "dependency_root_id",
             "source_id",

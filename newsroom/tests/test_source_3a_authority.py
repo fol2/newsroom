@@ -302,6 +302,9 @@ def test_observation_must_use_current_version_but_historical_current_rows_reopen
     system.close()
 
     reopened = open_source_system(database)
+    assert reopened.sources.latest_revision(
+        revision.request.item_id, proof=proof()
+    ).event_id == revision.event_id
     assert reopened.sources.revision(
         revision.request.revision_id,
         proof=proof(),

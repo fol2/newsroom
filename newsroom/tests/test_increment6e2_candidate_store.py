@@ -1287,6 +1287,54 @@ def test_real_successor_commits_then_history_current_and_reopen_retain_both_vers
         reopened.close()
 
 
+def test_candidate_read_verifies_shared_upstream_once_for_all_relationships(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_system as system
+    from newsroom.increment6 import dispositions as disposition_system
+
+    adapter = _Adapter(tmp_path)
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    try:
+        handle.submit(_generic("record-1"))
+        handle.submit(_generic("record-2"))
+        first = handle._row("record-1")
+        assert first is not None
+
+        disposition_calls = 0
+        retrieval_calls = 0
+        original_dispositions = system._VERIFY_DISPOSITION_INTEGRITY
+        original_retrieval = disposition_system._RETRIEVAL_VERIFY_RETAINED
+
+        def counted_dispositions(store) -> None:
+            nonlocal disposition_calls
+            disposition_calls += 1
+            original_dispositions(store)
+
+        def counted_retrieval(*args: object) -> None:
+            nonlocal retrieval_calls
+            retrieval_calls += 1
+            original_retrieval(*args)
+
+        with sqlite3.connect(location.seed[1]) as connection:
+            expected_retrievals = connection.execute(
+                "SELECT count(DISTINCT work_item_version_id || ':' || proposal_id) "
+                "FROM triage_proposal_dispositions"
+            ).fetchone()[0]
+        monkeypatch.setattr(
+            system, "_VERIFY_DISPOSITION_INTEGRITY", counted_dispositions
+        )
+        monkeypatch.setattr(
+            disposition_system, "_RETRIEVAL_VERIFY_RETAINED", counted_retrieval
+        )
+        handle._opened().load_version(str(first[1]))
+        assert disposition_calls == 1
+        assert retrieval_calls == expected_retrievals
+    finally:
+        handle.close()
+
+
 class _DefectiveAdapter(_Adapter):
     def __init__(self, root: Path, defect: str, case: CaseId) -> None:
         super().__init__(root)

@@ -58,7 +58,10 @@ from newsroom.increment6.collision import (
     CurrentCollisionEligibilityDecision,
     CurrentCollisionEligibilityRequest,
 )
-from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.dispositions import (
+    CurrentCandidateCitationReadPort,
+    ProposalDispositionStore,
+)
 from newsroom.increment6.lineage import merge_lineage_authority_registries
 from newsroom.increment6.relationships import merge_relationship_authority_registries
 from newsroom.increment6.work_items import RetrievalContextAuthority
@@ -485,15 +488,19 @@ class _CandidateStore(_EventAuthorityStore):
             admission.governing_manifest.relationship_assessment_digest
             for admission, *_ in verified.values()
         }
+        ordered_digests = tuple(sorted(digests))
+        # The lineage batch verifies its relationship, Hypothesis and disposition
+        # authority chain once, including when this Candidate history is empty.
         relationships = {
-            digest: self._lineage.require_retained_relationship_in_transaction(
-                digest
-            ).assessment
-            for digest in digests
+            digest: receipt.assessment
+            for digest, receipt in zip(
+                ordered_digests,
+                self._lineage.require_retained_relationships_in_transaction(
+                    ordered_digests
+                ),
+                strict=True,
+            )
         }
-        if not relationships:
-            self._lineage.verify_retained_integrity_in_transaction()
-        self._dispositions.verify_retained_integrity_in_transaction()
         for admission, *_ in verified.values():
             manifest = admission.governing_manifest
             assessment = relationships[manifest.relationship_assessment_digest]
@@ -546,12 +553,14 @@ class _CandidateStore(_EventAuthorityStore):
             else StoryCandidateVersion.from_canonical_bytes(bytes(row[0]))
         )
 
-    def _producers(self, manifest, proof):
+    def _producers_from_refs(
+        self, hypothesis_version_id, relationship_assessment_digest, proof
+    ):
         snapshot = self._lineage.require_current_producers_in_transaction(
-            manifest.hypothesis_version_id, proof=proof
+            hypothesis_version_id, proof=proof
         )
         relationship = self._lineage.require_retained_relationship_in_transaction(
-            manifest.relationship_assessment_digest
+            relationship_assessment_digest
         )
         disposition_ids = tuple(
             sorted(
@@ -570,7 +579,8 @@ class _CandidateStore(_EventAuthorityStore):
             )
         )
         discovery = _create_discovery_governing_producer_read_port(
-            self._connection
+            self._connection,
+            object_admission_payload_validator=self._validate_object_admission_payload_record,
         ).require_current_governing_producers(lead_ids)
         return (
             snapshot,
@@ -579,6 +589,36 @@ class _CandidateStore(_EventAuthorityStore):
             dispositions,
             tuple(zip(*discovery, strict=True)),
         )
+
+    def _producers(self, manifest, proof):
+        return self._producers_from_refs(
+            manifest.hypothesis_version_id,
+            manifest.relationship_assessment_digest,
+            proof,
+        )
+
+    def build_manifest(
+        self,
+        hypothesis_version_id: str,
+        relationship_assessment_digest: str,
+        collision: CurrentCollisionEligibilityDecision,
+        *,
+        proof: AuthenticationProof,
+    ):
+        if type(collision) is not CurrentCollisionEligibilityDecision:
+            raise CandidateContractError("Candidate collision decision differs")
+        if not self._connection.in_transaction:
+            with self._lock, self._transaction():
+                return self.build_manifest(
+                    hypothesis_version_id,
+                    relationship_assessment_digest,
+                    collision,
+                    proof=proof,
+                )
+        producers = self._producers_from_refs(
+            hypothesis_version_id, relationship_assessment_digest, proof
+        )
+        return self._manifest(producers, collision)
 
     @staticmethod
     def _manifest(producers, collision):
@@ -1064,6 +1104,13 @@ def _create_story_candidate_read_port(
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    command_service_version: str = "increment6-candidate-v1",
+    bounded_version: Callable[[str], StoryCandidateVersion] | None = None,
+    object_admission_payload_validator: Callable[
+        [sqlite3.Connection, sqlite3.Row], None
+    ]
+    | None = None,
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
 ) -> StoryCandidateReadPort:
     """Bind complete Candidate reads to one caller-owned transaction."""
 
@@ -1094,6 +1141,8 @@ def _create_story_candidate_read_port(
             command_registry=commands,
             payload_schemas=schemas,
             clock=clock,
+            object_admission_payload_validator=object_admission_payload_validator,
+            current_candidate_citations=current_candidate_citations,
         )
         verifier = object.__new__(_CandidateStore)
         verifier._conn = connection
@@ -1101,15 +1150,24 @@ def _create_story_candidate_read_port(
         verifier._lock = threading.RLock()
         verifier._command_registry = commands
         verifier._payload_schemas = schemas
-        verifier._command_service_version = "increment6-candidate-v1"
+        verifier._command_service_version = command_service_version
         verifier._lineage = lineage
+        if object_admission_payload_validator is not None:
+            verifier._validate_object_admission_payload_record = (
+                object_admission_payload_validator
+            )
         verifier._dispositions = ProposalDispositionStore(
-            connection, retrieval_authority, authenticator
+            connection,
+            retrieval_authority,
+            authenticator,
+            current_candidate_citations,
         )
         private = _StoryCandidateReadAuthority(
             _READ_AUTHORITY_TOKEN, connection, verifier
         )
-        port = _compose_story_candidate_read_port(private)
+        port = _compose_story_candidate_read_port(
+            private, bounded_version=bounded_version
+        )
         if type(port) is not StoryCandidateReadPort:
             raise CandidateContractError(
                 "Candidate read-port factory returned a forged port"

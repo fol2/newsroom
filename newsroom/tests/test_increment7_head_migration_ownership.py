@@ -25,6 +25,24 @@ _BASE_TREE = "f5109a81962db2d4206426abfc152c890ef5d461"
 _BASE_FINGERPRINT = (
     "sha256:353900bf5804f0b770489982541f3cff4fd30ea36fc75d19b9c63315d1b6ec06"
 )
+# #151 adds native retrieval and a bounded Candidate read port. The accepted
+# Increment 7R record remains immutable: it must still report those historical
+# whole-module anchors as changed, while current CI checks the exact successors.
+_NATIVE_SUCCESSOR_DIGESTS = {
+    "newsroom.increment6.candidates": "sha256:26a7b60922021d215a834417847f71cfa016d776b19a758fb487af891d83a6a6",
+    "newsroom.increment6.work_items": "sha256:063a31b7afbcfce354e2bcbc8e1f35dabcd743f853705f81cbeb581da92a01ff",
+}
+
+
+def _assert_reviewed_native_successor_inventory() -> None:
+    assert validate_interface_inventory(INCREMENT_7_READINESS) == tuple(
+        f"{name}: module source differs" for name in sorted(_NATIVE_SUCCESSOR_DIGESTS)
+    )
+    for name, expected in _NATIVE_SUCCESSOR_DIGESTS.items():
+        module = readiness_module._INTERFACE_MODULES[name]
+        assert digest_bytes(Path(module.__file__).read_bytes()) == expected
+
+
 _CHILD_ISSUES = tuple(range(435, 447))
 _MIGRATIONS = {437: 26, 439: 27, 443: 28, 445: 29}
 _WAVES = {
@@ -64,7 +82,7 @@ def test_readiness_is_bound_to_exact_final_increment6_head_and_v25_schema() -> N
     )
 
 
-def test_exact_inherited_interfaces_resolve_without_drift() -> None:
+def test_inherited_interfaces_preserve_historical_anchors_and_checked_native_successors() -> None:
     readiness = INCREMENT_7_READINESS
     assert tuple(item.interface_id for item in readiness.interface_inventory) == (
         "increment6.final-closeout",
@@ -77,7 +95,7 @@ def test_exact_inherited_interfaces_resolve_without_drift() -> None:
         "qualification.evaluation-plan",
         "authority.checked-schema",
     )
-    assert validate_interface_inventory(readiness) == ()
+    _assert_reviewed_native_successor_inventory()
     assert readiness.interface_inventory[1].symbol_values == {
         "SUPPLEMENTAL_DISCOVERY_REENTRY": "NEW_GOVERNED_DISCOVERY_LINEAGE_ONLY"
     }
@@ -218,7 +236,7 @@ def test_reserved_additive_schema_suffix_is_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checksum = "sha256:" + "a" * 64
-    assert validate_interface_inventory(INCREMENT_7_READINESS) == ()
+    _assert_reviewed_native_successor_inventory()
     wrong_name = list(authority_migrations.EXPECTED_MIGRATION_HISTORY)
     wrong_name[26] = (27, "wrong_v27", checksum)
     monkeypatch.setattr(

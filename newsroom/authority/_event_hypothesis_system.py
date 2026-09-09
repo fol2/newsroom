@@ -24,6 +24,7 @@ from newsroom.authority.migrations import (
 )
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment6.dispositions import (
+    CurrentCandidateCitationReadPort,
     DispositionJudgement,
     ProposalDisposition,
     ProposalDispositionStore,
@@ -180,6 +181,7 @@ class _HypothesisStore:
         retrieval_authority: RetrievalContextAuthority,
         authenticator: StaticAuthenticator,
         clock: Callable[[], UtcTimestamp],
+        current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -198,7 +200,10 @@ class _HypothesisStore:
             connection.execute("PRAGMA foreign_keys=ON")
             retrieval_authority.attach(connection)
             self._dispositions = ProposalDispositionStore(
-                connection, retrieval_authority, authenticator
+                connection,
+                retrieval_authority,
+                authenticator,
+                current_candidate_citations,
             )
             self._begin()
             self._verify()
@@ -719,7 +724,7 @@ class _HypothesisStore:
         finally:
             self._lock.release()
 
-    def _verify(self) -> None:
+    def _verify(self) -> dict[str, EventHypothesisVersion]:
         _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
         tables = {
             str(row[0])
@@ -892,7 +897,7 @@ class _HypothesisStore:
                     "SELECT hypothesis_id,canonical_digest FROM event_hypothesis_versions_v2 WHERE version_id=?",
                     (value.target_version_id,),
                 ).fetchone()
-                if target_row is None or target_row != (
+                if target_row is None or tuple(target_row) != (
                     value.proposed_target_hypothesis_id,
                     value.target_version_digest,
                 ):
@@ -931,7 +936,7 @@ class _HypothesisStore:
                 "SELECT actor_identity_digest,recorded_at FROM event_hypotheses_v2 WHERE hypothesis_id=?",
                 (hypothesis_id,),
             ).fetchone()
-            if identity_row != (
+            if identity_row is None or tuple(identity_row) != (
                 versions[0].actor_identity_digest,
                 versions[0].recorded_at,
             ):
@@ -956,6 +961,11 @@ class _HypothesisStore:
                 raise HypothesisContractError("Hypothesis head is not max Version")
         if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise HypothesisContractError("Hypothesis foreign keys differ")
+        return {
+            version.version_id: version
+            for versions in chains.values()
+            for version in versions
+        }
 
 
 _AUTHORITY_TOKEN = object()

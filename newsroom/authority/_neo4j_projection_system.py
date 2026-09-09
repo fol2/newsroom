@@ -155,6 +155,15 @@ class _StructuralGraphAdapter(Protocol):
     ) -> Any:
         ...
 
+    def open_native_retrieval_projection(
+        self,
+        *,
+        generation_id: str,
+        fulltext_index: str,
+        vector_index: str,
+    ) -> Any:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -299,6 +308,47 @@ def _open_neo4j_fulltext_reader_with_adapter(
         read=read,
         close=adapter.close,
     )
+
+
+class NativeRetrievalNeo4jResources:
+    """Bounded native retrieval projection and reader sharing one driver."""
+
+    __slots__ = ("projector", "fulltext", "__closed")
+
+    def __init__(self, *, projector: Any, fulltext: Neo4jFullTextReader) -> None:
+        self.projector = projector
+        self.fulltext = fulltext
+        self.__closed = False
+
+    def close(self) -> None:
+        if not self.__closed:
+            self.__closed = True
+            self.fulltext.close()
+
+
+def open_native_retrieval_neo4j_resources(
+    *,
+    config: Neo4jProjectorConfig,
+    generation_id: str,
+    fulltext_index: str,
+    vector_index: str,
+) -> NativeRetrievalNeo4jResources:
+    """Open one private adapter reduced to the two fixed native capabilities."""
+
+    adapter = _open_structural_graph_adapter(config)
+    try:
+        projector = adapter.open_native_retrieval_projection(
+            generation_id=generation_id,
+            fulltext_index=fulltext_index,
+            vector_index=vector_index,
+        )
+        fulltext = _open_neo4j_fulltext_reader_with_adapter(adapter)
+        return NativeRetrievalNeo4jResources(
+            projector=projector, fulltext=fulltext
+        )
+    except Exception:
+        adapter.close()
+        raise
 
 
 class Neo4jStructuralProjector:
@@ -1722,7 +1772,9 @@ def open_neo4j_projection_authority_system(
 
 
 __all__ = [
+    "NativeRetrievalNeo4jResources",
     "Neo4jProjectionAuthoritySystem",
     "Neo4jStructuralProjector",
+    "open_native_retrieval_neo4j_resources",
     "open_neo4j_projection_authority_system",
 ]

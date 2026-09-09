@@ -768,6 +768,28 @@ def test_candidate_read_port_reconstructs_exact_producer_snapshot() -> None:
         port.require_current_producers_in_transaction("version", proof=object())
 
 
+def test_candidate_relationship_batch_rejects_untyped_or_wrong_count_results(
+) -> None:
+    from newsroom.increment6 import lineage
+
+    class Raw:
+        value: object = ()
+
+        def require_retained_relationships_in_transaction(self, *_: object):
+            return self.value
+
+    raw = Raw()
+    port = lineage._compose_event_hypothesis_lineage_read_port(raw)
+    with pytest.raises(lineage.HypothesisLineageContractError):
+        port.require_retained_relationships_in_transaction([])  # type: ignore[arg-type]
+    digest = "sha256:" + "0" * 64
+    with pytest.raises(lineage.HypothesisLineageContractError):
+        port.require_retained_relationships_in_transaction((digest,))
+    raw.value = (object(),)
+    with pytest.raises(lineage.HypothesisLineageContractError):
+        port.require_retained_relationships_in_transaction((digest,))
+
+
 def test_second_public_writer_fails_closed_until_first_closes(tmp_path) -> None:
     _, args, _ = _seed(tmp_path)
     first = open_event_hypothesis_lineage_authority(**args)
