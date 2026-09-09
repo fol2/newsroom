@@ -101,7 +101,7 @@ class _Embedder:
         self.calls = []
         self.retryable = retryable
 
-    def retryable_pre_dispatch(self, **_arguments):
+    def retryable_settled_attempt(self, **_arguments):
         return self.retryable
 
     def retain(self, **arguments):

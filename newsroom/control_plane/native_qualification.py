@@ -348,7 +348,7 @@ def _invocations(
             allocation.get("invocation_id") != invocation_id
             or allocation.get("workload_class") != workload
             or allocation.get("canonical_digest") != allocation_digest
-            or allocation.get("policy_digest") != policy_digest
+            or allocation.get("invocation_policy_digest") != policy_digest
             or envelope.get("envelope_id") != allocation.get("envelope_id")
         ):
             raise NativeQualificationError("model usage allocation binding differs")
@@ -415,7 +415,7 @@ def _invocations(
                 or disposition.get("allocation_digest")
                 != allocations[invocation_id].get("canonical_digest")
                 or disposition.get("policy_digest")
-                != allocations[invocation_id].get("policy_digest")
+                != allocations[invocation_id].get("invocation_policy_digest")
                 or disposition.get("schema_version")
                 != CONSERVATIVE_DISPOSITION_SCHEMA_VERSION
                 or disposition.get("usage_status") != disposition_row[2]

@@ -605,6 +605,7 @@ async def _add_episode(
     invocation_observer: Any | None = None,
     donor_store: DonorStore | None = None,
     fallback_permitted: bool = True,
+    retry_snapshot_is_failed: Callable[[dict[str, object]], bool] | None = None,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
@@ -656,11 +657,57 @@ async def _add_episode(
         attempt_number=attempt_number,
         input_digest=input_digest,
     )
+    fresh_zero_dispatch_retry = False
     cancellation_cleanup_active = False
     failure_completed = False
     try:
         if runtime.MutationGuard is Neo4jMutationGuard:
             await _bootstrap_graphiti_schema(graphiti.driver)
+            if attempt_number > 1:
+                retry_guard = runtime.MutationGuard(
+                    graphiti.driver,
+                    group_id=GRAPHITI_WORKSPACE_GROUP,
+                    episode_uuid=episode_id,
+                    marker_episode_uuid=f"{episode_id}:attempt:{attempt_number}",
+                    attempt_number=attempt_number,
+                    input_digest=input_digest,
+                )
+                if await retry_guard.marker_exists():
+                    guard = retry_guard
+                    fresh_zero_dispatch_retry = True
+                else:
+                    retry_proof = getattr(
+                        invocation_observer,
+                        "allows_fresh_zero_dispatch_retry",
+                        None,
+                    )
+                    if callable(retry_proof) and retry_proof(
+                        episode_uuid=episode_id,
+                        attempt_number=attempt_number,
+                    ):
+                        prior_guard = guard
+                        for prior_attempt in range(attempt_number - 1, 1, -1):
+                            candidate = runtime.MutationGuard(
+                                graphiti.driver,
+                                group_id=GRAPHITI_WORKSPACE_GROUP,
+                                episode_uuid=episode_id,
+                                marker_episode_uuid=(
+                                    f"{episode_id}:attempt:{prior_attempt}"
+                                ),
+                                attempt_number=prior_attempt,
+                                input_digest=input_digest,
+                            )
+                            if await candidate.marker_exists():
+                                prior_guard = candidate
+                                break
+                        prior_raw = await prior_guard.completed_raw_or_none()
+                        if (
+                            prior_raw is not None
+                            and retry_snapshot_is_failed is not None
+                            and retry_snapshot_is_failed(prior_raw)
+                        ):
+                            guard = retry_guard
+                            fresh_zero_dispatch_retry = True
         if configuration is None or revision is None:
             raise GraphitiAdapterContractError(
                 "combined-temporal runtime requires typed attempt authority"
@@ -738,7 +785,9 @@ async def _add_episode(
             body=body,
             reference_time=reference_time,
         )
-        if state != "CREATED":
+        if state != "CREATED" and not (
+            fresh_zero_dispatch_retry and state == "RETAINED"
+        ):
             raise GraphitiAdapterContractError(
                 "deterministic episode predates its durable mutation marker"
             )
@@ -1323,6 +1372,15 @@ class RealGraphitiAdapter:
             )
             validated["produced"] = restoration.produced
 
+        def retry_snapshot_is_failed(raw: dict[str, object]) -> bool:
+            restoration = restore_validated_snapshot(raw=raw, attempt=attempt)
+            return (
+                restoration.produced.outcome
+                is ExtractionOutcome.RETRYABLE_FAILURE
+                and raw.get("combined_temporal_failure_code")
+                == CombinedTemporalFailureCode.PIPELINE_FAILED.value
+            )
+
         try:
             _load_graphiti()
             api_key = openrouter_api_key()
@@ -1392,6 +1450,7 @@ class RealGraphitiAdapter:
                         invocation_observer=self._invocation_observer,
                         donor_store=donor_store,
                         fallback_permitted=self._fallback_permitted,
+                        retry_snapshot_is_failed=retry_snapshot_is_failed,
                     ),
                     timeout=remaining_timeout_s,
                 )

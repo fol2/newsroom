@@ -1841,6 +1841,127 @@ class ModelUsageService:
             connection.close()
         return {"requests": requests, "refusals": refusals}
 
+    def graphiti_ingest_pre_dispatch_zero(self, *, ingest_id: str) -> bool:
+        """Prove every retained model allocation for one ingest stopped locally."""
+
+        _token(ingest_id, field="Graphiti ingest id")
+        connection = self._connection()
+        try:
+            envelope_rows = connection.execute(
+                "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
+                "canonical_digest,record_json FROM model_work_envelopes "
+                "WHERE json_extract(record_json,'$.ingest_id')=? "
+                "AND json_type(record_json,'$.graphiti_attempt_id')='text' "
+                "ORDER BY envelope_id",
+                (ingest_id,),
+            ).fetchall()
+            envelope_ids: list[str] = []
+            for row in envelope_rows:
+                record = _object(row[5])
+                envelope = _envelope_from_record(record)
+                attempt_prefix, separator, attempt_suffix = str(
+                    envelope.graphiti_attempt_id or ""
+                ).rpartition(":")
+                if (
+                    tuple(row[index] for index in range(5))
+                    != (
+                        envelope.envelope_id,
+                        envelope.cycle_id,
+                        envelope.workload_class.value,
+                        _utc_text(envelope.admitted_at),
+                        envelope.canonical_digest,
+                    )
+                    or envelope.ingest_id != ingest_id
+                    or envelope.workload_class
+                    not in {
+                        WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                        WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+                        WorkloadClass.GRAPHITI_EMBEDDING,
+                    }
+                    or separator != ":"
+                    or attempt_prefix != ingest_id
+                    or not attempt_suffix.isdigit()
+                    or int(attempt_suffix) <= 0
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti envelope binding differs"
+                    )
+                envelope_ids.append(envelope.envelope_id)
+            if not envelope_ids:
+                return False
+            placeholders = ",".join("?" for _ in envelope_ids)
+            allocation_rows = connection.execute(
+                "SELECT a.invocation_id,a.envelope_id,a.cycle_id,a.leaf_ordinal,"
+                "a.workload_class,a.policy_digest,a.provider,a.route,a.model,"
+                "a.request_digest,a.parent_invocation_id,a.allocated_at,"
+                "a.canonical_digest,a.record_json,t.terminal_digest,t.record_json "
+                "FROM model_invocation_allocations a "
+                "LEFT JOIN model_invocation_terminals t "
+                "ON t.invocation_id=a.invocation_id "
+                f"WHERE a.envelope_id IN ({placeholders}) "
+                "ORDER BY a.envelope_id,a.leaf_ordinal",
+                tuple(envelope_ids),
+            ).fetchall()
+            if not allocation_rows:
+                return False
+            for row in allocation_rows:
+                allocation = _allocation_from_record(_object(row[13]))
+                if tuple(row[index] for index in range(13)) != (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.leaf_ordinal,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    _utc_text(allocation.allocated_at),
+                    allocation.canonical_digest,
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti allocation binding differs"
+                    )
+                if allocation.workload_class not in {
+                    WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                    WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+                    WorkloadClass.GRAPHITI_EMBEDDING,
+                }:
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti allocation workload differs"
+                    )
+                if row[14] is None or row[15] is None:
+                    return False
+                terminal = _terminal_from_record(_object(row[15]))
+                components = terminal.components
+                if (
+                    str(row[14]) != terminal.terminal_digest
+                    or terminal.invocation_id != allocation.invocation_id
+                    or terminal.usage_status is not UsageStatus.REPORTED
+                    or terminal.pre_dispatch_zero_proved is not True
+                    or terminal.dispatch_at is not None
+                    or terminal.policy_breach is not None
+                    or components.provenance != "CLI_DERIVED"
+                    or components.total_tokens != 0
+                    or any(
+                        value not in {None, 0}
+                        for value in (
+                            components.input_tokens,
+                            components.output_tokens,
+                            components.cached_read_tokens,
+                            components.cached_write_tokens,
+                            components.reasoning_tokens,
+                            components.context_tokens,
+                        )
+                    )
+                ):
+                    return False
+            return True
+        finally:
+            connection.close()
+
     def next_graphiti_internal_ordinal(self, *, graphiti_attempt_id: str) -> int:
         """Return the next durable leaf ordinal for one Graphiti attempt."""
 
@@ -4818,6 +4939,117 @@ def _policy_from_record(record: Mapping[str, object]) -> InvocationEfficiencyPol
         qualified=bool(record["qualified"]),
         canonical_digest=str(record["canonical_digest"]),
     )
+
+
+def _envelope_from_record(record: Mapping[str, object]) -> WorkEnvelope:
+    """Decode and re-derive one retained work-envelope identity."""
+
+    envelope = WorkEnvelope.create(
+        cycle_id=str(record["cycle_id"]),
+        workload_class=WorkloadClass(str(record["workload_class"])),
+        admitted_at=_instant(str(record["admitted_at"])),
+        admission_decision_id=record.get("admission_decision_id"),
+        candidate_id=record.get("candidate_id"),
+        hypothesis_digest=record.get("hypothesis_digest"),
+        evidence_package_digest=record.get("evidence_package_digest"),
+        ingest_id=record.get("ingest_id"),
+        graphiti_attempt_id=record.get("graphiti_attempt_id"),
+    )
+    if (
+        record.get("envelope_id") != envelope.envelope_id
+        or record.get("canonical_digest") != envelope.canonical_digest
+        or dict(record) != envelope.as_record()
+    ):
+        raise ModelUsageIntegrityError("retained work envelope identity differs")
+    return envelope
+
+
+def _allocation_from_record(record: Mapping[str, object]) -> InvocationAllocation:
+    """Decode and re-derive one retained invocation-allocation identity."""
+
+    allocation = InvocationAllocation.create(
+        envelope_id=str(record["envelope_id"]),
+        cycle_id=str(record["cycle_id"]),
+        leaf_ordinal=_record_int(record, "leaf_ordinal"),
+        workload_class=WorkloadClass(str(record["workload_class"])),
+        invocation_policy_digest=str(record["invocation_policy_digest"]),
+        provider=str(record["provider"]),
+        route=str(record["route"]),
+        model=str(record["model"]),
+        reasoning=str(record["reasoning"]),
+        prompt_contract_version=str(record["prompt_contract_version"]),
+        prompt_bytes=_record_int(record, "prompt_bytes"),
+        prompt_digest=str(record["prompt_digest"]),
+        request_digest=str(record["request_digest"]),
+        output_schema_digest=str(record["output_schema_digest"]),
+        max_output_tokens=_record_int(record, "max_output_tokens"),
+        context_manifest_digest=str(record["context_manifest_digest"]),
+        context_identity=str(record["context_identity"]),
+        config_identity=str(record["config_identity"]),
+        one_turn=record["one_turn"],
+        exact_input=record["exact_input"],
+        skills_enabled=record["skills_enabled"],
+        tools_enabled=record["tools_enabled"],
+        mcp_enabled=record["mcp_enabled"],
+        prior_message_count=_record_int(record, "prior_message_count"),
+        allocated_at=_instant(str(record["allocated_at"])),
+        recovery_deadline_at=_instant(str(record["recovery_deadline_at"])),
+        parent_invocation_id=record.get("parent_invocation_id"),
+    )
+    if (
+        record.get("invocation_id") != allocation.invocation_id
+        or record.get("canonical_digest") != allocation.canonical_digest
+        or dict(record) != allocation.as_record()
+    ):
+        raise ModelUsageIntegrityError("retained invocation allocation identity differs")
+    return allocation
+
+
+def _terminal_from_record(record: Mapping[str, object]) -> InvocationTerminal:
+    """Decode and re-derive one retained invocation-terminal identity."""
+
+    raw_components = record.get("components")
+    if not isinstance(raw_components, Mapping):
+        raise ModelUsageIntegrityError("retained invocation terminal is malformed")
+    terminal = InvocationTerminal.create(
+        invocation_id=str(record["invocation_id"]),
+        outcome=str(record["outcome"]),
+        failure_class=record.get("failure_class"),
+        usage_status=UsageStatus(str(record["usage_status"])),
+        components=UsageComponents(
+            input_tokens=raw_components.get("input_tokens"),
+            output_tokens=raw_components.get("output_tokens"),
+            cached_read_tokens=raw_components.get("cached_read_tokens"),
+            cached_write_tokens=raw_components.get("cached_write_tokens"),
+            reasoning_tokens=raw_components.get("reasoning_tokens"),
+            context_tokens=raw_components.get("context_tokens"),
+            total_tokens=raw_components.get("total_tokens"),
+            provenance=str(raw_components["provenance"]),
+        ),
+        dispatch_at=(
+            None
+            if record.get("dispatch_at") is None
+            else _instant(str(record["dispatch_at"]))
+        ),
+        completed_at=_instant(str(record["completed_at"])),
+        observed_at=_instant(str(record["observed_at"])),
+        provider_telemetry_digest=record.get("provider_telemetry_digest"),
+        raw_telemetry_pointer=record.get("raw_telemetry_pointer"),
+        estimate_policy_digest=record.get("estimate_policy_digest"),
+        estimate_calculation=record.get("estimate_calculation"),
+        pre_dispatch_zero_proved=record.get("pre_dispatch_zero_proved"),
+        od_011_reference=record.get("od_011_reference"),
+        subscription_cli_chat_not_cash_debited=record[
+            "subscription_cli_chat_not_cash_debited"
+        ],
+        policy_breach=record.get("policy_breach"),
+    )
+    if (
+        record.get("terminal_digest") != terminal.terminal_digest
+        or dict(record) != terminal.as_record()
+    ):
+        raise ModelUsageIntegrityError("retained invocation terminal identity differs")
+    return terminal
 
 
 def _record_int(record: Mapping[str, object], field: str) -> int:
