@@ -939,17 +939,7 @@ class NativeAssessmentUsage:
         try:
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
-            if connection.execute(
-                "SELECT 1 FROM model_invocation_allocations AS allocation "
-                "LEFT JOIN model_work_envelopes AS envelope "
-                "ON envelope.envelope_id=allocation.envelope_id "
-                "WHERE envelope.envelope_id IS NULL LIMIT 1"
-            ).fetchone() is not None or connection.execute(
-                "SELECT 1 FROM model_transport_observations AS observation "
-                "LEFT JOIN model_invocation_allocations AS allocation "
-                "ON allocation.invocation_id=observation.invocation_id "
-                "WHERE allocation.invocation_id IS NULL LIMIT 1"
-            ).fetchone() is not None:
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 return None
             inventory = []
             envelopes = {}

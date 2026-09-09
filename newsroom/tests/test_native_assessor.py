@@ -502,12 +502,46 @@ def test_native_assessor_pre_dispatch_recovery_requires_zero_exact_envelopes(
             (allocation.envelope_id,),
         )
     assert usage.retained_pre_dispatch_failure(other) is not None
-    usage.mark_dispatch(allocation)
-    assert usage.retained_pre_dispatch_failure(other) is not None
+    dispatch_at = usage.mark_dispatch(allocation)
     with sqlite3.connect(_service.path) as usage_connection:
         usage_connection.execute(
             "UPDATE model_transport_observations SET invocation_id='orphan'"
         )
+    assert usage.retained_pre_dispatch_failure(other) is None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute(
+            "UPDATE model_transport_observations SET invocation_id=?",
+            (allocation.invocation_id,),
+        )
+    usage.complete(
+        allocation,
+        outcome="ASSESSOR_PROVIDER_FAILED",
+        execution=NativeAssessmentExecution(
+            "provider response",
+            {
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "context_tokens": 1,
+                "total_tokens": 2,
+            },
+        ),
+        provider_dispatched=True,
+        dispatch_at=dispatch_at,
+        failure_class="SYSTEMIC",
+    )
+    assert usage.retained_pre_dispatch_failure(other) is not None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute("PRAGMA foreign_keys=OFF")
+        usage_connection.execute("DELETE FROM model_transport_observations")
+        usage_connection.execute("DELETE FROM model_invocation_allocations")
+        usage_connection.execute("DELETE FROM model_work_envelopes")
+        assert usage_connection.execute(
+            "SELECT COUNT(*) FROM model_invocation_terminals"
+        ).fetchone() == (1,)
     assert usage.retained_pre_dispatch_failure(other) is None
     connection.close()
 
