@@ -26,6 +26,7 @@ from newsroom.increment9.proving import SOURCE_URLS
 from newsroom.sources import SourceDefinitionId
 from newsroom.tests.increment5b2_helpers import config
 from newsroom.tests.projection_b2_helpers import MemoryNeo4jAdapter
+from newsroom.tests.test_native_graphiti import _native
 
 
 NOW = datetime(2026, 9, 8, 14, tzinfo=UTC)
@@ -386,6 +387,58 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
                 assert serving.execute(
                     "SELECT COUNT(*) FROM private_serving_payloads"
                 ).fetchone()[0] == 0
+            if expected_bootstraps == 2:
+                interrupted = (_native("contract"), _native("unknown"))
+                retained_ordinals = {}
+                for unit, failure_class in zip(
+                    interrupted, ("EvidencePackageError", "OSError"), strict=True
+                ):
+                    pipeline._journal.land((unit,))
+                    pipeline._journal.advance(
+                        unit.revision_id,
+                        stage="ASSESSMENT_INTERRUPTED",
+                        facts={
+                            "candidate_version_id": "candidate:" + unit.item_key,
+                            "failure_class": failure_class,
+                            "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+                        },
+                    )
+                    retained_ordinals[unit.revision_id] = (
+                        pipeline._journal.progress[unit.revision_id]["ordinal"]
+                    )
+
+                def unexpected_hydration(**_arguments):
+                    raise AssertionError("interrupted recovery hydrated source objects")
+
+                recovery_sources = []
+
+                class ProofOnlyContinuation:
+                    def __init__(self, **arguments):
+                        recovery_sources.append(arguments["sources"])
+
+                    def advance(self, *, revision_id, candidate_version_id):
+                        return SimpleNamespace(state="ASSESSMENT_INTERRUPTED")
+
+                monkeypatch.setattr(
+                    native_composition,
+                    "native_evidence_sources",
+                    unexpected_hydration,
+                )
+                monkeypatch.setattr(
+                    native_composition,
+                    "NativePublicationContinuation",
+                    ProofOnlyContinuation,
+                )
+                for unit in interrupted:
+                    pipeline._publish.advance(
+                        revision_id=unit.revision_id,
+                        candidate_version_id="candidate:" + unit.item_key,
+                    )
+                assert recovery_sources == [{}, {}]
+                assert {
+                    revision_id: pipeline._journal.progress[revision_id]["ordinal"]
+                    for revision_id in retained_ordinals
+                } == retained_ordinals
 
     with pytest.raises(NativeRetrievalHold, match="NATIVE_EMBEDDING_POLICY_HOLD"):
         with native_composition.open_native_pipeline(

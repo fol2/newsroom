@@ -468,9 +468,14 @@ class NativePublicationContinuation:
     def advance(
         self, *, revision_id: str, candidate_version_id: str
     ) -> NativePublicationContinuationResult:
-        if revision_id not in self._journal.units or revision_id not in self._sources:
+        if revision_id not in self._journal.units:
             raise NativePublicationError("native continuation revision differs")
         progress = self._journal.progress.get(revision_id, {})
+        if (
+            progress.get("stage") != "ASSESSMENT_INTERRUPTED"
+            and revision_id not in self._sources
+        ):
+            raise NativePublicationError("native continuation revision differs")
         facts = dict(progress.get("facts", {}))
         if facts.get("candidate_version_id") not in (None, candidate_version_id):
             raise NativePublicationError("native continuation Candidate differs")

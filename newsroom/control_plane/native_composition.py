@@ -600,14 +600,24 @@ def open_native_pipeline(
 
         class Publication:
             def advance(self, *, revision_id, candidate_version_id):
-                sources = native_evidence_sources(
-                    units=journal.units[revision_id], sources=runtime.authority.sources,
-                    objects=runtime.authority.objects, licence=licence, proof=proof,
-                    observations=journal.observations,
-                )
+                progress = journal.progress.get(revision_id, {})
+                sources = ()
+                if progress.get("stage") != "ASSESSMENT_INTERRUPTED":
+                    sources = native_evidence_sources(
+                        units=journal.units[revision_id],
+                        sources=runtime.authority.sources,
+                        objects=runtime.authority.objects,
+                        licence=licence,
+                        proof=proof,
+                        observations=journal.observations,
+                    )
                 return NativePublicationContinuation(
                     journal=journal, runtime=runtime, evidence_controller=evidence,
-                    sources={revision_id: sources},
+                    sources=(
+                        {}
+                        if progress.get("stage") == "ASSESSMENT_INTERRUPTED"
+                        else {revision_id: sources}
+                    ),
                     assessment_contract_failure=(
                         assessment_usage.retained_output_contract_failure
                     ),

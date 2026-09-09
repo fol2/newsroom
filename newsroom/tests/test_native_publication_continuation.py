@@ -498,7 +498,7 @@ def test_unproved_assessment_interruption_has_no_follow_on_effect(
             proof=proof(), policies=SimpleNamespace(publication=object()),
         ),
         evidence_controller=object.__new__(NativeEvidenceController),
-        sources={unit.revision_id: (_source(unit),)},
+        sources={},
         assessment_contract_failure=no_proof,
     )
 
