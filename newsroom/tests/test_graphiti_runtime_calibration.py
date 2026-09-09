@@ -15,6 +15,15 @@ from newsroom.graphiti_adapter.runtime_calibration import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 def _valid_receipts() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     primary = {
         "invocation_id": "invocation-primary",

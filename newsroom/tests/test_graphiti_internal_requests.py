@@ -50,6 +50,15 @@ from newsroom.graphiti_adapter.combined_temporal_contract import (
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import cursor_cli_usage
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 T0 = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
 EXTRACTED_ENTITIES_SCHEMA = json.dumps(ExtractedEntities.model_json_schema())
 EXTRACTED_EDGES_SCHEMA = json.dumps(ExtractedEdges.model_json_schema())

@@ -28,15 +28,6 @@ def _grok_command_version_is_not_a_live_pin(
         lambda: "1.0.8",
     )
 
-@pytest.fixture(autouse=True)
-def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Provider-free observers model a deployed tree, not pytest's artefact directory.
-    monkeypatch.setattr(
-        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
-        lambda: ("a" * 40, True),
-    )
-
-
 _D3_CACHE_FORMAT = "newsroom.d3-conformance-cache.v2"
 _D3_CACHE_CAPACITY = 6
 _D3_CACHE_TEMPLATE_KEYS = (
