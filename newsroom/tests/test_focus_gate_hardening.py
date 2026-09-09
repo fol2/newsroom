@@ -53,9 +53,15 @@ def test_symbol_sensitive_route_keeps_changed_class_consumers_only(tmp_path: Pat
         "from .feature import Changed\n\ndef use() -> int:\n    return Changed().value()\n",
     )
     _write(tmp_path, "newsroom/downstream.py", "from newsroom.consumer import use\n")
+    _write(
+        tmp_path, "newsroom/dynamic.py",
+        "from importlib import import_module\n\nfeature = import_module('newsroom.feature')\n",
+    )
     _write(tmp_path, "newsroom/api/__init__.py", "from ..feature import Changed\n")
     _write(tmp_path, "newsroom/tests/test_direct.py", "from newsroom.feature import Changed\n")
     _write(tmp_path, "newsroom/tests/test_api.py", "from newsroom.api import Changed\n")
+    _write(tmp_path, "newsroom/tests/test_relative.py", "from ..api import Changed\n")
+    _write(tmp_path, "newsroom/tests/test_dynamic.py", "from newsroom.dynamic import feature\n")
     _write(tmp_path, "newsroom/tests/test_downstream.py", "from newsroom.downstream import use\n")
     _write(tmp_path, "newsroom/tests/test_module_style.py", "import newsroom.feature as feature\n\nVALUE = feature.Changed\n")
     _write(tmp_path, "newsroom/tests/test_local_reference.py", "from newsroom.feature import public_factory\n")
@@ -82,13 +88,40 @@ def test_symbol_sensitive_route_keeps_changed_class_consumers_only(tmp_path: Pat
         "newsroom/tests/test_api.py",
         "newsroom/tests/test_direct.py",
         "newsroom/tests/test_downstream.py",
+        "newsroom/tests/test_dynamic.py",
         "newsroom/tests/test_local_reference.py",
         "newsroom/tests/test_module_style.py",
         "newsroom/tests/test_package_module.py",
         "newsroom/tests/test_private_reference.py",
+        "newsroom/tests/test_relative.py",
     ]
     assert route["selected_service_tests"] == []
     assert route["gates"] == ["F0", "F1", "F2"]
+
+
+def test_symbol_alias_falls_back_to_broad_consumer_routing(tmp_path: Path) -> None:
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    _write(
+        tmp_path, "newsroom/feature.py",
+        "class Changed:\n    def value(self):\n        return 1\n\nclass Other:\n    pass\n\nAlias = Changed\n",
+    )
+    _write(tmp_path, "newsroom/tests/test_alias.py", "from newsroom.feature import Alias\n")
+    _write(tmp_path, "newsroom/tests/test_other_neo4j_service.py", "from newsroom.feature import Other\n")
+    base = _commit(tmp_path, "base")
+    _write(
+        tmp_path, "newsroom/feature.py",
+        "class Changed:\n    def value(self):\n        return 2\n\nclass Other:\n    pass\n\nAlias = Changed\n",
+    )
+    head = _commit(tmp_path, "head")
+
+    route = selector.select_focus(
+        ("newsroom/feature.py",), repo_root=tmp_path, base_sha=base, head_sha=head
+    )
+
+    assert route["selected_tests"] == ["newsroom/tests/test_alias.py"]
+    assert route["selected_service_tests"] == [
+        "newsroom/tests/test_other_neo4j_service.py"
+    ]
 
 
 def test_short_constant_reexport_selects_exact_consumer_only(

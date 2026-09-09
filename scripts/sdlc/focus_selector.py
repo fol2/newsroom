@@ -214,6 +214,12 @@ def _changed_public_symbols(repo_root: Path, path: str, base_sha: str, head_sha:
         }
         expanded = changed | callers
         if expanded == changed:
+            if any(
+                isinstance(item, ast.Name) and item.id in changed
+                for node in new_tree.body if not isinstance(node, kinds)
+                for item in ast.walk(node)
+            ):
+                return None
             return changed
         changed = expanded
 
@@ -236,12 +242,24 @@ def _attribute_chain(node: ast.AST) -> tuple[str, ...] | None:
     return tuple(reversed(parts))
 
 
-def _imports_public_symbol(tree: ast.AST, package: str, symbols: set[str]) -> bool:
+def _imported_from(node: ast.ImportFrom, importer: str | None) -> str | None:
+    if not node.level:
+        return node.module
+    if importer is None:
+        return None
+    parts = importer.rpartition(".")[0].split(".")
+    base = parts[: len(parts) - node.level + 1]
+    return ".".join((*base, *(node.module.split(".") if node.module else ())))
+
+
+def _imports_public_symbol(
+    tree: ast.AST, package: str, symbols: set[str], importer: str | None = None
+) -> bool:
     if not symbols:
         return False
     aliases: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == package:
+        if isinstance(node, ast.ImportFrom) and _imported_from(node, importer) == package:
             if any(alias.name == "*" or alias.name in symbols for alias in node.names):
                 return True
         elif isinstance(node, ast.Import):
@@ -265,17 +283,18 @@ def _imports_changed_surface(
 ) -> bool:
     parent, _, leaf = module.rpartition(".")
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call) and node.args
+            and isinstance(node.args[0], ast.Constant) and node.args[0].value == module
+        ):
+            return True
         if isinstance(node, ast.Import) and any(alias.name == module for alias in node.names):
             return True
         if isinstance(node, ast.ImportFrom):
             if node.level:
                 if importer is None:
                     return True
-                parts = importer.rpartition(".")[0].split(".")
-                base = parts[: len(parts) - node.level + 1]
-                imported_from = ".".join((*base, *(node.module.split(".") if node.module else ())))
-            else:
-                imported_from = node.module
+            imported_from = _imported_from(node, importer)
             if imported_from == parent and any(alias.name == leaf for alias in node.names):
                 return True
             if imported_from == module and any(
@@ -378,7 +397,9 @@ def _discover_tests(
             for module in dependents
         )
         reexport_hit = any(
-            _imports_public_symbol(tree, package, symbols) for package in reexports
+            _imports_public_symbol(
+                tree, package, symbols, module_name_for_path(relative)
+            ) for package in reexports
         )
         if direct_hit or dependent_hit or reexport_hit:
             selected.add(relative)
