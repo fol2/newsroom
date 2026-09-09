@@ -73,7 +73,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v4"
+VERSION = "newsroom.native-evidence-assessor.v5"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -93,6 +93,10 @@ SYSTEM = (
     "or one-to-ten word durations in hours/minutes and equivalent Chinese durations "
     "with at least 60 minutes where used as qualification evidence; "
     "or counts of schools, hospitals, clinics, buses or roads in those number forms. "
+    "For every claim, return semantic_relation exactly as source_modality ASSERTED, "
+    "rendered_modality ASSERTED, source_polarity AFFIRMED, rendered_polarity "
+    "AFFIRMED and relation SEMANTICALLY_EQUIVALENT; preserve more specific legal "
+    "or factual modality in the claim text itself. "
     "Return no qualification_evidence when no supported qualification test applies; "
     "never invent an AFFIRMED qualification merely to populate that array."
 )
@@ -104,12 +108,16 @@ _PAIRS = {
         "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
     },
 }
+_CANONICAL_SEMANTIC_RELATION = {
+    "source_modality": "ASSERTED",
+    "rendered_modality": "ASSERTED",
+    "source_polarity": "AFFIRMED",
+    "rendered_polarity": "AFFIRMED",
+    "relation": "SEMANTICALLY_EQUIVALENT",
+}
 _SEMANTIC_RELATION_FIELDS = {
-    "source_modality": _STRING,
-    "rendered_modality": _STRING,
-    "source_polarity": _STRING,
-    "rendered_polarity": _STRING,
-    "relation": _STRING,
+    key: {"const": value}
+    for key, value in _CANONICAL_SEMANTIC_RELATION.items()
 }
 
 
@@ -1267,8 +1275,7 @@ class AutonomousNativeEvidenceAssessor:
             raw_semantic = raw_claim.get("semantic_relation")
             if (
                 type(raw_semantic) is not dict
-                or set(raw_semantic) != set(_SEMANTIC_RELATION_FIELDS)
-                or any(type(item) is not str for item in raw_semantic.values())
+                or raw_semantic != _CANONICAL_SEMANTIC_RELATION
             ):
                 raise EvidencePackageError("assessment semantic relation differs")
             semantic_by_claim[claim_id] = raw_semantic
