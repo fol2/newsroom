@@ -544,9 +544,12 @@ def open_native_pipeline(
                 stop_check()
                 yield
 
-        def port_for(subjects, rights_inventory_digest):
+        def port_for(subjects, document_inventory, rights_inventory_digest):
             receipts = tuple(item.document_receipt for item in subjects)
-            retained = tuple(documents.require_document(item, proof=proof) for item in receipts)
+            retained_by_event = documents.require_authenticated_inventory(
+                document_inventory, receipts,
+            )
+            retained = tuple(retained_by_event[item.event_id] for item in receipts)
             for missing in projector.reconcile_membership(receipts):
                 documents.reproject(missing, proof=proof)
             watermark = max(runtime.authority.events.provenance(item.event_id, proof=proof).event.ledger_seq for item in receipts)
@@ -557,13 +560,16 @@ def open_native_pipeline(
                 ))), contiguous_ledger_seq=watermark,
                 expected_document_count=len(receipts), clock=now,
             )
-            view = documents.fulltext_authority_view(receipts, snapshot, proof=proof)
+            view = documents.fulltext_authority_view_from_inventory(
+                document_inventory, receipts, snapshot,
+            )
             return NativeRetrievalPort(
                 documents=documents, exact=exact,
                 fulltext=FullTextRetriever(graph_reader=reader, journal=fulltext_journal,
                                           authority_view_provider=lambda _: view),
                 increment4=runtime.authority.increment4, fulltext_view=view,
-                subjects=subjects, authority_scope_id=scope,
+                subjects=subjects, document_inventory=document_inventory,
+                authority_scope_id=scope,
                 rights_inventory_digest=rights_inventory_digest,
                 minimum_authority_watermark=watermark,
             )

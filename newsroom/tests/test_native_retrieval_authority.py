@@ -279,6 +279,72 @@ def test_native_documents_admit_retain_context_and_reopen(
             document.revision_id, graph_id, document_receipt,
             "Official deadline changed",
         )
+        document_inventory = documents.authenticated_document_inventory(
+            (document_receipt,), proof=runtime.proof,
+        )
+        with pytest.raises(
+            NativeRetrievalError, match="document inventory type differs",
+        ):
+            documents.fulltext_authority_view_from_inventory(
+                object(), (document_receipt,), snapshot,
+            )
+        with pytest.raises(
+            NativeRetrievalError, match="document inventory type differs",
+        ):
+            NativeRetrievalPort(
+                documents=documents,
+                exact=exact_retriever,
+                fulltext=fulltext_retriever,
+                increment4=runtime.authority.increment4,
+                fulltext_view=view,
+                subjects=(subject,),
+                document_inventory=object(),
+                authority_scope_id="native-authority-scope",
+                rights_inventory_digest=digest_canonical({"rights": "first"}),
+                minimum_authority_watermark=0,
+            )
+        with pytest.raises(
+            NativeRetrievalError, match="document inventory binding differs",
+        ):
+            NativeRetrievalPort(
+                documents=documents,
+                exact=exact_retriever,
+                fulltext=fulltext_retriever,
+                increment4=runtime.authority.increment4,
+                fulltext_view=view,
+                subjects=(replace(
+                    subject,
+                    document_receipt=replace(
+                        document_receipt, event_id="different-authority-event",
+                    ),
+                ),),
+                document_inventory=document_inventory,
+                authority_scope_id="native-authority-scope",
+                rights_inventory_digest=digest_canonical({"rights": "first"}),
+                minimum_authority_watermark=0,
+            )
+        wrong_proof_inventory = documents.authenticated_document_inventory(
+            (document_receipt,), proof=runtime.proof,
+        )
+        wrong_proof_port = NativeRetrievalPort(
+            documents=documents,
+            exact=exact_retriever,
+            fulltext=fulltext_retriever,
+            increment4=runtime.authority.increment4,
+            fulltext_view=view,
+            subjects=(subject,),
+            document_inventory=wrong_proof_inventory,
+            authority_scope_id="native-authority-scope",
+            rights_inventory_digest=digest_canonical({"rights": "first"}),
+            minimum_authority_watermark=0,
+        )
+        with pytest.raises(
+            NativeRetrievalError, match="document inventory proof differs",
+        ):
+            wrong_proof_port.retrieve(
+                lead,
+                proof=replace(runtime.proof, credential="wrong-credential"),
+            )
         first_port = NativeRetrievalPort(
             documents=documents,
             exact=exact_retriever,
@@ -286,6 +352,7 @@ def test_native_documents_admit_retain_context_and_reopen(
             increment4=runtime.authority.increment4,
             fulltext_view=view,
             subjects=(subject,),
+            document_inventory=document_inventory,
             authority_scope_id="native-authority-scope",
             rights_inventory_digest=digest_canonical({"rights": "first"}),
             minimum_authority_watermark=0,
@@ -298,6 +365,24 @@ def test_native_documents_admit_retain_context_and_reopen(
             ).fetchone()[0])
         assert fulltext_request_value["query_text"] == "Official deadline changed"
         assert first_port.retrieve(lead, proof=runtime.proof) == first_binding
+        with pytest.raises(
+            NativeRetrievalError, match="document inventory binding differs",
+        ):
+            NativeRetrievalPort(
+                documents=documents,
+                exact=exact_retriever,
+                fulltext=fulltext_retriever,
+                increment4=runtime.authority.increment4,
+                fulltext_view=view,
+                subjects=(subject,),
+                document_inventory=document_inventory,
+                authority_scope_id="native-authority-scope",
+                rights_inventory_digest=digest_canonical({"rights": "second"}),
+                minimum_authority_watermark=0,
+            )
+        changed_inventory = documents.authenticated_document_inventory(
+            (document_receipt,), proof=runtime.proof,
+        )
         changed_port = NativeRetrievalPort(
             documents=documents,
             exact=exact_retriever,
@@ -305,6 +390,7 @@ def test_native_documents_admit_retain_context_and_reopen(
             increment4=runtime.authority.increment4,
             fulltext_view=view,
             subjects=(subject,),
+            document_inventory=changed_inventory,
             authority_scope_id="native-authority-scope",
             rights_inventory_digest=digest_canonical({"rights": "second"}),
             minimum_authority_watermark=0,

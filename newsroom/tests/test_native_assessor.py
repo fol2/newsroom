@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.evidence import evidence_package_value
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
@@ -19,6 +19,7 @@ from newsroom.control_plane.native_assessor import (
     SCHEMA,
     SCHEMA_DIGEST,
     VERSION,
+    _MAX_RETAINED_RESULT_BYTES,
 )
 from newsroom.control_plane.native_evidence import NativeEvidenceError, NativeEvidenceHold
 from newsroom.control_plane.model_usage import (
@@ -28,6 +29,7 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
+from newsroom.control_plane.store import connect
 from newsroom.increment10.evidence import EvidencePackageError, _base_package
 from newsroom.control_plane.writer import (
     CONT_DISABLED_CAPABILITIES,
@@ -62,11 +64,7 @@ def _model_package_value(package):
                     "source_polarity": "AFFIRMED",
                     "rendered_polarity": "AFFIRMED",
                     "relation": "SEMANTICALLY_EQUIVALENT",
-                },
-                "named_entities": [
-                    {"source_text": entity[0], "entity_type": entity[1]}
-                    for entity in item["named_entity_evidence"]
-                ]
+                }
             }
             for item in value["governed_claims"]
         ],
@@ -98,13 +96,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     assert "semantic_relation_evidence_id" not in model_value["governed_claims"][0]
     assert "qualification_record_id" not in model_value["qualification_evidence"][0]
     named = json.loads(canonical_json_bytes({"package": model_value}))
-    named["package"]["governed_claims"][0]["named_entities"] = [{
-        "source_text": "Home Office", "entity_type": "ORGANISATION",
-    }]
-    validator.validate(named)
-    named["package"]["governed_claims"][0]["named_entities"][0][
-        "rendered_text"
-    ] = "英國內政部"
+    named["package"]["governed_claims"][0]["named_entities"] = []
     with pytest.raises(ValidationError):
         validator.validate(named)
     invalid_qualification = json.loads(canonical_json_bytes({"package": model_value}))
@@ -117,6 +109,103 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid["invented"] = True
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid})
+    connection.close()
+
+
+def test_native_assessor_derives_entities_from_constructed_uk03_output(
+    tmp_path,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    package = _model_package_value(_ready_package(candidate)[1])
+    claim = package["governed_claims"][0]
+    excerpt = "The Home Office published changes to the Skilled Worker Visa."
+    claim.update({
+        "claim": excerpt,
+        "supporting_excerpt": excerpt,
+        "rendered_assertion_zh_hant_hk": (
+            "Home Office 已公布 Skilled Worker Visa 的修訂。"
+        ),
+    })
+    package.update({
+        "substantive_new_information": [excerpt],
+        "governed_claims": [claim],
+        "qualification_evidence": [],
+    })
+    role = SimpleNamespace(
+        role=SimpleNamespace(value="ORIGINATING_AUTHORITY"),
+        purpose="Own immigration rules",
+        canonical_value=lambda: {
+            "role": "ORIGINATING_AUTHORITY", "purpose": "Own immigration rules",
+        },
+    )
+    source = SimpleNamespace(
+        unit=SimpleNamespace(
+            source_id="source-1",
+            authority=SimpleNamespace(definition_id="definition-1"),
+        ),
+        source_version=SimpleNamespace(
+            canonical_digest="sha256:" + "a" * 64,
+            request=SimpleNamespace(roles=(role,)),
+        ),
+        rights=SimpleNamespace(record_id="rights-1"),
+        dependency=SimpleNamespace(
+            record_id="dependency-1", evidential_origin_id="origin-1",
+        ),
+    )
+    acquired = SimpleNamespace(
+        receipt_digest="sha256:" + "b" * 64,
+        publisher="Home Office",
+        publication_time="2026-09-09T12:00:00.000000Z",
+        retrieval_time="2026-09-09T12:01:00.000000Z",
+        source_updated_time="2026-09-09T12:00:00.000000Z",
+        transport_evidence_digest="sha256:" + "c" * 64,
+        body=excerpt.encode(),
+    )
+
+    result = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": package}).decode(), {}
+        ),
+        candidate,
+        base,
+        (source,),
+        (acquired,),
+    )
+
+    assert result.governed_claims[0].named_entities == (
+        "Home Office", "Skilled Worker Visa",
+    )
+    assert result.governed_claims[0].rendered_named_entities == (
+        "Home Office", "Skilled Worker Visa",
+    )
+    unsupported = json.loads(canonical_json_bytes({"package": package}))
+    unsupported["package"]["governed_claims"][0][
+        "supporting_excerpt"
+    ] = "published changes to the Skilled Worker Visa."
+    with pytest.raises(EvidencePackageError, match="source evidence"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(canonical_json_bytes(unsupported).decode(), {}),
+            candidate, base, (source,), (acquired,),
+        )
+    changed = json.loads(canonical_json_bytes({"package": package}))
+    changed["package"]["governed_claims"][0][
+        "rendered_assertion_zh_hant_hk"
+    ] = "英國內政部已公布技術移民規則。"
+    with pytest.raises(EvidencePackageError, match="rendered named entities"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(canonical_json_bytes(changed).decode(), {}),
+            candidate, base, (source,), (acquired,),
+        )
+    invented = json.loads(canonical_json_bytes({"package": package}))
+    invented["package"]["governed_claims"][0][
+        "rendered_assertion_zh_hant_hk"
+    ] += " NHS England"
+    with pytest.raises(EvidencePackageError, match="rendered named entities"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(canonical_json_bytes(invented).decode(), {}),
+            candidate, base, (source,), (acquired,),
+        )
     connection.close()
 
 
@@ -173,6 +262,7 @@ def _usage(tmp_path, monkeypatch):
         lambda: (REVISION, True),
     )
     service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
+    connect(service.path).close()
     policy = InvocationEfficiencyPolicy.create(
         policy_id="native-assessor-policy",
         version="v1",
@@ -335,8 +425,16 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert terminal["pre_dispatch_zero_proved"] is False
         assert terminal["dispatch_at"] is not None
         assert retained.execute(
-            "SELECT state FROM model_transport_observations"
+            "SELECT state FROM model_transport_observations ORDER BY state"
         ).fetchall() == [("DISPATCH_STARTED",)]
+        result_rows = retained.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'"
+        ).fetchall()
+        assert len(result_rows) == (0 if output is None else 1)
+        if output is not None:
+            diagnostic = json.loads(result_rows[0][0])
+            assert diagnostic["result_text"] == output
+            assert diagnostic["result_bytes"] == len(output.encode())
     proof = usage.retained_output_contract_failure(candidate)
     if outcome == "ASSESSOR_VALIDATION_FAILED":
         assert proof is not None
@@ -403,6 +501,109 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert usage.retained_output_contract_failure(candidate) is None
     else:
         assert proof is None
+    connection.close()
+
+
+def test_native_assessor_result_diagnostic_is_bounded_and_replay_safe(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    service, usage = _usage(tmp_path, monkeypatch)
+    allocation = usage.begin(candidate, base, "exact request")
+    dispatch_at = usage.mark_dispatch(allocation)
+    execution = NativeAssessmentExecution('{"malformed":true}', {})
+
+    assert usage.retain_result(
+        allocation, execution, dispatch_at=dispatch_at
+    ) is True
+    assert usage.retain_result(
+        allocation, execution, dispatch_at=dispatch_at
+    ) is True
+    with pytest.raises(
+        NativeEvidenceError, match="conflicting native assessment result replay"
+    ):
+        usage.retain_result(
+            allocation,
+            NativeAssessmentExecution('{"different":true}', {}),
+            dispatch_at=dispatch_at,
+        )
+    with sqlite3.connect(service.path) as retained:
+        result = json.loads(retained.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'"
+        ).fetchone()[0])
+        assert result["result_text"] == execution.text
+        assert result["result_digest"] == digest_bytes(execution.text.encode())
+        assert result["retention_outcome"] == "RETAINED"
+        assert retained.execute(
+            "SELECT COUNT(*) FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'"
+        ).fetchone()[0] == 1
+        assert retained.execute(
+            "SELECT COUNT(*) FROM model_invocation_terminals"
+        ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_native_assessor_result_diagnostic_rejects_oversized_output(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    service, usage = _usage(tmp_path, monkeypatch)
+    allocation = usage.begin(candidate, base, "exact request")
+    dispatch_at = usage.mark_dispatch(allocation)
+    text = "x" * (_MAX_RETAINED_RESULT_BYTES + 1)
+
+    assert usage.retain_result(
+        allocation, NativeAssessmentExecution(text, {}), dispatch_at=dispatch_at
+    ) is False
+    with sqlite3.connect(service.path) as retained:
+        result = json.loads(retained.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'"
+        ).fetchone()[0])
+    assert result["result_text"] is None
+    assert result["result_bytes"] == len(text)
+    assert result["result_digest"] == digest_bytes(text.encode())
+    assert result["retention_outcome"] == "OVERSIZED"
+    connection.close()
+
+
+def test_native_assessor_oversized_result_becomes_accounted_contract_hold(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    service, usage = _usage(tmp_path, monkeypatch)
+    output = "x" * (_MAX_RETAINED_RESULT_BYTES + 1)
+    provider_usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cached_read_tokens": 0,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "context_tokens": 1,
+        "total_tokens": 2,
+    }
+
+    with pytest.raises(
+        NativeEvidenceHold, match="ASSESSOR_OUTPUT_CONTRACT_HOLD"
+    ):
+        AutonomousNativeEvidenceAssessor(
+            lambda _request: NativeAssessmentExecution(output, provider_usage),
+            usage=usage,
+            dispatch_fence=nullcontext,
+        )(candidate, base, (), ())
+
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute(
+            "SELECT outcome FROM model_invocation_terminals"
+        ).fetchall() == [("ASSESSOR_VALIDATION_FAILED",)]
+        result = json.loads(retained.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'"
+        ).fetchone()[0])
+        assert result["retention_outcome"] == "OVERSIZED"
+        assert result["result_text"] is None
     connection.close()
 
 

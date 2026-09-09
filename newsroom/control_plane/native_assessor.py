@@ -23,6 +23,7 @@ from newsroom.control_plane.evidence import (
     NAMED_ENTITY_POLICY_VERSION,
     ORIGINALITY_POLICY_VERSION,
     Evid012QualificationTest,
+    bounded_named_entities,
     evidence_package_value,
 )
 from newsroom.increment10.editorial import SourceCurrentness
@@ -70,8 +71,9 @@ from .writer import (
     read_grok_command_semantic_version,
 )
 from .cycle import _complete_writer_usage
+from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v3"
+VERSION = "newsroom.native-evidence-assessor.v4"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -82,8 +84,9 @@ SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
     "candidate and exact source bytes. Return JSON matching the schema. Translate "
     "or localise only facts present in an exact source excerpt; never add facts or "
-    "authority absent from that evidence. Preserve named-entity source spellings in "
-    "the rendered claim; named entities are not translated. Localised factual "
+    "authority absent from that evidence. Preserve every named entity used in the "
+    "claim with exact source-excerpt evidence and its source spelling unchanged in the "
+    "rendered claim; do not annotate or translate named entities. Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
     "or one-to-ten word durations in hours/minutes and equivalent Chinese durations "
@@ -206,15 +209,6 @@ _CLAIM_FIELDS = {
         "additionalProperties": False,
     },
     "localised_factual_expressions": _PAIRS,
-    "named_entities": {"type": "array", "items": {
-        "type": "object",
-        "properties": {"source_text": _STRING, "entity_type": {"enum": [
-            "PERSON", "ORGANISATION", "PLACE", "OFFICIAL_TITLE",
-            "OFFICIAL_TERM", "PRODUCT",
-        ]}},
-        "required": ["source_text", "entity_type"],
-        "additionalProperties": False,
-    }},
     "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
     "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
     "originality_policy_version": {"const": ORIGINALITY_POLICY_VERSION},
@@ -253,6 +247,9 @@ INTEGRITY = (
     "NOT_TRUNCATED",
     "VERSION_UNAMBIGUOUS",
 )
+_ASSESSMENT_RESULT_KIND = "NATIVE_ASSESSMENT_RESULT"
+_ASSESSMENT_RESULT_SCHEMA_VERSION = "newsroom.native-assessment-result.v1"
+_MAX_RETAINED_RESULT_BYTES = 256 * 1024
 
 
 def _semantic_record_id(claim_id: str, claim: str, rendered: str) -> str:
@@ -337,6 +334,16 @@ class NativeAssessmentUsage:
         self._service = service
         self._policy = policy
         self._clock = clock
+        connection = service._connection()
+        try:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
+            ).fetchone() is None:
+                raise NativeEvidenceError(
+                    "native assessment diagnostic ledger is required"
+                )
+        finally:
+            connection.close()
         service.register_policy(policy)
 
     def begin(self, candidate, base, prompt: str) -> InvocationAllocation:
@@ -461,6 +468,135 @@ class NativeAssessmentUsage:
             evidence_digest=allocation.request_digest,
         )
         return dispatched_at
+
+    def retain_result(
+        self,
+        allocation: InvocationAllocation,
+        execution: NativeAssessmentExecution,
+        *,
+        dispatch_at: datetime,
+    ) -> bool:
+        """Retain bounded diagnostic output without admitting its contents."""
+
+        if (
+            type(allocation) is not InvocationAllocation
+            or type(execution) is not NativeAssessmentExecution
+            or type(execution.text) is not str
+            or type(execution.usage) is not dict
+        ):
+            raise NativeEvidenceError("native assessment result binding differs")
+        raw = execution.text.encode("utf-8")
+        result_digest = digest_bytes(raw)
+        connection = self._service._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            allocation_row = connection.execute(
+                "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,"
+                "workload_class,policy_digest,provider,route,model,request_digest,"
+                "parent_invocation_id,allocated_at,canonical_digest,record_json "
+                "FROM model_invocation_allocations "
+                "WHERE invocation_id=?",
+                (allocation.invocation_id,),
+            ).fetchone()
+            policy = _policy_for_allocation(connection, allocation)
+            dispatch_rows = connection.execute(
+                "SELECT observed_at,evidence_digest,record_json "
+                "FROM model_transport_observations "
+                "WHERE invocation_id=? AND state='DISPATCH_STARTED'",
+                (allocation.invocation_id,),
+            ).fetchall()
+            if allocation_row is None or len(dispatch_rows) != 1:
+                raise NativeEvidenceError("native assessment result lacks dispatch authority")
+            allocation_record = json.loads(allocation_row[13])
+            retained_allocation = _allocation_from_record(allocation_record)
+            dispatch_record = json.loads(dispatch_rows[0][2])
+            if (
+                retained_allocation != allocation
+                or tuple(allocation_row[:13]) != (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.leaf_ordinal,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    allocation_record["allocated_at"],
+                    allocation.canonical_digest,
+                )
+                or retained_allocation.invocation_policy_digest
+                != self._policy.canonical_digest
+                or policy.as_record() != self._policy.as_record()
+                or dispatch_record.get("invocation_id") != allocation.invocation_id
+                or dispatch_record.get("state") != "DISPATCH_STARTED"
+                or dispatch_record.get("evidence_digest") != allocation.request_digest
+                or digest_canonical({
+                    key: value for key, value in dispatch_record.items()
+                    if key != "observation_digest"
+                }) != dispatch_record.get("observation_digest")
+                or tuple(dispatch_rows[0][:2]) != (
+                    dispatch_record.get("observed_at"), allocation.request_digest,
+                )
+                or datetime.fromisoformat(str(dispatch_record.get("observed_at")))
+                != dispatch_at
+            ):
+                raise NativeEvidenceError("native assessment result authority differs")
+            retained = len(raw) <= _MAX_RETAINED_RESULT_BYTES
+            observed_at = self._clock().astimezone(UTC)
+            if observed_at < dispatch_at:
+                raise NativeEvidenceError(
+                    "native assessment result precedes dispatch"
+                )
+            record = {
+                "schema_version": _ASSESSMENT_RESULT_SCHEMA_VERSION,
+                "invocation_id": allocation.invocation_id,
+                "allocation_digest": allocation.canonical_digest,
+                "invocation_policy_digest": allocation.invocation_policy_digest,
+                "request_digest": allocation.request_digest,
+                "observed_at": observed_at.isoformat(timespec="microseconds"),
+                "dispatch_at": dispatch_record["observed_at"],
+                "result_digest": result_digest,
+                "result_bytes": len(raw),
+                "result_text": execution.text if retained else None,
+                "retention_outcome": "RETAINED" if retained else "OVERSIZED",
+            }
+            rows = connection.execute(
+                "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
+                "AND json_extract(payload_json,'$.invocation_id')=?",
+                (_ASSESSMENT_RESULT_KIND, allocation.invocation_id),
+            ).fetchall()
+            if rows:
+                if len(rows) != 1:
+                    raise NativeEvidenceError(
+                        "conflicting native assessment result replay"
+                    )
+                retained_record = json.loads(rows[0][1])
+                comparable = dict(retained_record)
+                comparable.pop("observed_at", None)
+                expected = dict(record)
+                expected.pop("observed_at")
+                if (
+                    digest_bytes(rows[0][1].encode()) != rows[0][0]
+                    or comparable != expected
+                    or datetime.fromisoformat(retained_record["observed_at"])
+                    < dispatch_at
+                ):
+                    raise NativeEvidenceError(
+                        "conflicting native assessment result replay"
+                    )
+            if not rows:
+                append_ledger(connection, _ASSESSMENT_RESULT_KIND, record)
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return retained
 
     def complete(
         self,
@@ -862,6 +998,12 @@ class AutonomousNativeEvidenceAssessor:
                 if allocation is not None:
                     dispatch_at = self._usage.mark_dispatch(allocation)
                 execution = self._dispatch(request)
+                if allocation is not None and not self._usage.retain_result(
+                    allocation, execution, dispatch_at=dispatch_at
+                ):
+                    raise EvidencePackageError(
+                        "native assessment output exceeds retained result limit"
+                    )
             result = self._validated_execution(
                 execution, candidate, base, sources, acquired
             )
@@ -1015,14 +1157,18 @@ class AutonomousNativeEvidenceAssessor:
                 for source, role in zip(selected, roles, strict=True)
             )
             authority.extend(decisions)
-            raw_entities = raw_claim.get("named_entities")
-            if type(raw_entities) is not list or any(
-                type(item) is not dict
-                or set(item) != {"source_text", "entity_type"}
-                or any(type(part) is not str for part in item.values())
-                for item in raw_entities
-            ):
-                raise EvidencePackageError("assessment named entities differ")
+            supporting_excerpt = raw_claim.get("supporting_excerpt")
+            if type(supporting_excerpt) is not str:
+                raise EvidencePackageError("assessment supporting excerpt differs")
+            named_entities = tuple(sorted(bounded_named_entities(claim_text)))
+            if not set(named_entities) <= bounded_named_entities(supporting_excerpt):
+                raise EvidencePackageError(
+                    "assessment named entities differ from source evidence"
+                )
+            if bounded_named_entities(rendered) != set(named_entities):
+                raise EvidencePackageError(
+                    "assessment rendered named entities differ"
+                )
             governed_claims.append({
                 **{
                     key: item
@@ -1062,14 +1208,11 @@ class AutonomousNativeEvidenceAssessor:
                         entity_type,
                         _named_entity_record_id(claim_id, text, entity_type, text),
                     ]
-                    for text, entity_type in (
-                        (item["source_text"], item["entity_type"])
-                        for item in raw_entities
-                    )
+                    for text, entity_type in named_entities
                 ],
-                "named_entities": [item["source_text"] for item in raw_entities],
+                "named_entities": [item[0] for item in named_entities],
                 "rendered_named_entities": [
-                    item["source_text"] for item in raw_entities
+                    item[0] for item in named_entities
                 ],
             })
         raw_qualifications = raw_package.get("qualification_evidence")

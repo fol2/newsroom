@@ -143,6 +143,18 @@ class _Documents:
         self.require_calls.append(receipt)
         return self.documents[str(receipt.aggregate_id)]
 
+    def authenticated_document_inventory(self, receipts, *, proof):
+        return tuple(
+            (receipt, self.require_document(receipt, proof=proof))
+            for receipt in receipts
+        )
+
+    def require_authenticated_inventory(self, inventory, receipts):
+        assert tuple(receipt for receipt, _document in inventory) == receipts
+        return {
+            receipt.event_id: document for receipt, document in inventory
+        }
+
     def read_context(self, receipt, *, proof):
         self.context_reads.append(receipt)
         return self.contexts[receipt.context_id]
@@ -213,9 +225,12 @@ def _continuation(
             documents.contexts[retained_context.context_id] = retained_context
             return retained_binding
 
-    def port_for(items, rights_inventory_digest):
+    def port_for(items, document_inventory, rights_inventory_digest):
         if rights_inventory_digests is not None:
             rights_inventory_digests.append(rights_inventory_digest)
+        assert tuple(receipt for receipt, _document in document_inventory) == tuple(
+            item.document_receipt for item in items
+        )
         port = _Port()
         port.subjects = items
         port.rights_inventory_digest = rights_inventory_digest
@@ -315,6 +330,7 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
     with pytest.raises(RuntimeError, match="context retention interrupted"):
         continuation.retrieve(lead, proof=proof())
     assert len(embedder.calls) == len(documents.admit_calls) == 2
+    assert len(documents.require_calls) == 2
     assert [call["cycle_id"] for call in embedder.calls] == [
         f"native-passage:{unit.ingest_id}" for unit in units
     ]
@@ -395,6 +411,19 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
             unit.ingest_id for unit in units
         ]
         assert replay_facts["retrieval_binding"] == replayed_binding.canonical_value()
+        retained_document = next(iter(documents.documents.values()))
+        original_revision = retained_document.revision_id
+        retained_document.revision_id = "different-retained-revision"
+        with pytest.raises(
+            ValueError, match="native passage continuation identity changed",
+        ):
+            final_continuation.retrieve(lead, proof=proof())
+        retained_document.revision_id = original_revision
+        retained_document.generation_id = "different-native-generation"
+        with pytest.raises(
+            ValueError, match="native passage continuation identity changed",
+        ):
+            final_continuation.retrieve(lead, proof=proof())
     finally:
         final_connection.close()
 
