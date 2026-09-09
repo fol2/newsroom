@@ -203,6 +203,32 @@ def test_match_holds_and_exact_native_bindings_fail_closed(tmp_path) -> None:
         )
 
 
+def test_current_repromoted_gate_does_not_rewrite_immutable_lead(tmp_path) -> None:
+    lead, binding = _native_lead(tmp_path)
+    current = replace(
+        binding,
+        gate_decision_id="00000000-0000-4000-8000-000000009201",
+        disposition_id="00000000-0000-4000-8000-000000009202",
+        disposition_digest="sha256:" + "9" * 64,
+        disposition_event_id="00000000-0000-4000-8000-000000009203",
+        disposition_ordinal=2,
+        previous_disposition_id=binding.disposition_id,
+    )
+    version = _version(current, _retrieval(no_match=False, native=True))
+
+    assert autonomous_worker_input_digest(version, (lead,)).startswith("sha256:")
+    with pytest.raises(AutonomousWorkerError, match="authority differs"):
+        autonomous_worker_input_digest(
+            replace(
+                version,
+                decision_leads=(
+                    replace(current, definition_version_id=binding.definition_id),
+                ),
+            ),
+            (lead,),
+        )
+
+
 def test_native_factual_match_stays_provisional_until_candidate_collision(
     tmp_path,
 ) -> None:

@@ -246,6 +246,47 @@ def test_actual_service_private_adapter_exact_duplicate_and_digest_conflict() ->
             assert [row["passage_id"] for row in envelope["rows"]] == [
                 f"p-scope-{ordinal:02d}" for ordinal in range(10)
             ]
+
+            with admin.session(database=config.database) as session:
+                session.run(
+                    f"UNWIND range(0, 65) AS ordinal "
+                    f"CREATE (node:`{label}` {{"
+                    "generation_id: $generation_id, "
+                    "passage_id: 'p-outsider-' + right('0' + toString(ordinal), 2), "
+                    "document_digest: $document_digest, "
+                    "language: 'en-GB', "
+                    "retrieval_text: 'bounded source scope probe'"
+                    "})",
+                    generation_id=probe_generation,
+                    document_digest="sha256:" + "2" * 64,
+                ).consume()
+                session.run(
+                    f"UNWIND range(0, 9) AS ordinal "
+                    f"CREATE (node:`{label}` {{"
+                    "generation_id: $generation_id, "
+                    "passage_id: 'p-native-' + right('0' + toString(ordinal), 2), "
+                    "document_digest: $document_digest, "
+                    "language: 'en-GB', "
+                    "retrieval_text: 'bounded source scope probe'"
+                    "})",
+                    generation_id=probe_generation,
+                    document_digest="sha256:" + "3" * 64,
+                ).consume()
+            eligible = tuple(f"p-native-{ordinal:02d}" for ordinal in range(10))
+            native = adapter.read_increment5_fulltext(
+                phase="QUERY",
+                index_name=index_name,
+                lucene_expression="retrieval_text:(bounded source scope probe)",
+                generation_id=probe_generation,
+                source_ids=("source:scope-probe",),
+                eligible_passage_ids=eligible,
+                limit=8,
+                timeout_ns=5_000_000_000,
+            )
+            assert native["candidate_overflow"] is False
+            assert [row["passage_id"] for row in native["rows"]] == list(
+                eligible[:8]
+            )
         finally:
             with admin.session(database=config.database) as session:
                 session.run(f"DROP INDEX `{index_name}` IF EXISTS").consume()

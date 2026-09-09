@@ -343,3 +343,56 @@ def test_native_pipeline_honours_global_stop_before_source_poll(tmp_path, monkey
         assert not journal.units and not calls
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("stop_after_retained", [False, True])
+def test_native_pipeline_advances_retained_work_before_new_graphiti_once(
+    tmp_path, monkeypatch, stop_after_retained,
+):
+    pipeline, journal, connection, units, calls, _ = _open(tmp_path, monkeypatch)
+    retained, pending = units
+    journal.land((retained,))
+    journal.advance(retained.revision_id, stage="GRAPHITI_COMPLETE", facts={
+        "graphiti_receipts": [{}],
+    })
+    stopped = False
+    original_graphiti = pipeline._graphiti
+
+    def check():
+        if stopped:
+            raise VetoError("owner stop before fresh dispatch")
+
+    def retrieval(selected):
+        nonlocal stopped
+        calls.append(("retrieval", selected[0].item_key))
+        if selected[0].revision_id == retained.revision_id:
+            stopped = stop_after_retained
+            raise RuntimeError("retained downstream failure")
+        return object()
+
+    def graphiti(selected, *, cycle_id):
+        assert selected == (pending,)
+        # The failure is committed before new provider work, not only in memory.
+        reopened = NativeRevisionJournal(connection)
+        assert reopened.progress[retained.revision_id]["stage"] == "RETRIEVAL_HOLD"
+        return original_graphiti.advance(selected, cycle_id=cycle_id)
+
+    pipeline._check = check
+    pipeline._retrieval_for = retrieval
+    pipeline._graphiti = NS(advance=graphiti)
+    try:
+        if stop_after_retained:
+            with pytest.raises(VetoError, match="before fresh dispatch"):
+                pipeline.tick(cycle_id="retained-first-stop")
+            assert not any(call[0] == "graphiti" for call in calls)
+        else:
+            report = pipeline.tick(cycle_id="retained-first")
+            assert report.revision_states == {"RETRIEVAL_HOLD": 1, "ACKNOWLEDGED": 1}
+            assert [call for call in calls if call[0] in {"retrieval", "graphiti"}] == [
+                ("retrieval", retained.item_key),
+                ("graphiti", pending.item_key),
+                ("retrieval", pending.item_key),
+            ]
+        assert calls.count(("retrieval", retained.item_key)) == 1
+    finally:
+        connection.close()

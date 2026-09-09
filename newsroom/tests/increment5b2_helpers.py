@@ -42,6 +42,7 @@ from newsroom.projection.neo4j._adapter import (
     _COMPONENT_QUERY,
     _FULLTEXT_INDEX_INVENTORY_QUERY,
     _FULLTEXT_READ_QUERY,
+    _NATIVE_FULLTEXT_READ_QUERY,
 )
 from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 
@@ -286,7 +287,7 @@ class FakeTransaction:
             if self._scenario.failure_on == "index":
                 raise RuntimeError("index read failed")
             return FakeResult(self._scenario.indexes)
-        if statement == _FULLTEXT_READ_QUERY:
+        if statement in {_FULLTEXT_READ_QUERY, _NATIVE_FULLTEXT_READ_QUERY}:
             if self._scenario.failure_on == "query":
                 raise RuntimeError("query timed out")
             return FakeResult(
@@ -373,19 +374,29 @@ class FakeDriver:
                     ),
                     driver_version=driver_version,
                 )
+            parameters: dict[str, object] = {
+                "index_name": request.index_name,
+                "query": request.lucene_expression,
+                "generation_id": str(request.generation_id),
+                "limit": request.limit,
+            }
+            if request.eligible_passage_ids is None:
+                parameters["candidate_limit"] = (
+                    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                    if request.source_ids
+                    else request.limit
+                )
+            else:
+                parameters["eligible_passage_ids"] = list(
+                    request.eligible_passage_ids
+                )
             query_envelope = transaction.run(
-                _FULLTEXT_READ_QUERY,
-                {
-                    "index_name": request.index_name,
-                    "query": request.lucene_expression,
-                    "generation_id": str(request.generation_id),
-                    "candidate_limit": (
-                        FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
-                        if request.source_ids
-                        else request.limit
-                    ),
-                    "limit": request.limit,
-                },
+                (
+                    _NATIVE_FULLTEXT_READ_QUERY
+                    if request.eligible_passage_ids is not None
+                    else _FULLTEXT_READ_QUERY
+                ),
+                parameters,
             ).single()
             assert query_envelope is not None
             return Neo4jFullTextReadResult(

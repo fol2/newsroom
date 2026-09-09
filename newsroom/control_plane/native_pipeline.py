@@ -56,14 +56,20 @@ class NativePipeline:
         for revision_id, units in grouped.items():
             self._journal.land(tuple(units))
 
-        # Extraction stays per ingest; projection is one complete-revision
-        # cohort per iteration, not one full-history rebuild per revision.
-        pending = tuple(
-            unit for revision_id, units in self._journal.units.items()
-            if not self._journal.progress.get(revision_id, {}).get("facts", {}).get("graphiti_receipts")
-            for unit in units
-        )
+        # Fixed disjoint cohorts attempt each revision at most once per tick.
+        # Retained downstream work must not wait behind fresh model requests.
+        ready, pending_revisions = [], []
+        for revision_id, units in self._journal.units.items():
+            facts = self._journal.progress.get(revision_id, {}).get("facts", {})
+            cohort = ready if facts.get("graphiti_receipts") else pending_revisions
+            cohort.append((revision_id, units))
+        self._advance_revisions(tuple(ready))
+        pending_revisions = tuple(pending_revisions)
+
+        # Extraction stays per ingest; projection remains one complete cohort.
+        pending = tuple(unit for _, units in pending_revisions for unit in units)
         if pending:
+            self._check()
             try:
                 results = self._graphiti.advance(pending, cycle_id=cycle_id)
                 if len(results) != len(pending) or {item.ingest_id for item in results} != {unit.ingest_id for unit in pending}:
@@ -107,9 +113,19 @@ class NativePipeline:
                         **facts, "reason": type(exc).__name__,
                     })
 
+        self._advance_revisions(pending_revisions)
+        states = Counter(
+            self._journal.progress.get(revision_id, {}).get("stage", "QUEUED")
+            for revision_id in self._journal.units
+        )
+        return NativePipelineReport(
+            self._journal.portfolio, dict(states), states.get("QUEUED", 0),
+        )
+
+    def _advance_revisions(self, revisions: tuple) -> None:
         # Each revision remains in the journal even when it disappears from the
         # next feed page. This is work continuation, not a fresh provider retry.
-        for revision_id, units in tuple(self._journal.units.items()):
+        for revision_id, units in revisions:
             self._check()
             previous = self._journal.progress.get(revision_id, {})
             if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
@@ -190,10 +206,3 @@ class NativePipeline:
                     **self._journal.progress.get(revision_id, {}).get("facts", facts),
                     "reason": getattr(exc, "reason", getattr(exc, "reason_code", type(exc).__name__)),
                 })
-        states = Counter(
-            self._journal.progress.get(revision_id, {}).get("stage", "QUEUED")
-            for revision_id in self._journal.units
-        )
-        return NativePipelineReport(
-            self._journal.portfolio, dict(states), states.get("QUEUED", 0),
-        )

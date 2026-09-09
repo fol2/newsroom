@@ -17,6 +17,7 @@ from newsroom.projection.neo4j._adapter import (
     _COMPONENT_QUERY,
     _FULLTEXT_INDEX_INVENTORY_QUERY,
     _FULLTEXT_READ_QUERY,
+    _NATIVE_FULLTEXT_READ_QUERY,
     _Neo4jAdapter,
 )
 
@@ -142,6 +143,7 @@ class _RecordReturningAdapter:
         source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
+        eligible_passage_ids: tuple[str, ...] | None = None,
     ):
         assert timeout_ns > 0
         if phase == "COMPONENT":
@@ -163,6 +165,7 @@ class _RecordReturningAdapter:
         assert lucene_expression
         assert generation_id
         assert source_ids == ()
+        assert eligible_passage_ids is None
         assert limit == 9
         return _Neo4jRecordLike(
             {
@@ -373,6 +376,45 @@ def test_authority_port_uses_source_scope_only_for_bounded_candidate_scan() -> N
         "generation_id",
         "candidate_limit",
         "limit",
+    }
+
+
+def test_native_authority_port_filters_authenticated_passages_before_top_eight() -> None:
+    eligible = tuple(f"p-native-{index:02d}" for index in range(10))
+    clock = SequenceClock((0, 100_000_000, 200_000_000))
+    driver = FakeDriver(default_scenario(rows=[]))
+    adapter = _Neo4jAdapter(
+        driver=driver,
+        config=config(),
+        driver_version="6.2.0",
+        monotonic_ns=clock,
+        unit_of_work_factory=RecordingUnitOfWorkFactory(),
+    )
+    reader = _open_neo4j_fulltext_reader_with_adapter(adapter)
+
+    result = reader.read(
+        Neo4jFullTextReadRequest.query(
+            index_name=snapshot().index_name,
+            lucene_expression="retrieval_text:(synthetic)",
+            generation_id=GENERATION_ID,
+            source_ids=("source-en",),
+            eligible_passage_ids=eligible,
+            limit=8,
+            timeout_ns=5_000_000_000,
+        )
+    )
+
+    assert result.rows == ()
+    statement, parameters = driver.calls[-1]
+    assert statement == _NATIVE_FULLTEXT_READ_QUERY
+    assert "node.passage_id IN $eligible_passage_ids" in statement
+    assert "ORDER BY score DESC, node.passage_id" in statement
+    assert parameters == {
+        "index_name": snapshot().index_name,
+        "query": "retrieval_text:(synthetic)",
+        "generation_id": str(GENERATION_ID),
+        "eligible_passage_ids": list(eligible),
+        "limit": 8,
     }
 
 

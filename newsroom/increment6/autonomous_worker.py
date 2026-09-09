@@ -68,8 +68,6 @@ def _exact_inputs(
             lead.canonical_digest != binding.lead_digest
             or str(lead.event_id) != binding.lead_event_id
             or lead.aggregate_version != binding.lead_aggregate_version
-            or str(lead.request.promoting_gate_decision_id)
-            != binding.gate_decision_id
             or str(lead.request.definition_id) != binding.definition_id
             or str(lead.request.definition_version_id)
             != binding.definition_version_id

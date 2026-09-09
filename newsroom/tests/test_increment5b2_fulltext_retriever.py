@@ -19,6 +19,7 @@ from newsroom.increment5.fulltext_contracts import (
     NORMALIZATION_COMPONENT_DIGEST,
     FullTextContractError,
     FullTextIndexState,
+    FullTextProfile,
 )
 from newsroom.increment5.fulltext_journal import (
     FullTextReceiptIdempotencyConflict,
@@ -654,6 +655,131 @@ def test_result_overflow_is_incomplete_instead_of_truncated(
     assert receipt.outcome is BranchOutcome.INCOMPLETE
     assert receipt.reason_code == "RESULT_BOUND_EXCEEDED"
     assert not receipt.hits
+
+
+def test_native_runtime_returns_authorised_top_eight_without_exhaustive_scan(
+    tmp_path: Path,
+) -> None:
+    eligible = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-native-{index:02d}",
+            dependency_root_id=f"root-native-{index:02d}",
+            source_identity=f"source-en:revision-{index:02d}",
+            provenance_digest=digest(f"native-document-{index:02d}"),
+        )
+        for index in range(10)
+    )
+    outsiders = tuple(
+        replace(
+            bindings()[1],
+            passage_id=f"p-outsider-{index:02d}",
+            dependency_root_id=f"root-outsider-{index:02d}",
+            source_id="source-other",
+            source_identity=f"source-other:revision-{index:02d}",
+            provenance_digest=digest(f"outsider-document-{index:02d}"),
+        )
+        for index in range(66)
+    )
+    current_view = authority_view(
+        projection_snapshot=snapshot(profile=FullTextProfile.NATIVE_RUNTIME),
+        document_bindings=tuple(sorted(
+            (*eligible, *outsiders, bindings()[0], bindings()[2]),
+            key=lambda item: item.passage_id,
+        )),
+    )
+    rows = [
+        {
+            "generation_id": str(GENERATION_ID),
+            "passage_id": binding.passage_id,
+            "document_digest": binding.provenance_digest,
+            "language": binding.language,
+            "score": float(20 - index),
+        }
+        for index, binding in enumerate(eligible[:8])
+    ]
+    driver, _factory, retriever = system(
+        tmp_path,
+        view=current_view,
+        scenario=default_scenario(
+            projection_snapshot=current_view.snapshot,
+            rows=rows,
+        ),
+    )
+
+    receipt = retriever.retrieve(
+        request(idempotency_key="native-top-eight", source_ids=("source-en",))
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert [item.passage_id for item in receipt.hits] == [
+        item.passage_id for item in eligible[:8]
+    ]
+    query = driver.read_requests[-1]
+    assert query.limit == 8
+    assert query.eligible_passage_ids == tuple(
+        item.passage_id for item in eligible
+    )
+
+
+def test_native_runtime_empty_authorised_inventory_is_bounded_no_match(
+    tmp_path: Path,
+) -> None:
+    current_view = authority_view(
+        projection_snapshot=snapshot(profile=FullTextProfile.NATIVE_RUNTIME),
+        document_bindings=(bindings()[0],),
+    )
+    driver, _factory, retriever = system(
+        tmp_path,
+        view=current_view,
+        scenario=default_scenario(
+            projection_snapshot=current_view.snapshot,
+            rows=[],
+        ),
+    )
+
+    receipt = retriever.retrieve(
+        request(
+            idempotency_key="native-empty-authority",
+            source_ids=("source-blocked",),
+        )
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.COMPLETE
+    assert receipt.reason_code == "NO_MATCH"
+    assert driver.read_requests[-1].eligible_passage_ids == ()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    (
+        [result_row("p-zh", 1.0)],
+        [result_row("p-en", float(20 - index)) for index in range(9)],
+    ),
+    ids=("outside-authority-scope", "unexpected-ninth-result"),
+)
+def test_native_runtime_rejects_projection_outside_its_bounded_authority(
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    current_view = authority_view(
+        projection_snapshot=snapshot(profile=FullTextProfile.NATIVE_RUNTIME),
+    )
+    _driver, _factory, retriever = system(
+        tmp_path,
+        view=current_view,
+        scenario=default_scenario(
+            projection_snapshot=current_view.snapshot,
+            rows=rows,
+        ),
+    )
+
+    receipt = retriever.retrieve(
+        request(idempotency_key=f"native-invalid-{len(rows)}", source_ids=("source-en",))
+    ).receipt
+
+    assert receipt.outcome is BranchOutcome.UNAVAILABLE
+    assert receipt.reason_code == "NEO4J_READ_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(

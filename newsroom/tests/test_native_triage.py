@@ -14,6 +14,15 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority._hermes_native_system import open_hermes_native_authority_system
 from newsroom.authority.persistence import EventReadPolicy, MetadataClass
 from newsroom.authority.types import TrustScope
+from newsroom.discovery import (
+    DecisionTerminality,
+    GateDecisionId,
+    GateOutcome,
+    LeadDispositionDecisionId,
+    NextAction,
+    NextActionKind,
+    TimeValidity,
+)
 from newsroom.control_plane.native_triage import (
     advance_native_triage,
     build_native_triage_work,
@@ -46,11 +55,13 @@ from newsroom.tests.authority_helpers import FIXED_NOW
 from newsroom.tests.discovery_3d_authority_helpers import (
     discovery_read_policy,
     exact_admission_request,
+    exact_gate_request,
     open_discovery_system,
     proof,
     scopes as discovery_scopes,
     seed_check_lineage,
 )
+from newsroom.tests.discovery_3d_helpers import disposition_request, reason
 from newsroom.tests.check_3c_authority_helpers import check_read_policy, source_read_policy
 from newsroom.tests.editorial_relation_4c_helpers import relation_read_policy
 from newsroom.tests.entity_4b_helpers import entity_read_policy
@@ -318,10 +329,61 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
         )
         assert admitted.lead is not None
         assert admitted.initial_disposition is not None
+        hold_id = GateDecisionId.parse(work_item_helpers._id(9000))
+        promoted_id = GateDecisionId.parse(work_item_helpers._id(9001))
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=hold_id,
+                decision_ordinal=2,
+                previous_decision_id=exact_gate_request().decision_id,
+                basis=replace(
+                    exact_gate_request().basis,
+                    policy_current=False,
+                    operationally_executable=False,
+                    time_validity=TimeValidity.CURRENT,
+                ),
+                outcome=GateOutcome.OPERATIONAL_HOLD,
+                terminality=DecisionTerminality.PENDING_CONDITION,
+                primary_reason=reason("OPS.POLICY_STALE"),
+                next_action=NextAction(
+                    NextActionKind.REVIEW,
+                    "REVIEW_STALE_POLICY",
+                    owner="discovery-operator",
+                    instructions="Revalidate the deterministic Gate policy.",
+                ),
+                idempotency_key="native-triage-gate-hold",
+            ),
+            proof=proof(),
+        )
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=promoted_id,
+                decision_ordinal=3,
+                previous_decision_id=hold_id,
+                idempotency_key="native-triage-gate-repromotion",
+            ),
+            proof=proof(),
+        )
+        replacement = system.discovery.record_lead_disposition(
+            replace(
+                disposition_request(),
+                decision_id=LeadDispositionDecisionId.parse(
+                    work_item_helpers._id(9002)
+                ),
+                gate_decision_id=promoted_id,
+                decision_ordinal=2,
+                previous_decision_id=admitted.initial_disposition.request.decision_id,
+                idempotency_key="native-triage-replacement-queue",
+            ),
+            proof=proof(),
+        )
         work = build_native_triage_work(
-            admitted_leads=((admitted.lead, admitted.initial_disposition),),
+            admitted_leads=((admitted.lead, replacement),),
             retrieval=retrieval,
         )
+        assert work.version.decision_leads[0].disposition_ordinal == 2
         schedule = plan_native_schedule(work)
         assert schedule.state == "SCHEDULED"
         assert schedule.decision is not None

@@ -99,6 +99,7 @@ class Neo4jFullTextReadRequest:
     lucene_expression: str | None = None
     generation_id: ProjectionGenerationId | None = None
     source_ids: tuple[str, ...] = ()
+    eligible_passage_ids: tuple[str, ...] | None = None
     limit: int = 0
 
     def __post_init__(self) -> None:
@@ -113,7 +114,7 @@ class Neo4jFullTextReadRequest:
                     self.lucene_expression,
                     self.generation_id,
                 )
-            ) or self.source_ids or self.limit != 0:
+            ) or self.source_ids or self.eligible_passage_ids is not None or self.limit != 0:
                 raise Neo4jFullTextReadError(
                     "component read cannot carry index or query controls"
                 )
@@ -126,6 +127,7 @@ class Neo4jFullTextReadRequest:
                 self.lucene_expression is not None
                 or self.generation_id is not None
                 or self.source_ids
+                or self.eligible_passage_ids is not None
                 or self.limit != 0
             ):
                 raise Neo4jFullTextReadError(
@@ -159,10 +161,35 @@ class Neo4jFullTextReadRequest:
             raise Neo4jFullTextReadError(
                 "full-text source scope must be sorted and unique"
             )
-        if isinstance(self.limit, bool) or self.limit != 9:
-            raise Neo4jFullTextReadError(
-                "full-text overflow sentinel limit must equal 9"
-            )
+        if self.eligible_passage_ids is None:
+            if isinstance(self.limit, bool) or self.limit != 9:
+                raise Neo4jFullTextReadError(
+                    "full-text overflow sentinel limit must equal 9"
+                )
+        else:
+            if (
+                not isinstance(self.eligible_passage_ids, tuple)
+                or len(self.eligible_passage_ids) > 4_096
+            ):
+                raise Neo4jFullTextReadError(
+                    "native full-text eligible passages exceed their fixed bound"
+                )
+            for passage_id in self.eligible_passage_ids:
+                _bounded_text(
+                    passage_id,
+                    field="native_fulltext_eligible_passage_id",
+                    maximum_bytes=256,
+                )
+            if self.eligible_passage_ids != tuple(
+                sorted(set(self.eligible_passage_ids))
+            ):
+                raise Neo4jFullTextReadError(
+                    "native full-text eligible passages must be sorted and unique"
+                )
+            if isinstance(self.limit, bool) or self.limit != 8:
+                raise Neo4jFullTextReadError(
+                    "native full-text result limit must equal 8"
+                )
 
     @classmethod
     def component(cls, *, timeout_ns: int) -> "Neo4jFullTextReadRequest":
@@ -194,6 +221,7 @@ class Neo4jFullTextReadRequest:
         source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
+        eligible_passage_ids: tuple[str, ...] | None = None,
     ) -> "Neo4jFullTextReadRequest":
         return cls(
             phase=Neo4jFullTextReadPhase.QUERY,
@@ -202,6 +230,7 @@ class Neo4jFullTextReadRequest:
             lucene_expression=lucene_expression,
             generation_id=generation_id,
             source_ids=source_ids,
+            eligible_passage_ids=eligible_passage_ids,
             limit=limit,
         )
 
@@ -308,6 +337,22 @@ class Neo4jFullTextReader:
             raise Neo4jFullTextReadError(
                 "full-text authority port driver identity changed"
             )
+        if request.eligible_passage_ids is not None and (
+            result.candidate_overflow or len(result.rows) > request.limit
+        ):
+            raise Neo4jFullTextReadError(
+                "native full-text result exceeds its fixed bound"
+            )
+        if request.eligible_passage_ids is not None:
+            eligible = set(request.eligible_passage_ids)
+            if any(
+                type(row.get("passage_id")) is not str
+                or row["passage_id"] not in eligible
+                for row in result.rows
+            ):
+                raise Neo4jFullTextReadError(
+                    "native full-text result is outside its authority scope"
+                )
         return result
 
     def close(self) -> None:
