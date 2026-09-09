@@ -280,12 +280,18 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
             canonical_json_bytes({"package": negative_value}).decode(), {}
         )
     )
-    negative = negative_assessor(
-        version, _base_package(assessed_package), (source,), (acquisition,)
-    )
-    assert negative.assessment_records[0]["source_polarity"] == "NEGATED"
+    with pytest.raises(EvidencePackageError, match="semantic relation"):
+        negative_assessor(
+            version, _base_package(assessed_package), (source,), (acquisition,)
+        )
+    # Keep the downstream defence independent of the now-stricter producer.
+    negative = replace(assessed, assessment_records=tuple(
+        {**record, "source_polarity": "NEGATED"}
+        if record["record_type"] == "SEMANTIC_RELATION_EVIDENCE" else record
+        for record in assessed.assessment_records
+    ))
     with pytest.raises(NativeEvidenceHold, match="EVIDENCE_VALIDATION_HOLD"):
-        evidence_controller(negative_assessor).acquire_and_retain(
+        evidence_controller(lambda *_args: negative).acquire_and_retain(
             candidate_version_id=version.version_id,
             intake_receipt_id=acknowledgement.receipt_id,
             sources=(source,),
