@@ -105,7 +105,9 @@ class NativeRetrievalContinuation:
         retained = self._facts(revision_id).get("retrieval_binding")
         if retained is None:
             self._prepare(units, proof=proof)
-        subjects, rights_inventory = self._current_subjects(proof=proof)
+        subjects, document_inventory, rights_inventory = self._current_subjects(
+            proof=proof
+        )
         if retained is not None:
             binding = RetrievalInputBinding.from_value(retained)
             receipt = NativeRetrievalContextReceipt.from_bytes(binding.receipt_bytes)
@@ -116,7 +118,9 @@ class NativeRetrievalContinuation:
                 return binding
 
         rights_inventory_digest = digest_canonical(rights_inventory)
-        port = self._port_for(subjects, rights_inventory_digest)
+        port = self._port_for(
+            subjects, document_inventory, rights_inventory_digest
+        )
         binding = port.retrieve(lead, proof=proof)
         request = NativeRetrievalContextRequest.from_bytes(binding.request_bytes)
         receipt = NativeRetrievalContextReceipt.from_bytes(binding.receipt_bytes)
@@ -177,9 +181,6 @@ class NativeRetrievalContinuation:
                     })
                     continue
                 exclusions.pop(unit.ingest_id, None)
-                document = self._documents.require_document(receipt, proof=proof)
-                if document.revision_id != source_revision or document.generation_id != self._generation:
-                    raise ValueError("native passage continuation identity changed")
                 subjects.append(NativeRetrievalSubject(
                     source_revision, record["graph_root_id"], receipt,
                     unit.headline,
@@ -198,7 +199,23 @@ class NativeRetrievalContinuation:
                     stage=self._journal.progress[source_revision]["stage"],
                     facts={**facts, "retrieval_exclusions": exclusions},
                 )
-        return tuple(subjects), sorted(
+        retained_subjects = tuple(subjects)
+        document_inventory = self._documents.authenticated_document_inventory(
+            tuple(item.document_receipt for item in retained_subjects), proof=proof,
+        )
+        retained_by_event = self._documents.require_authenticated_inventory(
+            document_inventory,
+            tuple(item.document_receipt for item in retained_subjects),
+        )
+        if any(
+            retained_by_event[item.document_receipt.event_id].revision_id
+            != item.revision_id
+            or retained_by_event[item.document_receipt.event_id].generation_id
+            != self._generation
+            for item in retained_subjects
+        ):
+            raise ValueError("native passage continuation identity changed")
+        return retained_subjects, document_inventory, sorted(
             inventory, key=lambda item: (item["revision_id"], item["ingest_id"]),
         )
 

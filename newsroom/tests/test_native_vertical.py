@@ -314,7 +314,6 @@ def _install_boundaries(monkeypatch, counters):
                     "relation": "SEMANTICALLY_EQUIVALENT",
                 },
                 "localised_factual_expressions": [],
-                "named_entities": [],
                 "quotations": [],
                 "certainty": "CONFIRMED",
                 "originality_basis": "FACTUAL_REWRITE_REQUIRED",

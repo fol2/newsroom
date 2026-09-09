@@ -1025,6 +1025,52 @@ class NativeDocumentProjection(Protocol):
 
 
 _CONTEXT_READ_PORT_TOKEN = object()
+_DOCUMENT_INVENTORY_TOKEN = object()
+
+
+class _AuthenticatedDocumentInventory:
+    """Documents authenticated once for one synchronous retrieval call."""
+
+    __slots__ = ("_consumed", "_documents", "_owner", "_proof", "_receipts")
+
+    def __init__(
+        self,
+        owner: "NativeRetrievalDocuments",
+        values: tuple[tuple[NativeDocumentReceipt, NativePassageDocument], ...],
+        proof: AuthenticationProof,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _DOCUMENT_INVENTORY_TOKEN:
+            raise NativeRetrievalError("native document inventory is factory-owned")
+        self._owner = owner
+        self._proof = proof
+        self._consumed = False
+        self._receipts = tuple(receipt for receipt, _document in values)
+        self._documents = {
+            receipt.event_id: document for receipt, document in values
+        }
+
+    def inspect(
+        self,
+        owner: "NativeRetrievalDocuments",
+        receipts: tuple[NativeDocumentReceipt, ...],
+    ) -> dict[str, NativePassageDocument]:
+        if self._consumed or owner is not self._owner or receipts != self._receipts:
+            raise NativeRetrievalError("native document inventory binding differs")
+        return dict(self._documents)
+
+    def consume(
+        self,
+        owner: "NativeRetrievalDocuments",
+        receipts: tuple[NativeDocumentReceipt, ...],
+        proof: AuthenticationProof,
+    ) -> dict[str, NativePassageDocument]:
+        documents = self.inspect(owner, receipts)
+        if type(proof) is not AuthenticationProof or proof != self._proof:
+            raise NativeRetrievalError("native document inventory proof differs")
+        self._consumed = True
+        return documents
 
 
 class NativeRetrievalContextReadPort:
@@ -1083,6 +1129,48 @@ class NativeRetrievalDocuments:
     def require_document(self, receipt: NativeDocumentReceipt, *, proof: AuthenticationProof) -> NativePassageDocument:
         """Re-read one exact governed document and its embedding authority."""
         return self._read(receipt, proof)[0]
+
+    def authenticated_document_inventory(
+        self,
+        receipts: tuple[NativeDocumentReceipt, ...],
+        *,
+        proof: AuthenticationProof,
+    ) -> _AuthenticatedDocumentInventory:
+        """Authenticate an exact inventory for reuse only in the current call."""
+        if (
+            type(receipts) is not tuple
+            or not receipts
+            or len(receipts) > 4_096
+            or any(type(item) is not NativeDocumentReceipt for item in receipts)
+            or len({item.event_id for item in receipts}) != len(receipts)
+        ):
+            raise NativeRetrievalError("native document inventory differs")
+        return _AuthenticatedDocumentInventory(
+            self,
+            tuple((receipt, self._read(receipt, proof)[0]) for receipt in receipts),
+            proof,
+            _token=_DOCUMENT_INVENTORY_TOKEN,
+        )
+
+    def require_authenticated_inventory(
+        self,
+        inventory: _AuthenticatedDocumentInventory,
+        receipts: tuple[NativeDocumentReceipt, ...],
+    ) -> dict[str, NativePassageDocument]:
+        if type(inventory) is not _AuthenticatedDocumentInventory:
+            raise NativeRetrievalError("native document inventory type differs")
+        return inventory.inspect(self, receipts)
+
+    def consume_authenticated_inventory(
+        self,
+        inventory: _AuthenticatedDocumentInventory,
+        receipts: tuple[NativeDocumentReceipt, ...],
+        *,
+        proof: AuthenticationProof,
+    ) -> dict[str, NativePassageDocument]:
+        if type(inventory) is not _AuthenticatedDocumentInventory:
+            raise NativeRetrievalError("native document inventory type differs")
+        return inventory.consume(self, receipts, proof)
 
     def reproject(
         self, receipt: NativeDocumentReceipt, *, proof: AuthenticationProof,
@@ -1216,6 +1304,25 @@ class NativeRetrievalDocuments:
         if type(receipts) is not tuple or not receipts or len(receipts) > 4_096 or type(snapshot) is not FullTextProjectionSnapshot:
             raise NativeRetrievalError("native full-text authority inventory differs")
         documents = tuple(self._read(receipt, proof)[0] for receipt in receipts)
+        return self._fulltext_authority_view(documents, snapshot)
+
+    def fulltext_authority_view_from_inventory(
+        self,
+        inventory: _AuthenticatedDocumentInventory,
+        receipts: tuple[NativeDocumentReceipt, ...],
+        snapshot: FullTextProjectionSnapshot,
+    ) -> FullTextAuthorityView:
+        """Build a view from this call's authenticated immutable inventory."""
+        documents = self.require_authenticated_inventory(inventory, receipts)
+        return self._fulltext_authority_view(
+            tuple(documents[receipt.event_id] for receipt in receipts), snapshot,
+        )
+
+    def _fulltext_authority_view(
+        self,
+        documents: tuple[NativePassageDocument, ...],
+        snapshot: FullTextProjectionSnapshot,
+    ) -> FullTextAuthorityView:
         if (
             len({document.passage_id for document in documents}) != len(documents)
             or any(document.generation_id != str(snapshot.generation_id) for document in documents)
@@ -1489,6 +1596,7 @@ class NativeRetrievalPort:
         exact: SQLiteExactRetriever, fulltext: FullTextRetriever,
         increment4: Increment4Neo4jController, fulltext_view: FullTextAuthorityView,
         subjects: tuple[NativeRetrievalSubject, ...],
+        document_inventory: _AuthenticatedDocumentInventory,
         authority_scope_id: str, rights_inventory_digest: str,
         minimum_authority_watermark: int,
     ) -> None:
@@ -1500,12 +1608,28 @@ class NativeRetrievalPort:
             raise NativeRetrievalError("native retrieval subject inventory differs")
         if len({item.document_receipt.event_id for item in subjects}) != len(subjects):
             raise NativeRetrievalError("native retrieval subject documents repeat")
+        receipts = tuple(item.document_receipt for item in subjects)
+        document_by_event = documents.require_authenticated_inventory(
+            document_inventory, receipts,
+        )
+        if any(
+            document_by_event[item.document_receipt.event_id].revision_id
+            != item.revision_id
+            or document_by_event[item.document_receipt.event_id].generation_id
+            != str(fulltext_view.snapshot.generation_id)
+            for item in subjects
+        ):
+            raise NativeRetrievalError("native retrieval subject authority differs")
         _text(authority_scope_id, "native retrieval authority scope")
         _digest(rights_inventory_digest, "native retrieval rights inventory")
         if type(minimum_authority_watermark) is not int or minimum_authority_watermark < 0:
             raise NativeRetrievalError("native retrieval authority watermark differs")
         self._documents, self._exact, self._fulltext, self._increment4 = documents, exact, fulltext, increment4
         self._fulltext_view = fulltext_view
+        self._document_inventory: _AuthenticatedDocumentInventory | None = (
+            document_inventory
+        )
+        self._subject_receipts = receipts
         grouped: dict[str, list[NativeRetrievalSubject]] = {}
         for item in subjects:
             grouped.setdefault(item.revision_id, []).append(item)
@@ -1521,12 +1645,21 @@ class NativeRetrievalPort:
         from newsroom.discovery import NewsLead
         if type(lead) is not NewsLead:
             raise NativeRetrievalError("native retrieval Lead differs")
+        inventory = self._document_inventory
+        if inventory is None:
+            inventory = self._documents.authenticated_document_inventory(
+                self._subject_receipts, proof=proof,
+            )
+        document_by_event = self._documents.consume_authenticated_inventory(
+            inventory, self._subject_receipts, proof=proof,
+        )
+        self._document_inventory = None
         revision_id = str(lead.request.revision_id)
         subjects = self._subjects.get(revision_id)
         if subjects is None:
             raise NativeRetrievalHold("NATIVE_RETRIEVAL_DOCUMENT_MISSING")
         retained_subjects = tuple(
-            (subject, self._documents.require_document(subject.document_receipt, proof=proof))
+            (subject, document_by_event[subject.document_receipt.event_id])
             for subject in subjects
         )
         if any(document.revision_id != revision_id for _, document in retained_subjects):
@@ -1614,7 +1747,7 @@ class NativeRetrievalPort:
         by_passage: dict[str, NativeDocumentReceipt] = {}
         for items in self._subjects.values():
             for item in items:
-                retained = self._documents.require_document(item.document_receipt, proof=proof)
+                retained = document_by_event[item.document_receipt.event_id]
                 by_passage[retained.passage_id] = item.document_receipt
         used = {
             *(str(hit.passage_id) for hit in fulltext.hits if hit.passage_id is not None),
