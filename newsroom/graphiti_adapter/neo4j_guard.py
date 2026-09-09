@@ -158,6 +158,19 @@ class Neo4jMutationGuard:
 
         return await self._marker() is not None
 
+    async def recovered_ambiguous_marker_or_none(self) -> GuardMarker | None:
+        """Read and validate an exactly retained completed rollback marker."""
+
+        raw = await self._marker()
+        if raw is None:
+            return None
+        marker = self._bind_marker(raw)
+        return (
+            marker
+            if marker.state is GuardState.RECOVERED_AMBIGUOUS
+            else None
+        )
+
     async def _claim_marker(
         self,
     ) -> tuple[dict[str, object], bool, bool]:

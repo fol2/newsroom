@@ -2179,20 +2179,34 @@ def test_ingest_zero_proof_crosses_an_empty_recovered_attempt(
             subscription_cli_chat_not_cash_debited=True,
         )
     )
+    service.record_work_outcome(
+        envelope_id=first.envelope_id,
+        outcome="PRODUCER_INTERNAL_ERROR",
+        outcome_record_id="attempt-1-outcome",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=1),
+    )
     for attempt_number in (2, 3):
-        service.open_envelope(
-            WorkEnvelope.create(
-                cycle_id=f"cycle-769-attempt-{attempt_number}",
-                workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
-                admitted_at=T0 + timedelta(seconds=attempt_number),
-                admission_decision_id=None,
-                candidate_id=None,
-                hypothesis_digest=None,
-                evidence_package_digest=None,
-                ingest_id="ingest-769",
-                graphiti_attempt_id=f"ingest-769:{attempt_number}",
-            )
+        retained = WorkEnvelope.create(
+            cycle_id=f"cycle-769-attempt-{attempt_number}",
+            workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            admitted_at=T0 + timedelta(seconds=attempt_number),
+            admission_decision_id=None,
+            candidate_id=None,
+            hypothesis_digest=None,
+            evidence_package_digest=None,
+            ingest_id="ingest-769",
+            graphiti_attempt_id=f"ingest-769:{attempt_number}",
         )
+        service.open_envelope(retained)
+        if attempt_number == 2:
+            service.record_work_outcome(
+                envelope_id=retained.envelope_id,
+                outcome="RECOVERED_IMMUTABLE_COMPLETE",
+                outcome_record_id="attempt-2-outcome",
+                payload_digest=None,
+                terminal_at=T0 + timedelta(seconds=2),
+            )
     third = WorkEnvelope.create(
         cycle_id="cycle-769-attempt-3",
         workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
@@ -2212,12 +2226,84 @@ def test_ingest_zero_proof_crosses_an_empty_recovered_attempt(
         owner_stop_check=lambda: None,
     )
 
-    assert service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+    assert not service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
     assert observer.allows_fresh_zero_dispatch_retry(
         episode_uuid="ingest-769", attempt_number=3
     )
     assert not observer.allows_fresh_zero_dispatch_retry(
         episode_uuid="another-ingest", attempt_number=3
+    )
+
+
+@pytest.mark.parametrize(
+    ("settled", "unresolved", "expected"),
+    (
+        ((3,), (), True),
+        ((1, 2, 3), (), False),
+        ((3,), (2,), False),
+    ),
+)
+def test_completed_rollback_retry_binds_latest_settled_provider_attempt(
+    settled: tuple[int, ...],
+    unresolved: tuple[int, ...],
+    expected: bool,
+) -> None:
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-769-attempt-4",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=4),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-769",
+        graphiti_attempt_id="ingest-769:4",
+    )
+
+    retry_queries: list[dict[str, object]] = []
+
+    class Service:
+        def next_graphiti_internal_ordinal(self, **_values: object) -> int:
+            return 1
+
+        def graphiti_ingest_pre_dispatch_zero(self, **_values: object) -> bool:
+            return False
+
+        def graphiti_ingest_retry_evidence(self, **values: object) -> object:
+            retry_queries.append(values)
+            return SimpleNamespace(
+                zero_dispatch_attempts=(),
+                settled_provider_attempts=settled,
+                latest_settled_provider_attempt=(
+                    settled[-1] if settled else None
+                ),
+                unresolved_attempts=unresolved,
+            )
+
+    observer = GraphitiModelUsageObserver(
+        service=Service(),  # type: ignore[arg-type]
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=5),
+        provider_attempt_number=4,
+        owner_stop_check=lambda: None,
+    )
+
+    assert retry_queries == [
+        {"ingest_id": "ingest-769", "before_attempt_number": 4}
+    ]
+
+    assert (
+        observer.allows_fresh_completed_rollback_retry(
+            episode_uuid="ingest-769",
+            attempt_number=4,
+            prior_attempt_number=3,
+        )
+        is expected
+    )
+    assert not observer.allows_fresh_completed_rollback_retry(
+        episode_uuid="ingest-769",
+        attempt_number=4,
+        prior_attempt_number=2,
     )
 
 

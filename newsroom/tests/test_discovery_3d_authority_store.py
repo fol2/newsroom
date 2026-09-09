@@ -115,6 +115,88 @@ def test_governing_producer_read_port_returns_exact_ordered_closure(
         connection.close()
 
 
+def test_governing_producer_read_port_uses_exact_scoped_event_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _discovery_store as private
+
+    database = tmp_path / "scoped-events.sqlite3"
+    admitted = _seed_and_admit(database)
+    connection = _transaction_connection(database)
+    event_ids: list[str] = []
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+    monkeypatch.setattr(
+        private._DiscoveryAuthorityStore,
+        "_validate_relational_invariants",
+        lambda *_: pytest.fail("scoped Discovery read used global relations"),
+    )
+    monkeypatch.setattr(
+        private._DiscoveryAuthorityStore,
+        "_validate_immutable_records",
+        lambda *_: pytest.fail("scoped Discovery read used global records"),
+    )
+    try:
+        port = _create_discovery_governing_producer_read_port(
+            connection,
+            validate_retained_event=event_ids.append,
+        )
+        assert port.require_current_governing_producers((LEAD_ID,)) == (
+            (admitted.lead, admitted.signal, admitted.gate),
+        )
+        expected = {
+            str(row[0])
+            for table in (
+                "discovery_signals",
+                "discovery_gate_decisions",
+                "news_leads",
+                "discovery_watch_conditions",
+                "lead_disposition_decisions",
+            )
+            for row in connection.execute(
+                f"SELECT authority_event_id FROM {table}"
+            )
+        }
+        assert set(event_ids) == expected
+        traced = " ".join(statements).lower()
+        assert "where e.aggregate_type=" in traced
+        assert "pragma foreign_key_check" in traced
+        assert "pragma foreign_key_check()" not in traced
+    finally:
+        connection.set_trace_callback(None)
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_governing_producer_read_port_propagates_exact_event_failure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "exact-event-failure.sqlite3"
+    _seed_and_admit(database)
+    connection = _transaction_connection(database)
+    signal_event_id = str(
+        connection.execute(
+            "SELECT authority_event_id FROM discovery_signals WHERE signal_id=?",
+            (str(SIGNAL_ID),),
+        ).fetchone()[0]
+    )
+
+    def validate(event_id: str) -> None:
+        if event_id == signal_event_id:
+            raise AuthorityPersistenceError("exact Discovery event differs")
+
+    try:
+        port = _create_discovery_governing_producer_read_port(
+            connection,
+            validate_retained_event=validate,
+        )
+        with pytest.raises(DiscoveryContractError, match="transaction read failed"):
+            port.require_current_governing_producers((LEAD_ID,))
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
 def test_governing_producer_read_port_rejects_currentness_and_offline_rewrite(
     tmp_path: Path,
 ) -> None:

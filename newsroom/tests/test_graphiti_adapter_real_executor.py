@@ -2077,6 +2077,58 @@ def test_completed_guard_probe_is_read_only_when_marker_is_absent() -> None:
     assert asyncio.run(guard.completed_raw_or_none()) is None
 
 
+def test_recovered_guard_probe_validates_exact_attempt_without_mutation() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        GuardState,
+        Neo4jMutationGuard,
+    )
+
+    marker = {
+        "state": "RECOVERED_AMBIGUOUS",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 3,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:3",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+    }
+    queries: list[str] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            queries.append(query)
+            assert params == {"episode_uuid": "episode-id:attempt:3"}
+            assert routing_ == "w"
+            return ([{"marker": marker}], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        marker_episode_uuid="episode-id:attempt:3",
+        attempt_number=3,
+        input_digest="sha256:" + "0" * 64,
+    )
+    retained = asyncio.run(guard.recovered_ambiguous_marker_or_none())
+
+    assert retained is not None
+    assert retained.state is GuardState.RECOVERED_AMBIGUOUS
+    assert len(queries) == 1
+    assert "MATCH (m:NewsroomIngestMarker" in queries[0]
+    assert "SET " not in queries[0]
+
+    marker["attempt_number"] = 2
+    with pytest.raises(GuardError, match="attempt marker identity differs"):
+        asyncio.run(guard.recovered_ambiguous_marker_or_none())
+
+
 def test_guard_completion_checks_the_committed_transition() -> None:
     from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
 
@@ -2319,7 +2371,25 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     async def completed_raw_or_none(
         guard: object,
     ) -> dict[str, object] | None:
-        return markers.get(guard._marker_episode_uuid)
+        retained = markers.get(guard._marker_episode_uuid)
+        if retained is not None and retained.get("state") in {
+            "PENDING",
+            "RECOVERED_AMBIGUOUS",
+        }:
+            return None
+        return retained
+
+    async def recovered_ambiguous_marker_or_none(
+        guard: object,
+    ) -> GuardMarker | None:
+        retained = markers.get(guard._marker_episode_uuid)
+        if retained is None or retained.get("state") != "RECOVERED_AMBIGUOUS":
+            return None
+        return GuardMarker(
+            state=GuardState.RECOVERED_AMBIGUOUS,
+            attempt_number=guard._attempt_number,
+            input_digest=guard._input_digest,
+        )
 
     async def begin(guard: object) -> GuardMarker:
         retained = markers.get(guard._marker_episode_uuid)
@@ -2354,6 +2424,11 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     monkeypatch.setattr(real.Neo4jMutationGuard, "marker_exists", marker_exists)
     monkeypatch.setattr(
         real.Neo4jMutationGuard, "completed_raw_or_none", completed_raw_or_none
+    )
+    monkeypatch.setattr(
+        real.Neo4jMutationGuard,
+        "recovered_ambiguous_marker_or_none",
+        recovered_ambiguous_marker_or_none,
     )
     monkeypatch.setattr(real.Neo4jMutationGuard, "begin", begin)
     monkeypatch.setattr(real.Neo4jMutationGuard, "complete", complete)
@@ -2445,15 +2520,32 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     configuration, revision = _combined_runtime_inputs("Body", "episode-id")
 
     class Proof:
-        def __init__(self, allowed: bool) -> None:
+        def __init__(self, allowed: bool, settled: bool) -> None:
             self.allowed = allowed
+            self.settled = settled
 
         def allows_fresh_zero_dispatch_retry(
             self, *, episode_uuid: str, attempt_number: int
         ) -> bool:
             return self.allowed and episode_uuid == "episode-id" and attempt_number == 3
 
-    async def run(attempt_number: int, *, allowed: bool) -> None:
+        def allows_fresh_completed_rollback_retry(
+            self,
+            *,
+            episode_uuid: str,
+            attempt_number: int,
+            prior_attempt_number: int,
+        ) -> bool:
+            return (
+                self.settled
+                and episode_uuid == "episode-id"
+                and attempt_number > 3
+                and prior_attempt_number == attempt_number - 1
+            )
+
+    async def run(
+        attempt_number: int, *, allowed: bool, settled: bool = False
+    ) -> None:
         await real._add_episode(
             api_key="key",
             password="password",
@@ -2467,8 +2559,8 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             restore_result=lambda raw, _telemetry: restored.append(dict(raw)),
             configuration=configuration,
             revision=revision,
-            invocation_observer=Proof(allowed),
-            retry_snapshot_is_failed=lambda raw: raw == {"failure": "attempt-1"},
+            invocation_observer=Proof(allowed, settled),
+            retry_snapshot_is_failed=lambda raw: "failure" in raw,
         )
 
     asyncio.run(run(2, allowed=False))
@@ -2489,6 +2581,22 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
         with pytest.raises(real.AmbiguousEpisodeEffect):
             asyncio.run(run(4, allowed=False))
         assert provider_calls == 1
+
+    markers["episode-id:attempt:3"] = {"state": "RECOVERED_AMBIGUOUS"}
+    with pytest.raises(real.AmbiguousEpisodeEffect):
+        asyncio.run(run(4, allowed=False, settled=False))
+    assert provider_calls == 1
+    asyncio.run(run(4, allowed=False, settled=True))
+    assert provider_calls == 2
+    assert markers["episode-id:attempt:4"] == {"success": "attempt-3"}
+
+    markers["episode-id:attempt:4"] = {
+        "failure": "attempt-4",
+        "provider_attempt_number": 4,
+    }
+    asyncio.run(run(5, allowed=False, settled=True))
+    assert provider_calls == 3
+    assert markers["episode-id:attempt:5"] == {"success": "attempt-3"}
 
 
 def test_attempt_marker_keeps_the_stable_source_episode_identity() -> None:

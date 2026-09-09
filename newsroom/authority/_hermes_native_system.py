@@ -44,6 +44,7 @@ from ._event_hypothesis_lineage_system import (
 from ._event_hypothesis_relationship_system import (
     _RelationshipEventStore,
     _create_event_hypothesis_relationship_read_port,
+    _verify_relationship_event_coverage,
 )
 from ._event_hypothesis_system import _HypothesisStore
 from ._event_system import _ReadBoundary
@@ -412,7 +413,9 @@ def open_hermes_native_authority_system(
         relationship_store._command_service = service
         with operation_lock, relationship_store._transaction():
             relationship_store._adopt()
-            try: relationship_store._verify_relationships()
+            try:
+                _verify_relationship_event_coverage(connection)
+                relationship_store._verify_relationships()
             finally: relationship_store._release()
 
         lineage_store = _share_store(_SharedLineageStore, root)
@@ -423,7 +426,9 @@ def open_hermes_native_authority_system(
             current_candidate_citations=current_candidate_citations,
         )
         lineage_store._service = service
-        with operation_lock, lineage_store._transaction(): lineage_store._verify()
+        with operation_lock, lineage_store._transaction():
+            lineage_store._verify_global_event_coverage()
+            lineage_store._verify()
 
         candidate_store = _share_store(_SharedCandidateStore, root)
         candidate_store._retrieval = retrieval_authority
@@ -438,7 +443,9 @@ def open_hermes_native_authority_system(
         )
         candidate_store._dispositions = dispositions
         candidate_store._service = service
-        with operation_lock, candidate_store._transaction(): candidate_store._verify()
+        with operation_lock, candidate_store._transaction():
+            candidate_store._verify_global_event_coverage()
+            candidate_store._verify()
 
         transaction_candidate_port = _create_story_candidate_read_port(
             connection,

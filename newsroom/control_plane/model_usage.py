@@ -43,6 +43,10 @@ CONSERVATIVE_DISPOSITION_SCHEMA_VERSION = (
 CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
     "newsroom.model-usage.conservative-disposition-authority.v2"
 )
+NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
+    "newsroom.model-usage.native-conservative-disposition-authority.v1"
+)
+NATIVE_AUTONOMOUS_USAGE_SCOPE = "NATIVE_AUTONOMOUS_INTERNAL_PIPELINE"
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
     ("model-usage-v2", "newsroom.model-usage.v2"),
@@ -94,6 +98,54 @@ class UsageStatus(StrEnum):
     UNREPORTED = "UNREPORTED"
     AMBIGUOUS = "AMBIGUOUS"
     INVALID = "INVALID"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiIngestRetryEvidence:
+    """Settled model-use evidence grouped by durable Graphiti attempt."""
+
+    attempt_numbers: tuple[int, ...]
+    zero_dispatch_attempts: tuple[int, ...]
+    settled_provider_attempts: tuple[int, ...]
+    latest_settled_provider_attempt: int | None
+    unresolved_attempts: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        groups = (
+            self.attempt_numbers,
+            self.zero_dispatch_attempts,
+            self.settled_provider_attempts,
+            self.unresolved_attempts,
+        )
+        if any(
+            values != tuple(sorted(set(values)))
+            or any(type(value) is not int or value <= 0 for value in values)
+            for values in groups
+        ):
+            raise ModelUsageIntegrityError("Graphiti retry attempt evidence differs")
+        attempts = set(self.attempt_numbers)
+        classified = (
+            set(self.zero_dispatch_attempts)
+            | set(self.settled_provider_attempts)
+            | set(self.unresolved_attempts)
+        )
+        zero = set(self.zero_dispatch_attempts)
+        settled = set(self.settled_provider_attempts)
+        unresolved = set(self.unresolved_attempts)
+        if (
+            not classified <= attempts
+            or zero & settled
+            or zero & unresolved
+            or settled & unresolved
+        ):
+            raise ModelUsageIntegrityError("Graphiti retry classification differs")
+        expected_latest = (
+            self.settled_provider_attempts[-1]
+            if self.settled_provider_attempts
+            else None
+        )
+        if self.latest_settled_provider_attempt != expected_latest:
+            raise ModelUsageIntegrityError("Graphiti retry latest attempt differs")
 
 
 _GRAPHITI_COMPLETED_USEFUL_OUTCOMES = frozenset(
@@ -418,6 +470,11 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         policy_breach_clause = (
             f"({policy_breach_clause} AND NOT ({canary_non_success_leaf}))"
         )
+    native_disposed = _native_disposed_invocation_ids(connection)
+    native_bindings = " OR ".join("t.invocation_id=?" for _ in native_disposed)
+    native_clause = (
+        f"AND NOT ({native_bindings}) " if native_bindings else ""
+    )
     rows = connection.execute(
         "SELECT a.route FROM model_invocation_terminals t "
         "JOIN model_invocation_allocations a "
@@ -430,15 +487,307 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "FROM model_usage_conservative_dispositions d "
         "WHERE d.invocation_id=t.invocation_id "
         f"AND ({approved_bindings})) "
+        f"{native_clause}"
         f"{canary_runtime_leaf_exclusion}"
         ") "
         f"OR {policy_breach_clause} "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "
         "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)",
-        parameters,
+        parameters + tuple(sorted(native_disposed)),
     ).fetchall()
     return {_canonical_circuit_route(str(row[0])) for row in rows}
+
+
+def _policy_for_allocation(
+    connection: sqlite3.Connection,
+    allocation: InvocationAllocation,
+) -> InvocationEfficiencyPolicy:
+    row = connection.execute(
+        "SELECT canonical_digest,policy_id,version,workload_class,provider,route,"
+        "model,qualified,record_json FROM model_invocation_policies "
+        "WHERE canonical_digest=?",
+        (allocation.invocation_policy_digest,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("retained Graphiti policy is absent")
+    policy = _policy_from_record(_object(row[8]))
+    if tuple(row[index] for index in range(8)) != (
+        policy.canonical_digest,
+        policy.policy_id,
+        policy.version,
+        policy.workload_class.value,
+        policy.provider,
+        policy.route,
+        policy.model,
+        int(policy.qualified),
+    ) or (
+        policy.canonical_digest != allocation.invocation_policy_digest
+        or policy.workload_class is not allocation.workload_class
+        or policy.provider != allocation.provider
+        or policy.route != allocation.route
+        or policy.model != allocation.model
+    ):
+        raise ModelUsageIntegrityError("retained Graphiti policy binding differs")
+    return policy
+
+
+def _is_exact_pre_dispatch_zero(terminal: InvocationTerminal) -> bool:
+    components = terminal.components
+    return bool(
+        terminal.usage_status is UsageStatus.REPORTED
+        and terminal.pre_dispatch_zero_proved is True
+        and terminal.dispatch_at is None
+        and terminal.policy_breach is None
+        and components.provenance == "CLI_DERIVED"
+        and components.total_tokens == 0
+        and all(
+            value in {None, 0}
+            for value in (
+                components.input_tokens,
+                components.output_tokens,
+                components.cached_read_tokens,
+                components.cached_write_tokens,
+                components.reasoning_tokens,
+                components.context_tokens,
+            )
+        )
+    )
+
+
+def _has_exact_dispatch(
+    connection: sqlite3.Connection, terminal: InvocationTerminal
+) -> bool:
+    rows = connection.execute(
+        "SELECT observation_digest,observed_at,state,evidence_digest,record_json "
+        "FROM model_transport_observations WHERE invocation_id=? "
+        "ORDER BY observed_at,observation_digest",
+        (terminal.invocation_id,),
+    ).fetchall()
+    matched = False
+    for row in rows:
+        record = _object(row[4])
+        unsigned = dict(record)
+        retained_digest = unsigned.pop("observation_digest", None)
+        if (
+            retained_digest != row[0]
+            or digest_canonical(unsigned) != retained_digest
+            or (
+                record.get("invocation_id"),
+                record.get("observed_at"),
+                record.get("state"),
+                record.get("evidence_digest"),
+            )
+            != (terminal.invocation_id, row[1], row[2], row[3])
+        ):
+            raise ModelUsageIntegrityError("retained transport observation differs")
+        matched |= row[2] == "DISPATCH_STARTED"
+    return matched
+
+
+def _require_reported_telemetry(
+    connection: sqlite3.Connection, terminal: InvocationTerminal
+) -> None:
+    if terminal.components.provenance == "CLI_DERIVED":
+        return
+    rows = connection.execute(
+        "SELECT telemetry_record_digest,invocation_id,provider_telemetry_digest,"
+        "record_json FROM model_provider_telemetry WHERE invocation_id=?",
+        (terminal.invocation_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ModelUsageIntegrityError("reported provider telemetry differs")
+    row = rows[0]
+    record = _object(row[3])
+    if (
+        digest_canonical(record) != row[0]
+        or (row[1], row[2])
+        != (record.get("invocation_id"), record.get("provider_telemetry_digest"))
+        or record.get("invocation_id") != terminal.invocation_id
+        or record.get("provider_telemetry_digest")
+        != terminal.provider_telemetry_digest
+        or digest_canonical(record.get("provider_telemetry")) != row[2]
+        or terminal.raw_telemetry_pointer is None
+    ):
+        raise ModelUsageIntegrityError("reported provider telemetry differs")
+
+
+def _valid_native_disposition(
+    connection: sqlite3.Connection,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+) -> dict[str, object] | None:
+    row = connection.execute(
+        "SELECT disposition_digest,terminal_digest,allocation_digest,policy_digest,"
+        "approved_plan_digest,authority_digest,approved_by,approval_reference,"
+        "approved_at,observed_at,usage_status,record_json "
+        "FROM model_usage_conservative_dispositions WHERE invocation_id=?",
+        (allocation.invocation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = _object(row[11])
+    unsigned = dict(record)
+    retained_digest = unsigned.pop("disposition_digest", None)
+    if record.get("authority_scope") != NATIVE_AUTONOMOUS_USAGE_SCOPE:
+        return None
+    policy = _policy_for_allocation(connection, allocation)
+    expected_scope = _native_disposition_authority(
+        allocation=allocation,
+        terminal=terminal,
+        policy=policy,
+        envelope=_native_envelope(connection, allocation),
+    )
+    scope_digest = digest_canonical(expected_scope)
+    if (
+        retained_digest != row[0]
+        or digest_canonical(unsigned) != retained_digest
+        or tuple(row[index] for index in range(1, 11))
+        != (
+            terminal.terminal_digest,
+            allocation.canonical_digest,
+            policy.canonical_digest,
+            scope_digest,
+            scope_digest,
+            NATIVE_AUTONOMOUS_USAGE_SCOPE,
+            NATIVE_AUTONOMOUS_USAGE_SCOPE,
+            record.get("observed_at"),
+            record.get("observed_at"),
+            UsageStatus.ESTIMATED.value,
+        )
+        or record.get("schema_version")
+        != CONSERVATIVE_DISPOSITION_SCHEMA_VERSION
+        or record.get("invocation_id") != allocation.invocation_id
+        or record.get("terminal_digest") != terminal.terminal_digest
+        or record.get("allocation_digest") != allocation.canonical_digest
+        or record.get("policy_digest") != policy.canonical_digest
+        or record.get("native_scope_digest") != scope_digest
+        or record.get("authority_digest") != scope_digest
+        or _instant(str(record.get("observed_at"))) < terminal.observed_at
+        or record.get("usage_status") != UsageStatus.ESTIMATED.value
+        or record.get("components")
+        != UsageComponents(
+            total_tokens=policy.max_total_tokens,
+            provenance="BOUNDED_ESTIMATE",
+        ).as_record()
+        or record.get("estimate_policy_digest") != policy.canonical_digest
+        or record.get("exact_usage_remains_unknown") is not True
+        or record.get("provider_dispatch_preserved") is not True
+        or record.get("unknown_spend_released") is not False
+    ):
+        raise ModelUsageIntegrityError("native conservative disposition differs")
+    return record
+
+
+def _native_disposed_invocation_ids(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute(
+        "SELECT invocation_id FROM model_usage_conservative_dispositions "
+        "WHERE json_extract(record_json,'$.authority_scope')=?",
+        (NATIVE_AUTONOMOUS_USAGE_SCOPE,),
+    ).fetchall()
+    result: set[str] = set()
+    for row in rows:
+        invocation_id = str(row[0])
+        allocation_row = connection.execute(
+            "SELECT record_json FROM model_invocation_allocations "
+            "WHERE invocation_id=?",
+            (invocation_id,),
+        ).fetchone()
+        terminal_row = connection.execute(
+            "SELECT record_json FROM model_invocation_terminals "
+            "WHERE invocation_id=?",
+            (invocation_id,),
+        ).fetchone()
+        if allocation_row is None or terminal_row is None:
+            raise ModelUsageIntegrityError("native conservative disposition is orphaned")
+        allocation = _allocation_from_record(_object(allocation_row[0]))
+        terminal = _terminal_from_record(_object(terminal_row[0]))
+        if _valid_native_disposition(
+            connection, allocation=allocation, terminal=terminal
+        ) is None:
+            raise ModelUsageIntegrityError("native conservative disposition differs")
+        result.add(invocation_id)
+    return result
+
+
+def _native_envelope(
+    connection: sqlite3.Connection, allocation: InvocationAllocation
+) -> WorkEnvelope:
+    row = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,admitted_at,canonical_digest,"
+        "record_json FROM model_work_envelopes WHERE envelope_id=?",
+        (allocation.envelope_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("native conservative envelope is absent")
+    envelope = _envelope_from_record(_object(row[5]))
+    if tuple(row[index] for index in range(5)) != (
+        envelope.envelope_id,
+        envelope.cycle_id,
+        envelope.workload_class.value,
+        _utc_text(envelope.admitted_at),
+        envelope.canonical_digest,
+    ) or (
+        envelope.envelope_id != allocation.envelope_id
+        or envelope.cycle_id != allocation.cycle_id
+        or envelope.workload_class is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
+        or envelope.ingest_id is None
+    ):
+        raise ModelUsageIntegrityError("native conservative envelope binding differs")
+    prefix, separator, suffix = str(envelope.graphiti_attempt_id or "").rpartition(":")
+    if (
+        separator != ":"
+        or prefix != envelope.ingest_id
+        or not suffix.isdigit()
+        or int(suffix) <= 0
+    ):
+        raise ModelUsageIntegrityError("native conservative attempt binding differs")
+
+    # The native journal reconstructs canonical LANDED units and their exact
+    # source-observation authority before this controller-scoped disposition.
+    from newsroom.control_plane.native_progress import NativeRevisionJournal
+
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
+    ).fetchone() is None:
+        raise ModelUsageIntegrityError(
+            "native conservative disposition lacks a landed source observation"
+        )
+    journal = NativeRevisionJournal(connection)
+    if not any(
+        unit.ingest_id == envelope.ingest_id
+        and unit.proving_run_id.startswith("native-source:")
+        and unit.authority is not None
+        for units in journal.units.values()
+        for unit in units
+    ):
+        raise ModelUsageIntegrityError(
+            "native conservative disposition lacks a landed source observation"
+        )
+    return envelope
+
+
+def _native_disposition_authority(
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    policy: InvocationEfficiencyPolicy,
+    envelope: WorkEnvelope,
+) -> dict[str, object]:
+    return {
+        "schema_version": (
+            NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION
+        ),
+        "authority_scope": NATIVE_AUTONOMOUS_USAGE_SCOPE,
+        "ingest_id": envelope.ingest_id,
+        "graphiti_attempt_id": envelope.graphiti_attempt_id,
+        "invocation_id": allocation.invocation_id,
+        "terminal_digest": terminal.terminal_digest,
+        "allocation_digest": allocation.canonical_digest,
+        "policy_digest": policy.canonical_digest,
+        "maximum_total_tokens": policy.max_total_tokens,
+    }
 
 
 def _non_negative(value: int | None, *, field: str) -> int | None:
@@ -1844,19 +2193,45 @@ class ModelUsageService:
     def graphiti_ingest_pre_dispatch_zero(self, *, ingest_id: str) -> bool:
         """Prove every retained model allocation for one ingest stopped locally."""
 
+        evidence, allocation_count = self._graphiti_ingest_retry_evidence(
+            ingest_id=ingest_id
+        )
+        return bool(
+            allocation_count
+            and not evidence.unresolved_attempts
+            and not evidence.settled_provider_attempts
+            and evidence.zero_dispatch_attempts
+        )
+
+    def graphiti_ingest_retry_evidence(
+        self, *, ingest_id: str, before_attempt_number: int | None = None
+    ) -> GraphitiIngestRetryEvidence:
+        """Return exact settled/zero/unresolved evidence for retained attempts."""
+
+        evidence, _allocation_count = self._graphiti_ingest_retry_evidence(
+            ingest_id=ingest_id, before_attempt_number=before_attempt_number
+        )
+        return evidence
+
+    def _graphiti_ingest_retry_evidence(
+        self, *, ingest_id: str, before_attempt_number: int | None = None
+    ) -> tuple[GraphitiIngestRetryEvidence, int]:
         _token(ingest_id, field="Graphiti ingest id")
+        if before_attempt_number is not None and (
+            type(before_attempt_number) is not int or before_attempt_number <= 0
+        ):
+            raise ModelUsageIntegrityError("Graphiti retry boundary differs")
         connection = self._connection()
         try:
             envelope_rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
-                "ORDER BY envelope_id",
+                "ORDER BY envelope_id"
             ).fetchall()
             envelopes: dict[str, WorkEnvelope] = {}
-            envelope_ids: set[str] = set()
+            attempts: dict[str, int] = {}
             for row in envelope_rows:
-                record = _object(row[5])
-                envelope = _envelope_from_record(record)
+                envelope = _envelope_from_record(_object(row[5]))
                 if tuple(row[index] for index in range(5)) != (
                     envelope.envelope_id,
                     envelope.cycle_id,
@@ -1868,39 +2243,72 @@ class ModelUsageService:
                         "retained Graphiti envelope binding differs"
                     )
                 envelopes[envelope.envelope_id] = envelope
-                if envelope.ingest_id == ingest_id:
-                    attempt_prefix, separator, attempt_suffix = str(
-                        envelope.graphiti_attempt_id or ""
-                    ).rpartition(":")
-                    if (
-                        envelope.workload_class
-                        not in {
-                            WorkloadClass.GRAPHITI_CHAT_PRIMARY,
-                            WorkloadClass.GRAPHITI_CHAT_FALLBACK,
-                            WorkloadClass.GRAPHITI_EMBEDDING,
-                        }
-                        or separator != ":"
-                        or attempt_prefix != ingest_id
-                        or not attempt_suffix.isdigit()
-                        or int(attempt_suffix) <= 0
-                    ):
-                        raise ModelUsageIntegrityError(
-                            "retained Graphiti envelope binding differs"
-                        )
-                    envelope_ids.add(envelope.envelope_id)
+                if envelope.ingest_id != ingest_id:
+                    continue
+                prefix, separator, suffix = str(
+                    envelope.graphiti_attempt_id or ""
+                ).rpartition(":")
+                if (
+                    envelope.workload_class
+                    not in {
+                        WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                        WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+                        WorkloadClass.GRAPHITI_EMBEDDING,
+                    }
+                    or separator != ":"
+                    or prefix != ingest_id
+                    or not suffix.isdigit()
+                    or int(suffix) <= 0
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti envelope binding differs"
+                    )
+                attempt = int(suffix)
+                if attempt in attempts.values():
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti attempt identity is duplicated"
+                    )
+                attempts[envelope.envelope_id] = attempt
+
+            work_outcomes: set[str] = set()
+            for row in connection.execute(
+                "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+                "FROM model_work_outcomes ORDER BY envelope_id"
+            ):
+                if str(row[1]) not in attempts:
+                    continue
+                record = _object(row[4])
+                unsigned = dict(record)
+                retained_digest = unsigned.pop("outcome_digest", None)
+                if (
+                    retained_digest != row[0]
+                    or digest_canonical(unsigned) != retained_digest
+                    or (row[1], row[2], row[3])
+                    != (
+                        record.get("envelope_id"),
+                        record.get("outcome"),
+                        record.get("terminal_at"),
+                    )
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti work outcome binding differs"
+                    )
+                work_outcomes.add(str(row[1]))
+
             allocation_rows = connection.execute(
                 "SELECT a.invocation_id,a.envelope_id,a.cycle_id,a.leaf_ordinal,"
                 "a.workload_class,a.policy_digest,a.provider,a.route,a.model,"
                 "a.request_digest,a.parent_invocation_id,a.allocated_at,"
                 "a.canonical_digest,a.record_json,t.invocation_id,t.usage_status,"
                 "t.outcome,t.failure_class,t.completed_at,t.terminal_digest,"
-                "t.record_json "
-                "FROM model_invocation_allocations a "
+                "t.record_json FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=a.invocation_id "
-                "ORDER BY a.envelope_id,a.leaf_ordinal",
+                "ORDER BY a.envelope_id,a.leaf_ordinal"
             ).fetchall()
-            ingest_allocation_rows: list[sqlite3.Row | tuple[object, ...]] = []
+            by_attempt: dict[
+                int, list[tuple[InvocationAllocation, InvocationTerminal | None]]
+            ] = {attempt: [] for attempt in attempts.values()}
             for row in allocation_rows:
                 allocation = _allocation_from_record(_object(row[13]))
                 if tuple(row[index] for index in range(13)) != (
@@ -1922,21 +2330,13 @@ class ModelUsageService:
                         "retained Graphiti allocation binding differs"
                     )
                 envelope = envelopes.get(allocation.envelope_id)
-                if (
-                    envelope is None
-                    or allocation.cycle_id != envelope.cycle_id
-                ):
+                if envelope is None or allocation.cycle_id != envelope.cycle_id:
                     raise ModelUsageIntegrityError(
                         "retained Graphiti allocation envelope differs"
                     )
-                if allocation.envelope_id in envelope_ids:
-                    ingest_allocation_rows.append(row)
-            if not envelope_ids:
-                return False
-            if not ingest_allocation_rows:
-                return False
-            for row in ingest_allocation_rows:
-                allocation = _allocation_from_record(_object(row[13]))
+                attempt = attempts.get(allocation.envelope_id)
+                if attempt is None:
+                    continue
                 if allocation.workload_class not in {
                     WorkloadClass.GRAPHITI_CHAT_PRIMARY,
                     WorkloadClass.GRAPHITI_CHAT_FALLBACK,
@@ -1945,43 +2345,97 @@ class ModelUsageService:
                     raise ModelUsageIntegrityError(
                         "retained Graphiti allocation workload differs"
                     )
-                if row[14] is None or row[20] is None:
-                    return False
-                terminal = _terminal_from_record(_object(row[20]))
-                components = terminal.components
-                if tuple(row[index] for index in range(14, 20)) != (
-                    terminal.invocation_id,
-                    terminal.usage_status.value,
-                    terminal.outcome,
-                    terminal.failure_class,
-                    _utc_text(terminal.completed_at),
-                    terminal.terminal_digest,
-                ):
-                    raise ModelUsageIntegrityError(
-                        "retained Graphiti terminal binding differs"
-                    )
-                if (
-                    terminal.invocation_id != allocation.invocation_id
-                    or terminal.usage_status is not UsageStatus.REPORTED
-                    or terminal.pre_dispatch_zero_proved is not True
-                    or terminal.dispatch_at is not None
-                    or terminal.policy_breach is not None
-                    or components.provenance != "CLI_DERIVED"
-                    or components.total_tokens != 0
-                    or any(
-                        value not in {None, 0}
-                        for value in (
-                            components.input_tokens,
-                            components.output_tokens,
-                            components.cached_read_tokens,
-                            components.cached_write_tokens,
-                            components.reasoning_tokens,
-                            components.context_tokens,
+                terminal = None
+                if row[14] is not None and row[20] is not None:
+                    terminal = _terminal_from_record(_object(row[20]))
+                    if tuple(row[index] for index in range(14, 20)) != (
+                        terminal.invocation_id,
+                        terminal.usage_status.value,
+                        terminal.outcome,
+                        terminal.failure_class,
+                        _utc_text(terminal.completed_at),
+                        terminal.terminal_digest,
+                    ) or terminal.invocation_id != allocation.invocation_id:
+                        raise ModelUsageIntegrityError(
+                            "retained Graphiti terminal binding differs"
                         )
+                by_attempt[attempt].append((allocation, terminal))
+
+            selected_attempts = {
+                envelope_id: attempt
+                for envelope_id, attempt in attempts.items()
+                if before_attempt_number is None or attempt < before_attempt_number
+            }
+            zero: list[int] = []
+            settled: list[int] = []
+            unresolved: list[int] = []
+            for envelope_id, attempt in sorted(
+                selected_attempts.items(), key=lambda item: item[1]
+            ):
+                leaves = by_attempt[attempt]
+                if envelope_id not in work_outcomes:
+                    unresolved.append(attempt)
+                    continue
+                if not leaves:
+                    # A terminal controller refusal has no provider allocation.
+                    # It counts toward raw attempts but is not proof of a zero leaf.
+                    continue
+                attempt_zero = True
+                attempt_dispatched = False
+                attempt_unresolved = False
+                for allocation, terminal in leaves:
+                    if terminal is None:
+                        attempt_unresolved = True
+                        continue
+                    policy = _policy_for_allocation(connection, allocation)
+                    self._validate_terminal(
+                        terminal,
+                        allocation.workload_class,
+                        policy,
+                        requested_max_output_tokens=allocation.max_output_tokens,
                     )
-                ):
-                    return False
-            return True
+                    if _is_exact_pre_dispatch_zero(terminal):
+                        continue
+                    attempt_zero = False
+                    if terminal.dispatch_at is None or not _has_exact_dispatch(
+                        connection, terminal
+                    ):
+                        attempt_unresolved = True
+                        continue
+                    if terminal.usage_status is UsageStatus.REPORTED:
+                        _require_reported_telemetry(connection, terminal)
+                        attempt_dispatched = True
+                    elif _valid_native_disposition(
+                        connection,
+                        allocation=allocation,
+                        terminal=terminal,
+                    ) is not None:
+                        attempt_dispatched = True
+                    else:
+                        attempt_unresolved = True
+                if attempt_unresolved:
+                    unresolved.append(attempt)
+                elif attempt_zero:
+                    zero.append(attempt)
+                elif attempt_dispatched:
+                    settled.append(attempt)
+                else:
+                    unresolved.append(attempt)
+
+            attempt_numbers = tuple(sorted(selected_attempts.values()))
+            settled_attempts = tuple(settled)
+            return (
+                GraphitiIngestRetryEvidence(
+                    attempt_numbers=attempt_numbers,
+                    zero_dispatch_attempts=tuple(zero),
+                    settled_provider_attempts=settled_attempts,
+                    latest_settled_provider_attempt=(
+                        settled_attempts[-1] if settled_attempts else None
+                    ),
+                    unresolved_attempts=tuple(unresolved),
+                ),
+                sum(len(leaves) for leaves in by_attempt.values()),
+            )
         finally:
             connection.close()
 
@@ -2797,6 +3251,170 @@ class ModelUsageService:
                 ).fetchone()
                 is not None
             )
+        finally:
+            connection.close()
+
+    def disposition_native_unreported_subscription_usage(
+        self,
+        *,
+        invocation_id: str,
+        expected_terminal_digest: str,
+        expected_allocation_digest: str,
+        observed_at: datetime,
+    ) -> dict[str, object]:
+        """Retain the native pipeline's qualified-policy upper-bound estimate."""
+
+        invocation_id = _token(invocation_id, field="invocation id")
+        expected_terminal_digest = _token(
+            expected_terminal_digest, field="expected terminal digest"
+        )
+        expected_allocation_digest = _token(
+            expected_allocation_digest, field="expected allocation digest"
+        )
+        observed_at_text = _utc_text(observed_at)
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            retained = connection.execute(
+                "SELECT t.terminal_digest,t.record_json,a.canonical_digest,"
+                "a.record_json FROM model_invocation_terminals t "
+                "JOIN model_invocation_allocations a "
+                "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if retained is None:
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition terminal is absent"
+                )
+            terminal = _terminal_from_record(_object(retained[1]))
+            allocation = _allocation_from_record(_object(retained[3]))
+            if (
+                retained[0] != terminal.terminal_digest
+                or retained[2] != allocation.canonical_digest
+                or terminal.invocation_id != invocation_id
+                or allocation.invocation_id != invocation_id
+            ):
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition binding differs"
+                )
+            if terminal.terminal_digest != expected_terminal_digest:
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition terminal differs"
+                )
+            if allocation.canonical_digest != expected_allocation_digest:
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition allocation differs"
+                )
+
+            prior = _valid_native_disposition(
+                connection, allocation=allocation, terminal=terminal
+            )
+            if prior is not None:
+                connection.rollback()
+                return prior
+
+            policy = _policy_for_allocation(connection, allocation)
+            envelope = _native_envelope(connection, allocation)
+            if (
+                allocation.workload_class
+                is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
+                or allocation.route != WorkloadClass.GRAPHITI_CHAT_PRIMARY.value
+                or allocation.provider != "cursor-agent-cli"
+                or not policy.qualified
+                or terminal.usage_status is not UsageStatus.UNREPORTED
+                or terminal.outcome not in {"FAILED", "TIMEOUT"}
+                or terminal.failure_class != "MISSING_PROVIDER_TELEMETRY"
+                or terminal.subscription_cli_chat_not_cash_debited is not True
+                or terminal.policy_breach is not None
+                or terminal.provider_telemetry_digest is not None
+                or terminal.raw_telemetry_pointer is not None
+                or terminal.pre_dispatch_zero_proved
+            ):
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition target is ineligible"
+                )
+            if observed_at < terminal.observed_at:
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition precedes terminal"
+                )
+            if not _has_exact_dispatch(connection, terminal):
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition lacks committed dispatch"
+                )
+            if connection.execute(
+                "SELECT 1 FROM model_provider_telemetry WHERE invocation_id=? "
+                "UNION ALL SELECT 1 FROM model_usage_reconciliations "
+                "WHERE invocation_id=? LIMIT 1",
+                (invocation_id, invocation_id),
+            ).fetchone() is not None:
+                raise ModelUsageIntegrityError(
+                    "native conservative disposition exact telemetry already exists"
+                )
+
+            authority = _native_disposition_authority(
+                allocation=allocation,
+                terminal=terminal,
+                policy=policy,
+                envelope=envelope,
+            )
+            scope_digest = digest_canonical(authority)
+            record_without_digest: dict[str, object] = {
+                "schema_version": CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+                "authority_scope": NATIVE_AUTONOMOUS_USAGE_SCOPE,
+                "native_scope_digest": scope_digest,
+                "invocation_id": invocation_id,
+                "terminal_digest": terminal.terminal_digest,
+                "allocation_digest": allocation.canonical_digest,
+                "policy_digest": policy.canonical_digest,
+                "usage_status": UsageStatus.ESTIMATED.value,
+                "components": UsageComponents(
+                    total_tokens=policy.max_total_tokens,
+                    provenance="BOUNDED_ESTIMATE",
+                ).as_record(),
+                "estimate_policy_digest": policy.canonical_digest,
+                "estimate_calculation": (
+                    "QUALIFIED_POLICY_MAX_TOTAL_TOKENS_CONSERVATIVE_UPPER_BOUND"
+                ),
+                "exact_usage_remains_unknown": True,
+                "provider_dispatch_preserved": True,
+                "unknown_spend_released": False,
+                "authority_digest": scope_digest,
+                "observed_at": observed_at_text,
+            }
+            disposition_digest = digest_canonical(record_without_digest)
+            record = {
+                **record_without_digest,
+                "disposition_digest": disposition_digest,
+            }
+            connection.execute(
+                "INSERT INTO model_usage_conservative_dispositions("
+                "disposition_digest,invocation_id,terminal_digest,"
+                "allocation_digest,policy_digest,approved_plan_digest,"
+                "authority_digest,approved_by,approval_reference,approved_at,"
+                "observed_at,usage_status,record_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    disposition_digest,
+                    invocation_id,
+                    terminal.terminal_digest,
+                    allocation.canonical_digest,
+                    policy.canonical_digest,
+                    scope_digest,
+                    scope_digest,
+                    NATIVE_AUTONOMOUS_USAGE_SCOPE,
+                    NATIVE_AUTONOMOUS_USAGE_SCOPE,
+                    observed_at_text,
+                    observed_at_text,
+                    UsageStatus.ESTIMATED.value,
+                    _json(record),
+                ),
+            )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
         finally:
             connection.close()
 

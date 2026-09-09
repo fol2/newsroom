@@ -35,60 +35,59 @@ class _PayloadAndEnvelopeIntegrity:
         for row in conn.execute(
             "SELECT * FROM authority_payloads"
         ).fetchall():
-            PayloadId.parse(str(row["payload_id"]))
-            mode = PayloadMode(str(row["mode"]))
-            if mode is PayloadMode.OBJECT_ADMISSION:
-                self._validate_object_admission_payload_record(conn, row)
-                continue
-            if row["payload_bytes"] is None:
-                raise AuthorityPersistenceError(
-                    "A2a retained payload bytes are missing"
-                )
-            data = bytes(row["payload_bytes"])
-            expected_digest = str(row["payload_digest"])
-            validate_sha256_digest(
-                expected_digest, field="payload_digest"
-            )
-            if digest_bytes(data) != expected_digest:
-                raise AuthorityPersistenceError(
-                    "retained payload digest does not match exact bytes"
-                )
-            if mode is PayloadMode.NO_PAYLOAD and data != b"":
-                raise AuthorityPersistenceError(
-                    "NO_PAYLOAD authority must retain exact empty bytes"
-                )
-            if mode is PayloadMode.INLINE and not data:
-                raise AuthorityPersistenceError(
-                    "INLINE authority cannot retain an empty payload"
-                )
-            contract = conn.execute(
-                "SELECT * FROM payload_schema_contracts "
-                "WHERE contract_digest=?",
-                (str(row["schema_contract_digest"]),),
-            ).fetchone()
-            if contract is None:
-                raise AuthorityPersistenceError(
-                    "payload schema contract is missing"
-                )
-            if (
-                str(contract["schema_version"])
-                != str(row["schema_version"])
-                or str(contract["payload_mode"]) != mode.value
-                or str(contract["contract_version"])
-                != str(row["schema_contract_version"])
-                or str(
-                    contract["canonicalizer_implementation_version"]
-                )
-                != str(row["canonicalizer_implementation_version"])
-            ):
-                raise AuthorityPersistenceError(
-                    "payload does not match its immutable schema contract"
-                )
+            self._validate_payload_record(conn, row)
 
         for row in conn.execute(
             "SELECT * FROM ledger_events ORDER BY ledger_seq"
         ).fetchall():
             self._validate_event_types(row)
+
+    def _validate_payload_record(
+        self, conn: sqlite3.Connection, row: sqlite3.Row
+    ) -> None:
+        """Validate one retained payload without scanning unrelated history."""
+
+        PayloadId.parse(str(row["payload_id"]))
+        mode = PayloadMode(str(row["mode"]))
+        if mode is PayloadMode.OBJECT_ADMISSION:
+            self._validate_object_admission_payload_record(conn, row)
+            return
+        if row["payload_bytes"] is None:
+            raise AuthorityPersistenceError(
+                "A2a retained payload bytes are missing"
+            )
+        data = bytes(row["payload_bytes"])
+        expected_digest = str(row["payload_digest"])
+        validate_sha256_digest(expected_digest, field="payload_digest")
+        if digest_bytes(data) != expected_digest:
+            raise AuthorityPersistenceError(
+                "retained payload digest does not match exact bytes"
+            )
+        if mode is PayloadMode.NO_PAYLOAD and data != b"":
+            raise AuthorityPersistenceError(
+                "NO_PAYLOAD authority must retain exact empty bytes"
+            )
+        if mode is PayloadMode.INLINE and not data:
+            raise AuthorityPersistenceError(
+                "INLINE authority cannot retain an empty payload"
+            )
+        contract = conn.execute(
+            "SELECT * FROM payload_schema_contracts WHERE contract_digest=?",
+            (str(row["schema_contract_digest"]),),
+        ).fetchone()
+        if contract is None:
+            raise AuthorityPersistenceError("payload schema contract is missing")
+        if (
+            str(contract["schema_version"]) != str(row["schema_version"])
+            or str(contract["payload_mode"]) != mode.value
+            or str(contract["contract_version"])
+            != str(row["schema_contract_version"])
+            or str(contract["canonicalizer_implementation_version"])
+            != str(row["canonicalizer_implementation_version"])
+        ):
+            raise AuthorityPersistenceError(
+                "payload does not match its immutable schema contract"
+            )
 
 
     @staticmethod

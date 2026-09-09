@@ -959,8 +959,11 @@ class _HypothesisStore:
                 last.recorded_at,
             ):
                 raise HypothesisContractError("Hypothesis head is not max Version")
-        if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-            raise HypothesisContractError("Hypothesis foreign keys differ")
+        for table in ("event_hypothesis_versions_v2", "event_hypothesis_heads_v2"):
+            if self._connection.execute(
+                f'PRAGMA foreign_key_check("{table}")'
+            ).fetchone() is not None:
+                raise HypothesisContractError("Hypothesis foreign keys differ")
         return {
             version.version_id: version
             for versions in chains.values()

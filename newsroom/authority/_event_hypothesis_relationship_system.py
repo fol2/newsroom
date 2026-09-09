@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -232,16 +233,38 @@ def _load_retained_relationship_receipt_in_transaction(
     return RetainedRelationshipDecisionReceipt(verified, evidence)
 
 
-def _verify_relationship_event_coverage(connection: sqlite3.Connection) -> None:
-    mismatch = connection.execute(
-        "SELECT r.decision_id FROM event_hypothesis_relationship_decisions r "
-        "LEFT JOIN ledger_events e ON e.event_id=r.authority_event_id "
-        "WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL "
-        "SELECT e.event_id FROM ledger_events e LEFT JOIN "
-        "event_hypothesis_relationship_decisions r ON r.authority_event_id=e.event_id "
-        "WHERE e.event_type=? AND r.decision_id IS NULL LIMIT 1",
-        (RELATIONSHIP_EVENT_TYPE, RELATIONSHIP_EVENT_TYPE),
-    ).fetchone()
+def _verify_relationship_event_coverage(
+    connection: sqlite3.Connection, *, aggregate_type: str | None = None
+) -> None:
+    if aggregate_type is None:
+        statement = (
+            "SELECT r.decision_id FROM event_hypothesis_relationship_decisions r "
+            "LEFT JOIN ledger_events e ON e.event_id=r.authority_event_id "
+            "WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL "
+            "SELECT e.event_id FROM ledger_events e LEFT JOIN "
+            "event_hypothesis_relationship_decisions r "
+            "ON r.authority_event_id=e.event_id WHERE e.event_type=? "
+            "AND r.decision_id IS NULL LIMIT 1"
+        )
+        parameters = (RELATIONSHIP_EVENT_TYPE, RELATIONSHIP_EVENT_TYPE)
+    else:
+        statement = (
+            "SELECT r.decision_id FROM event_hypothesis_relationship_decisions r "
+            "LEFT JOIN ledger_events e ON e.event_id=r.authority_event_id "
+            "WHERE e.event_id IS NULL OR e.event_type!=? "
+            "OR e.aggregate_type!=? UNION ALL "
+            "SELECT e.event_id FROM ledger_events e LEFT JOIN "
+            "event_hypothesis_relationship_decisions r "
+            "ON r.authority_event_id=e.event_id WHERE e.aggregate_type=? "
+            "AND (e.event_type!=? OR r.decision_id IS NULL) LIMIT 1"
+        )
+        parameters = (
+            RELATIONSHIP_EVENT_TYPE,
+            aggregate_type,
+            aggregate_type,
+            RELATIONSHIP_EVENT_TYPE,
+        )
+    mismatch = connection.execute(statement, parameters).fetchone()
     if mismatch is not None:
         raise AuthoritySchemaError("relationship event coverage differs")
 
@@ -251,6 +274,7 @@ def _verify_relationship_reads_in_transaction(
     hypotheses: _HypothesisStore,
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
+    validate_retained_event: Callable[[str], None],
 ) -> tuple[
     dict[str, EventHypothesisVersion],
     dict[str, RetainedRelationshipDecisionReceipt],
@@ -263,10 +287,11 @@ def _verify_relationship_reads_in_transaction(
         versions = hypotheses._verify()
     receipts: dict[str, RetainedRelationshipDecisionReceipt] = {}
     rows = connection.execute(
-        "SELECT decision_id FROM "
+        "SELECT decision_id,authority_event_id FROM "
         "event_hypothesis_relationship_decisions ORDER BY decision_id"
     )
     for row in rows:
+        validate_retained_event(str(row[1]))
         receipt = _load_retained_relationship_receipt_in_transaction(
             connection,
             hypotheses,
@@ -410,8 +435,11 @@ class _RelationshipEventStore(_EventAuthorityStore):
             self._hypotheses,
             self._command_registry,
             self._payload_schemas,
+            self._validate_retained_event,
         )
-        self._validate_relational_invariants(self._connection)
+        _verify_relationship_event_coverage(
+            self._connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
+        )
 
     @staticmethod
     def _command(
@@ -687,7 +715,12 @@ class EventHypothesisRelationshipAuthority:
 class _EventHypothesisRelationshipReadAuthority:
     """Private transaction-bound authority backing the narrow public read port."""
 
-    __slots__ = ("__connection", "__hypotheses", "__registries")
+    __slots__ = (
+        "__connection",
+        "__event_validator",
+        "__hypotheses",
+        "__registries",
+    )
 
     def __init__(
         self,
@@ -704,6 +737,13 @@ class _EventHypothesisRelationshipReadAuthority:
         self.__connection = connection
         self.__hypotheses = hypotheses
         self.__registries = (command_registry, payload_schemas)
+        validator = object.__new__(_RelationshipEventStore)
+        validator._conn = connection
+        validator._closed = False
+        validator._lock = threading.RLock()
+        validator._command_registry = command_registry
+        validator._payload_schemas = payload_schemas
+        self.__event_validator = validator._validate_retained_event
 
     def __read[T](self, operation: Callable[[], T]) -> T:
         _require_checked_connection(self.__connection, active=True)
@@ -723,9 +763,14 @@ class _EventHypothesisRelationshipReadAuthority:
     def verify_retained_integrity_in_transaction(self) -> None:
         def verify() -> None:
             _verify_relationship_reads_in_transaction(
-                self.__connection, self.__hypotheses, *self.__registries
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                self.__event_validator,
             )
-            _verify_relationship_event_coverage(self.__connection)
+            _verify_relationship_event_coverage(
+                self.__connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
+            )
 
         return self.__read(verify)
 
@@ -734,9 +779,14 @@ class _EventHypothesisRelationshipReadAuthority:
     ) -> RetainedRelationshipDecisionReceipt:
         def value() -> RetainedRelationshipDecisionReceipt:
             _, receipts = _verify_relationship_reads_in_transaction(
-                self.__connection, self.__hypotheses, *self.__registries
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                self.__event_validator,
             )
-            _verify_relationship_event_coverage(self.__connection)
+            _verify_relationship_event_coverage(
+                self.__connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
+            )
             try:
                 return receipts[assessment_digest]
             except KeyError as exc:
@@ -759,9 +809,14 @@ class _EventHypothesisRelationshipReadAuthority:
             tuple[EventHypothesisVersion, ...],
         ]:
             versions, receipts = _verify_relationship_reads_in_transaction(
-                self.__connection, self.__hypotheses, *self.__registries
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                self.__event_validator,
             )
-            _verify_relationship_event_coverage(self.__connection)
+            _verify_relationship_event_coverage(
+                self.__connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
+            )
             try:
                 return (
                     tuple(receipts[item] for item in assessment_digests),
