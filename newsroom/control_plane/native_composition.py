@@ -463,8 +463,11 @@ def open_native_pipeline(
             policy=embedding_policy, dispatch_fence=stop_fence,
             implementation_worktree_clean=implementation_worktree_clean, clock=clock,
         )
+        assessment_usage = NativeAssessmentUsage(
+            usage, assessment_policy, clock=clock
+        )
         assessor = AutonomousNativeEvidenceAssessor(
-            usage=NativeAssessmentUsage(usage, assessment_policy, clock=clock),
+            usage=assessment_usage,
             dispatch_fence=stop_fence,
         )
         definitions = dict(source_definition_ids)
@@ -604,7 +607,11 @@ def open_native_pipeline(
                 )
                 return NativePublicationContinuation(
                     journal=journal, runtime=runtime, evidence_controller=evidence,
-                    sources={revision_id: sources}, clock=now,
+                    sources={revision_id: sources},
+                    assessment_contract_failure=(
+                        assessment_usage.retained_output_contract_failure
+                    ),
+                    clock=now,
                 ).advance(revision_id=revision_id, candidate_version_id=candidate_version_id)
 
         intake = NativeSourceIntake(

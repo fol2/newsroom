@@ -15,6 +15,7 @@ from newsroom.control_plane.native_evidence import (
 )
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
 from newsroom.control_plane.native_progress import NativeRevisionJournal
+from newsroom.control_plane.native_assessor import RetainedAssessorContractFailure
 from newsroom.control_plane.native_publication import NativePublicationContinuation
 from newsroom.control_plane.store import connect
 from newsroom.increment10.editorial import (
@@ -410,6 +411,106 @@ def test_post_assessment_dispatch_ambiguity_is_not_redispatched(
     assert first.state == second.state == "ASSESSMENT_INTERRUPTED"
     assert calls == ["assessor-dispatch"]
     assert journal.progress[unit.revision_id]["stage"] == "ASSESSMENT_INTERRUPTED"
+    connection.close()
+
+
+def test_retained_assessor_contract_failure_becomes_typed_hold(tmp_path) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="ASSESSMENT_INTERRUPTED", facts={
+        "candidate_id": "candidate",
+        "candidate_version_id": "candidate-version",
+        "graphiti_receipts": [{}],
+        "failure_class": "EvidencePackageError",
+        "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+    })
+    calls: list[str] = []
+    retained = RetainedAssessorContractFailure(
+        "envelope", "invocation", _DIGEST, _DIGEST, _DIGEST
+    )
+
+    def recover(_version):
+        calls.append("recover")
+        return retained
+
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        assessment_contract_failure=recover,
+    )
+
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    replay = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert first.state == replay.state == "EVIDENCE_HOLD"
+    assert first.reason == replay.reason == "ASSESSOR_OUTPUT_CONTRACT_HOLD"
+    assert calls == ["recover"]
+    facts = journal.progress[unit.revision_id]["facts"]
+    assert facts["assessment_failure_envelope_id"] == "envelope"
+    assert facts["assessment_failure_invocation_id"] == "invocation"
+    assert facts["assessment_failure_allocation_digest"] == _DIGEST
+    assert facts["assessment_failure_terminal_digest"] == _DIGEST
+    assert facts["assessment_failure_context_manifest_digest"] == _DIGEST
+    assert facts["acquisition_retryable"] is False
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("failure_class", "expected_recovery_calls"),
+    (("EvidencePackageError", 1), ("OSError", 0)),
+)
+def test_unproved_assessment_interruption_has_no_follow_on_effect(
+    tmp_path, failure_class, expected_recovery_calls,
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="ASSESSMENT_INTERRUPTED", facts={
+        "candidate_id": "candidate",
+        "candidate_version_id": "candidate-version",
+        "failure_class": failure_class,
+        "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+    })
+    retained_ordinal = journal.progress[unit.revision_id]["ordinal"]
+    recovery_calls: list[str] = []
+
+    def no_proof(_version):
+        recovery_calls.append("checked")
+        return None
+
+    authority, publication = _Authority(), _Publication()
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=authority, ingress=object(), publication=publication,
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        assessment_contract_failure=no_proof,
+    )
+
+    result = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert result.state == "ASSESSMENT_INTERRUPTED"
+    assert len(recovery_calls) == expected_recovery_calls
+    assert authority.receives == 0
+    assert publication.calls == 0
+    assert journal.progress[unit.revision_id]["ordinal"] == retained_ordinal
     connection.close()
 
 

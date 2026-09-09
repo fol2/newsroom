@@ -2,6 +2,7 @@ import json
 import sqlite3
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -177,7 +178,17 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
     (
         (lambda _: (_ for _ in ()).throw(RuntimeError("provider broke")),
          "ASSESSOR_PROVIDER_FAILED"),
-        (lambda _: NativeAssessmentExecution('{"package": {}}', {}),
+        (lambda _: NativeAssessmentExecution(
+            '{"assessment_records":[],"package":{}}', {
+            "usage_basis": "PROVIDER_REPORTED",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 1,
+            "total_tokens": 2,
+        }),
          "ASSESSOR_VALIDATION_FAILED"),
     ),
 )
@@ -205,6 +216,26 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert retained.execute(
             "SELECT state FROM model_transport_observations"
         ).fetchall() == [("DISPATCH_STARTED",)]
+    proof = usage.retained_output_contract_failure(candidate)
+    if outcome == "ASSESSOR_VALIDATION_FAILED":
+        assert proof is not None
+        assert proof.invocation_id == terminal["invocation_id"]
+        assert proof.terminal_digest == terminal["terminal_digest"]
+        wrong_candidate = SimpleNamespace(
+            candidate_id="wrong-candidate",
+            version_id=candidate.version_id,
+            governing_manifest=candidate.governing_manifest,
+        )
+        assert usage.retained_output_contract_failure(wrong_candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_provider_telemetry "
+                "SET provider_telemetry_digest=?",
+                ("sha256:" + "f" * 64,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+    else:
+        assert proof is None
     connection.close()
 
 
@@ -237,3 +268,16 @@ def test_native_work_envelopes_reject_unrelated_authority_ids() -> None:
                 "graphiti_attempt_id": None,
             },
         )
+
+
+def test_inflight_native_assessor_is_not_a_retained_contract_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    _service, usage = _usage(tmp_path, monkeypatch)
+
+    usage.begin(candidate, base, "in-flight assessor request")
+
+    assert usage.retained_output_contract_failure(candidate) is None
+    connection.close()

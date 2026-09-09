@@ -69,6 +69,91 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         connection.close()
 
 
+def test_native_pipeline_only_reclassifies_retained_assessment_interruption(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    dispositions[0] = ()
+    journal.land((units[0],))
+    journal.advance(units[0].revision_id, stage="ASSESSMENT_INTERRUPTED", facts={
+        "candidate_version_id": "candidate:one",
+        "graphiti_receipts": [{}],
+        "failure_class": "EvidencePackageError",
+        "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+    })
+
+    class Recovery:
+        def advance(self, *, revision_id, candidate_version_id):
+            calls.append(("recover", revision_id, candidate_version_id))
+            journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+                **journal.progress[revision_id]["facts"],
+                "reason": "ASSESSOR_OUTPUT_CONTRACT_HOLD",
+                "acquisition_retryable": False,
+            })
+
+    pipeline._publish = Recovery()
+    calls.clear()
+    try:
+        first = pipeline.tick(cycle_id="recovery")
+        assert first.revision_states == {"EVIDENCE_HOLD": 1}
+        assert calls == [
+            ("rights", "current"),
+            ("recover", units[0].revision_id, "candidate:one"),
+        ]
+        calls.clear()
+        pipeline.tick(cycle_id="replay")
+        assert calls == [("rights", "current")]
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_does_not_restart_unproved_assessment_interruptions(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    dispositions[0] = ()
+    retained_ordinals = {}
+    for unit, failure_class in zip(
+        units, ("EvidencePackageError", "OSError"), strict=True
+    ):
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="ASSESSMENT_INTERRUPTED", facts={
+            "candidate_version_id": "candidate:" + unit.item_key,
+            "graphiti_receipts": [{}],
+            "failure_class": failure_class,
+            "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+        })
+        retained_ordinals[unit.revision_id] = journal.progress[unit.revision_id][
+            "ordinal"
+        ]
+
+    class UnprovedRecovery:
+        def advance(self, *, revision_id, candidate_version_id):
+            calls.append(("proof-only", revision_id, candidate_version_id))
+            return NS(state="ASSESSMENT_INTERRUPTED")
+
+    pipeline._publish = UnprovedRecovery()
+    calls.clear()
+    try:
+        report = pipeline.tick(cycle_id="unproved-recovery")
+        assert report.revision_states == {"ASSESSMENT_INTERRUPTED": 2}
+        assert calls == [
+            ("rights", "current"),
+            ("proof-only", units[0].revision_id, "candidate:one"),
+            ("proof-only", units[1].revision_id, "candidate:two"),
+        ]
+        assert {
+            revision_id: journal.progress[revision_id]["ordinal"]
+            for revision_id in retained_ordinals
+        } == retained_ordinals
+    finally:
+        connection.close()
+
+
 def test_native_pipeline_retains_hold_reason_then_clears_it_on_continuation(
     tmp_path, monkeypatch,
 ):

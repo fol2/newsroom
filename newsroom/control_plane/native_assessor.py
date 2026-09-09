@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -25,14 +26,25 @@ from newsroom.control_plane.evidence import (
     evidence_package_value,
 )
 from newsroom.increment10.editorial import SourceCurrentness
-from newsroom.increment10.evidence import _base_package, _package_from_value
+from newsroom.increment10.evidence import (
+    EvidencePackageError,
+    _base_package,
+    _package_from_value,
+)
 
 from .model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
+    ModelUsageIntegrityError,
     ModelUsageService,
+    UsageStatus,
     WorkEnvelope,
     WorkloadClass,
+    _allocation_from_record,
+    _envelope_from_record,
+    _policy_from_record,
+    _require_reported_telemetry,
+    _terminal_from_record,
 )
 
 from .native_evidence import (
@@ -200,6 +212,15 @@ INTEGRITY = (
 class NativeAssessmentExecution:
     text: str
     usage: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedAssessorContractFailure:
+    envelope_id: str
+    invocation_id: str
+    allocation_digest: str
+    terminal_digest: str
+    context_manifest_digest: str
 
 
 class NativeAssessmentUsage:
@@ -385,6 +406,290 @@ class NativeAssessmentUsage:
             policy=self._policy,
         )
 
+    def retained_output_contract_failure(
+        self, candidate: object
+    ) -> RetainedAssessorContractFailure | None:
+        """Prove one settled, candidate-bound assessor contract failure."""
+
+        candidate_id = getattr(candidate, "candidate_id", None)
+        version_id = getattr(candidate, "version_id", None)
+        manifest = getattr(candidate, "governing_manifest", None)
+        hypothesis_digest = getattr(manifest, "canonical_digest", None)
+        if not all(type(value) is str and value for value in (
+            candidate_id, version_id, hypothesis_digest,
+        )):
+            return None
+        connection = sqlite3.connect(f"file:{self._service.path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
+                "canonical_digest,record_json FROM model_work_envelopes "
+                "WHERE workload_class=?",
+                (WorkloadClass.NATIVE_EVIDENCE_ASSESSOR.value,),
+            ).fetchall()
+            matches: list[RetainedAssessorContractFailure] = []
+            for row in rows:
+                try:
+                    envelope_record = json.loads(row[5])
+                    envelope = _envelope_from_record(envelope_record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if tuple(row[:5]) != (
+                    envelope.envelope_id,
+                    envelope.cycle_id,
+                    envelope.workload_class.value,
+                    envelope_record["admitted_at"],
+                    envelope.canonical_digest,
+                ) or envelope.as_record() != envelope_record:
+                    return None
+                if (
+                    envelope.candidate_id != candidate_id
+                    or envelope.hypothesis_digest != hypothesis_digest
+                ):
+                    continue
+                if envelope.evidence_package_digest is None or envelope.cycle_id != digest_bytes(
+                    canonical_json_bytes([version_id, envelope.evidence_package_digest])
+                ):
+                    continue
+                allocation_rows = connection.execute(
+                    "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,"
+                    "workload_class,policy_digest,provider,route,model,request_digest,"
+                    "parent_invocation_id,allocated_at,canonical_digest,record_json "
+                    "FROM model_invocation_allocations WHERE envelope_id=?",
+                    (envelope.envelope_id,),
+                ).fetchall()
+                if len(allocation_rows) != 1:
+                    return None
+                allocation_row = allocation_rows[0]
+                try:
+                    allocation_record = json.loads(allocation_row[13])
+                    allocation = _allocation_from_record(allocation_record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if tuple(allocation_row[:13]) != (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.leaf_ordinal,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    allocation_record["allocated_at"],
+                    allocation.canonical_digest,
+                ) or allocation.as_record() != allocation_record or (
+                    allocation.envelope_id != envelope.envelope_id
+                    or allocation.cycle_id != envelope.cycle_id
+                    or allocation.leaf_ordinal != 1
+                    or allocation.workload_class
+                    is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                ):
+                    return None
+                policy_row = connection.execute(
+                    "SELECT canonical_digest,record_json FROM model_invocation_policies "
+                    "WHERE canonical_digest=?",
+                    (allocation.invocation_policy_digest,),
+                ).fetchone()
+                context_row = connection.execute(
+                    "SELECT context_manifest_digest,provider,route,"
+                    "evidence_package_digest,record_json "
+                    "FROM model_invocation_context_manifests "
+                    "WHERE context_manifest_digest=?",
+                    (allocation.context_manifest_digest,),
+                ).fetchone()
+                terminal_row = connection.execute(
+                    "SELECT terminal_digest,invocation_id,usage_status,outcome,"
+                    "failure_class,completed_at,record_json "
+                    "FROM model_invocation_terminals WHERE invocation_id=?",
+                    (allocation.invocation_id,),
+                ).fetchone()
+                transport_rows = connection.execute(
+                    "SELECT observation_digest,invocation_id,observed_at,state,"
+                    "evidence_digest,record_json FROM model_transport_observations "
+                    "WHERE invocation_id=? ORDER BY observed_at,observation_digest",
+                    (allocation.invocation_id,),
+                ).fetchall()
+                if policy_row is None or context_row is None or terminal_row is None:
+                    return None
+                try:
+                    policy_record = json.loads(policy_row[1])
+                    policy = _policy_from_record(policy_record)
+                    policy._validate()
+                    context = json.loads(context_row[4])
+                    terminal_record = json.loads(terminal_row[6])
+                    terminal = _terminal_from_record(terminal_record)
+                    transport_values = tuple(
+                        json.loads(item[5]) for item in transport_rows
+                    )
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                try:
+                    terminal_policy_breach = self._service._validate_terminal(
+                        terminal,
+                        allocation.workload_class,
+                        policy,
+                        requested_max_output_tokens=allocation.max_output_tokens,
+                    )
+                except ModelUsageIntegrityError:
+                    return None
+                unsigned_context = dict(context)
+                retained_context_digest = unsigned_context.pop(
+                    "context_manifest_digest", None
+                )
+                if (
+                    policy_row[0] != policy.canonical_digest
+                    or policy.as_record() != policy_record
+                    or policy.canonical_digest
+                    != allocation.invocation_policy_digest
+                    or policy.workload_class
+                    is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                    or not policy.qualified
+                    or (
+                        allocation.provider,
+                        allocation.route,
+                        allocation.model,
+                        allocation.reasoning,
+                        allocation.prompt_contract_version,
+                        allocation.output_schema_digest,
+                    )
+                    != (
+                        policy.provider,
+                        policy.route,
+                        policy.model,
+                        policy.reasoning,
+                        policy.prompt_contract_version,
+                        policy.output_schema_digest,
+                    )
+                    or (
+                        allocation.one_turn,
+                        allocation.exact_input,
+                        allocation.skills_enabled,
+                        allocation.tools_enabled,
+                        allocation.mcp_enabled,
+                        allocation.prior_message_count,
+                        allocation.context_identity,
+                        allocation.config_identity,
+                    )
+                    != (
+                        policy.one_turn,
+                        policy.exact_input,
+                        policy.skills_enabled,
+                        policy.tools_enabled,
+                        policy.mcp_enabled,
+                        policy.prior_message_count,
+                        CONTEXT_IDENTITY,
+                        CONFIG_IDENTITY,
+                    )
+                    or allocation.context_identity
+                    not in policy.allowed_context_identities
+                    or allocation.config_identity
+                    not in policy.allowed_config_identities
+                    or tuple(context_row[:4]) != (
+                        retained_context_digest,
+                        context.get("provider"),
+                        context.get("route"),
+                        context.get("evidence_package_digest"),
+                    )
+                    or retained_context_digest != allocation.context_manifest_digest
+                    or digest_canonical(unsigned_context) != retained_context_digest
+                    or context.get("evidence_package_digest")
+                    != envelope.evidence_package_digest
+                    or context.get("request_digest") != allocation.request_digest
+                    or context.get("prompt_digest") != allocation.prompt_digest
+                    or context.get("provider") != allocation.provider
+                    or context.get("route") != allocation.route
+                    or context.get("model") != allocation.model
+                    or context.get("reasoning") != allocation.reasoning
+                    or context.get("implementation_revision")
+                    != policy.implementation_revision
+                    or context.get("implementation_worktree_clean") is not True
+                    or context.get("command_semantic_version")
+                    != policy.command_semantic_version
+                    or context.get("command_flags") != list(policy.command_flags)
+                    or context.get("disabled_capabilities")
+                    != list(policy.disabled_capabilities)
+                    or context.get("prompt_contract_version")
+                    != policy.prompt_contract_version
+                    or context.get("context_identity")
+                    != allocation.context_identity
+                    or context.get("config_identity")
+                    != allocation.config_identity
+                    or context.get("one_turn") != allocation.one_turn
+                    or context.get("exact_input") != allocation.exact_input
+                    or context.get("skills_enabled") != allocation.skills_enabled
+                    or context.get("tools_enabled") != allocation.tools_enabled
+                    or context.get("mcp_enabled") != allocation.mcp_enabled
+                    or context.get("prior_message_count")
+                    != allocation.prior_message_count
+                    or context.get("output_schema_digest") != SCHEMA_DIGEST
+                    or context.get("schema_digest") != policy.output_schema_digest
+                    or tuple(terminal_row[:6]) != (
+                        terminal.terminal_digest,
+                        terminal.invocation_id,
+                        terminal.usage_status.value,
+                        terminal.outcome,
+                        terminal.failure_class,
+                        terminal_record["completed_at"],
+                    )
+                    or terminal.as_record() != terminal_record
+                    or terminal.invocation_id != allocation.invocation_id
+                    or terminal.usage_status is not UsageStatus.REPORTED
+                    or terminal.outcome != "ASSESSOR_VALIDATION_FAILED"
+                    or terminal.failure_class != "ASSESSMENT_VALIDATION_FAILED"
+                    or terminal.dispatch_at is None
+                    or terminal.pre_dispatch_zero_proved
+                    or terminal.policy_breach is not None
+                    or terminal_policy_breach is not None
+                    or len(transport_rows) != 1
+                    or tuple(transport_rows[0][:5]) != (
+                        transport_values[0].get("observation_digest"),
+                        allocation.invocation_id,
+                        transport_values[0].get("observed_at"),
+                        "DISPATCH_STARTED",
+                        allocation.request_digest,
+                    )
+                    or transport_values[0].get("invocation_id")
+                    != allocation.invocation_id
+                    or transport_values[0].get("state") != "DISPATCH_STARTED"
+                    or transport_values[0].get("evidence_digest")
+                    != allocation.request_digest
+                    or transport_values[0].get("observed_at")
+                    != terminal_record.get("dispatch_at")
+                    or digest_canonical(
+                        {
+                            key: value
+                            for key, value in transport_values[0].items()
+                            if key != "observation_digest"
+                        }
+                    )
+                    != transport_values[0].get("observation_digest")
+                    or connection.execute(
+                        "SELECT 1 FROM model_usage_reconciliations "
+                        "WHERE invocation_id=? AND "
+                        "json_extract(record_json,'$.policy_breach') IS NOT NULL",
+                        (allocation.invocation_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    return None
+                try:
+                    _require_reported_telemetry(connection, terminal)
+                except ModelUsageIntegrityError:
+                    return None
+                matches.append(RetainedAssessorContractFailure(
+                    envelope.envelope_id,
+                    allocation.invocation_id,
+                    allocation.canonical_digest,
+                    terminal.terminal_digest,
+                    allocation.context_manifest_digest,
+                ))
+            return matches[0] if len(matches) == 1 else None
+        finally:
+            connection.close()
+
 
 class AutonomousNativeEvidenceAssessor:
     """Dispatch one fixed-schema transform, then prove its output locally."""
@@ -478,6 +783,27 @@ class AutonomousNativeEvidenceAssessor:
                     failure_class=exc.failure_class,
                 )
             raise
+        except EvidencePackageError as exc:
+            if allocation is None or execution is None:
+                raise
+            self._usage.complete(
+                allocation,
+                outcome="ASSESSOR_VALIDATION_FAILED",
+                execution=execution,
+                provider_dispatched=dispatch_at is not None,
+                dispatch_at=dispatch_at,
+                failure_class="ASSESSMENT_VALIDATION_FAILED",
+            )
+            if self._usage.retained_output_contract_failure(candidate) is None:
+                raise
+            raise NativeEvidenceHold(
+                "ASSESSOR_OUTPUT_CONTRACT_HOLD",
+                (
+                    sources[0].unit.source_id
+                    if sources
+                    else str(getattr(candidate, "candidate_id", "unknown-candidate"))
+                ),
+            ) from exc
         except BaseException:
             if allocation is not None:
                 self._usage.complete(
