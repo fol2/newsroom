@@ -255,6 +255,7 @@ def parse_govuk_content_document(
         "news_story", "press_release", "guidance", "detailed_guide",
         "html_publication", "notice", "policy_paper", "written_statement",
         "guide", "manual_section", "oral_statement", "statistics",
+        "speech",
     }:
         body_text = _document_text(value)
     elif document_type == "official_statistics_announcement":
@@ -266,7 +267,7 @@ def parse_govuk_content_document(
         )
         raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
     elif document_type == "document_collection":
-        _require_link_inventory(value, key="documents")
+        _require_collection_inventory(value)
         raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
     elif document_type == "transparency":
         _require_attachment_inventory(value)
@@ -275,6 +276,28 @@ def parse_govuk_content_document(
         if value.get("schema_name") != "publication":
             raise ValueError("source correspondence schema differs")
         _document_text(value)
+        _require_attachment_inventory(value)
+        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+    elif document_type == "statutory_guidance":
+        if value.get("schema_name") != "publication":
+            raise ValueError("source statutory guidance schema differs")
+        _document_text(value)
+        _require_attachment_inventory(value)
+        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+    elif document_type == "consultation_outcome":
+        details = value.get("details")
+        if value.get("schema_name") != "consultation" or type(details) is not dict:
+            raise ValueError("source consultation outcome schema differs")
+        _document_text(value)
+        _html_text(details.get("final_outcome_detail"))
+        outcome_attachments = details.get("final_outcome_attachments")
+        if (
+            type(outcome_attachments) is not list
+            or not outcome_attachments
+            or any(type(item) is not str or not item for item in outcome_attachments)
+            or len(set(outcome_attachments)) != len(outcome_attachments)
+        ):
+            raise ValueError("source consultation outcome inventory differs")
         _require_attachment_inventory(value)
         raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
     else:
@@ -325,6 +348,32 @@ def _require_link_inventory(value: dict, *, key: str) -> None:
         paths.append(path)
     if len(set(paths)) != len(paths):
         raise ValueError("source child inventory is incomplete")
+
+
+def _require_collection_inventory(value: dict) -> None:
+    """Validate either structured children or an observed body-backed collection."""
+    links = value.get("links")
+    if type(links) is dict and links.get("documents"):
+        _require_link_inventory(value, key="documents")
+        return
+    details = value.get("details")
+    groups = details.get("collection_groups") if type(details) is dict else None
+    if (
+        value.get("schema_name") != "document_collection"
+        or type(groups) is not list
+        or not groups
+    ):
+        raise ValueError("source child inventory is absent")
+    _document_text(value)
+    for group in groups:
+        if (
+            type(group) is not dict
+            or type(group.get("title")) is not str
+            or not group["title"].strip()
+            or type(group.get("body")) is not str
+            or type(group.get("documents")) is not list
+        ):
+            raise ValueError("source child inventory differs")
 
 
 def _require_attachment_inventory(value: dict) -> None:
