@@ -118,6 +118,17 @@ def test_native_cycle_isolates_hold_then_admits_and_replays_after_restart(
         fences.append("entered")
         return nullcontext()
 
+    from newsroom.control_plane import native_cycle
+
+    preparations = []
+    original_prepare = native_cycle.advance_native_triage
+
+    def counted_prepare(*args, **kwargs):
+        preparations.append(kwargs["work"].version.version_id)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(native_cycle, "advance_native_triage", counted_prepare)
+
     with _shared_system(
         tmp_path, monkeypatch, retrieval_authority, collision=enforcer
     ) as reopened:
@@ -138,10 +149,19 @@ def test_native_cycle_isolates_hold_then_admits_and_replays_after_restart(
         candidate = outcomes[1].triage.candidate
         assert candidate is not None
         assert fences == ["entered"]
+        assert preparations == [
+            held.triage.work.version.version_id,
+            held.triage.work.version.version_id,
+        ]
 
     with _shared_system(
         tmp_path, monkeypatch, retrieval_authority, collision=enforcer
     ) as restarted:
+        def unbounded_history(*_args, **_kwargs):
+            raise AssertionError("native replay used an unbounded history read")
+
+        monkeypatch.setattr(type(restarted.candidates), "versions", unbounded_history)
+        monkeypatch.setattr(type(restarted.hypotheses), "current", unbounded_history)
         replay = advance_native_cycle(
             restarted,
             (status,),

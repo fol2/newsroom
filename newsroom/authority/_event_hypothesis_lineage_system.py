@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -309,6 +310,7 @@ class _LineageStore(_EventAuthorityStore):
         current_version_ids: tuple[str, ...] = (),
         *,
         proof: object | None = None,
+        exact_relationships: bool = False,
     ):
         nodes = {
             node.version_id: node
@@ -343,9 +345,11 @@ class _LineageStore(_EventAuthorityStore):
             )
         else:
             retained_relationships, retained_versions = (
-                self._port._require_retained_inputs_in_transaction(
-                    relationship_digests, tuple(sorted(nodes))
-                )
+                (
+                    self._port._require_exact_retained_inputs_in_transaction
+                    if exact_relationships
+                    else self._port._require_retained_inputs_in_transaction
+                )(relationship_digests, tuple(sorted(nodes)))
             )
             current_versions = ()
             current_dispositions = ()
@@ -396,11 +400,116 @@ class _LineageStore(_EventAuthorityStore):
             receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs
         )
 
+    def _require_materialised_heads(self, receipts, replay) -> None:
+        producers = {
+            node.version_id: (
+                receipt.lineage_id,
+                str(self._row(receipt.lineage_id)["recorded_at"]),
+            )
+            for receipt in receipts
+            for node in receipt.outputs
+        }
+        hypothesis_ids = tuple(sorted({
+            node.hypothesis_id
+            for receipt in receipts
+            for node in (*receipt.inputs, *receipt.outputs)
+        } | {head.node.hypothesis_id for head in replay.active_heads}))
+        if not hypothesis_ids:
+            return
+        placeholders = ",".join("?" for _ in hypothesis_ids)
+        actual = tuple(sorted(tuple(row) for row in self._connection.execute(
+            "SELECT hypothesis_id,version_id,version_digest,generation,"
+            "producing_lineage_id,updated_at FROM event_hypothesis_lineage_heads "
+            f"WHERE hypothesis_id IN ({placeholders})",
+            hypothesis_ids,
+        )))
+        expected = tuple(sorted(
+            (
+                head.node.hypothesis_id,
+                head.node.version_id,
+                head.node.version_digest,
+                head.generation,
+                *producers[head.node.version_id],
+            )
+            for head in replay.active_heads
+            if head.node.version_id in producers
+        ))
+        if actual != expected:
+            raise HypothesisLineageContractError(
+                "lineage materialised heads differ"
+            )
+
     def _history_rows(self) -> tuple[HypothesisLineageReceipt, ...]:
         return tuple(
             self._load_row(str(row[0]))
             for row in self._connection.execute(
                 "SELECT lineage_id FROM event_hypothesis_lineage ORDER BY expected_generation,lineage_id"
+            )
+        )
+
+    def _lineage_closure(
+        self, version_ids: tuple[str, ...]
+    ) -> tuple[HypothesisLineageReceipt, ...]:
+        """Load the exact connected lineage component for requested Versions."""
+
+        retained: dict[str, HypothesisLineageReceipt] = {}
+        pending = list(version_ids)
+        seen_versions: set[str] = set()
+        while pending:
+            version_id = pending.pop()
+            if version_id in seen_versions:
+                continue
+            seen_versions.add(version_id)
+            producers = self._connection.execute(
+                "SELECT DISTINCT l.lineage_id FROM event_hypothesis_lineage l, "
+                "json_each(CAST(l.receipt_bytes AS TEXT),'$.outputs') output "
+                "WHERE json_extract(output.value,'$.version_id')=? LIMIT 2",
+                (version_id,),
+            ).fetchall()
+            consumers = self._connection.execute(
+                "SELECT DISTINCT l.lineage_id FROM event_hypothesis_lineage l, "
+                "json_each(CAST(l.receipt_bytes AS TEXT),'$.inputs') input "
+                "WHERE json_extract(input.value,'$.version_id')=? LIMIT 2",
+                (version_id,),
+            ).fetchall()
+            if len(producers) > 1:
+                raise HypothesisLineageContractError(
+                    "one Version has multiple lineage producers"
+                )
+            if len(consumers) > 1:
+                raise HypothesisLineageContractError(
+                    "one Version has multiple lineage consumers"
+                )
+            for row in (*producers, *consumers):
+                receipt = self._load_row(str(row[0]))
+                existing = retained.get(receipt.lineage_id)
+                if existing is not None:
+                    if existing != receipt:
+                        raise HypothesisLineageContractError(
+                            "lineage producer replay differs"
+                        )
+                    continue
+                retained[receipt.lineage_id] = receipt
+                pending.extend(
+                    node.version_id for node in (*receipt.inputs, *receipt.outputs)
+                )
+                if receipt.reversal_target is not None:
+                    target = self._load_row(receipt.reversal_target.lineage_id)
+                    if (
+                        target.canonical_digest
+                        != receipt.reversal_target.lineage_digest
+                    ):
+                        raise HypothesisLineageContractError(
+                            "lineage reversal target differs"
+                        )
+                    retained[target.lineage_id] = target
+                    pending.extend(
+                        node.version_id for node in (*target.inputs, *target.outputs)
+                    )
+        return tuple(
+            sorted(
+                retained.values(),
+                key=lambda item: (item.expected_generation, item.lineage_id),
             )
         )
 
@@ -530,7 +639,6 @@ class _LineageStore(_EventAuthorityStore):
         self, receipt_bytes: bytes, *, proof: AuthenticationProof
     ) -> HypothesisLineageReceipt:
         receipt = HypothesisLineageReceipt.from_canonical_bytes(receipt_bytes)
-        self._verify()
         existing = self._connection.execute(
             "SELECT * FROM event_hypothesis_lineage WHERE lineage_id=?",
             (receipt.lineage_id,),
@@ -541,6 +649,33 @@ class _LineageStore(_EventAuthorityStore):
         actor = _actor(grant.authentication)
         if existing is not None:
             retained = self._load_row(receipt.lineage_id)
+            component = self._lineage_closure(
+                tuple(
+                    node.version_id
+                    for node in (*receipt.inputs, *receipt.outputs)
+                )
+            )
+            if receipt.lineage_id not in {
+                item.lineage_id for item in component
+            }:
+                raise HypothesisLineageContractError(
+                    "lineage replay closure is incomplete"
+                )
+            roots, versions, proofs, _, _, _ = self._replay_inputs(
+                component, exact_relationships=True
+            )
+            replay = replay_hypothesis_lineage(
+                component,
+                initial_heads=roots,
+                versions=versions,
+                relationship_proofs=proofs,
+            )
+            self._require_materialised_heads(component, replay)
+            retained = next(
+                item
+                for item in replay.history
+                if item.lineage_id == receipt.lineage_id
+            )
             if retained.canonical_bytes != receipt_bytes or actor != str(
                 existing["actor_identity_digest"]
             ):
@@ -558,8 +693,101 @@ class _LineageStore(_EventAuthorityStore):
                 node.version_id, proof=proof
             )
             _exact_version(current, node)
-        history = self._history_rows()
-        replay = self._full_replay((*history, receipt))
+        history_by_id = {
+            item.lineage_id: item
+            for item in self._lineage_closure(
+                tuple(node.version_id for node in receipt.inputs)
+            )
+        }
+        if receipt.reversal_target is not None:
+            target = self._load_row(receipt.reversal_target.lineage_id)
+            if target.canonical_digest != receipt.reversal_target.lineage_digest:
+                raise HypothesisLineageContractError(
+                    "lineage reversal target differs"
+                )
+            history_by_id[target.lineage_id] = target
+        history = tuple(
+            sorted(
+                history_by_id.values(),
+                key=lambda item: (item.expected_generation, item.lineage_id),
+            )
+        )
+        if history:
+            roots, versions, proofs, _, _, _ = self._replay_inputs(
+                history, exact_relationships=True
+            )
+            self._require_materialised_heads(
+                history,
+                replay_hypothesis_lineage(
+                    history,
+                    initial_heads=roots,
+                    versions=versions,
+                    relationship_proofs=proofs,
+                ),
+            )
+        produced_versions = {
+            node.version_id for item in history for node in item.outputs
+        }
+        consumed_versions = {
+            node.version_id for item in history for node in item.inputs
+        }
+        for node in receipt.inputs:
+            head = self._connection.execute(
+                "SELECT version_id,version_digest,generation FROM "
+                "event_hypothesis_lineage_heads WHERE hypothesis_id=?",
+                (node.hypothesis_id,),
+            ).fetchone()
+            expected = (
+                node.version_id,
+                node.version_digest,
+                receipt.expected_generation,
+            )
+            if node.version_id in consumed_versions or (
+                node.version_id in produced_versions and (
+                head is None or tuple(head) != expected
+                )
+            ) or (node.version_id not in produced_versions and head is not None):
+                raise HypothesisLineageContractError(
+                    "lineage input differs from the exact active head"
+                )
+        input_hypotheses = {node.hypothesis_id for node in receipt.inputs}
+        for node in receipt.outputs:
+            active = self._connection.execute(
+                "SELECT version_id FROM event_hypothesis_lineage_heads "
+                "WHERE hypothesis_id=?",
+                (node.hypothesis_id,),
+            ).fetchone()
+            if active is not None and node.hypothesis_id not in input_hypotheses:
+                raise HypothesisLineageContractError(
+                    "lineage output Hypothesis is already active"
+                )
+            prior = self._connection.execute(
+                "SELECT 1 FROM event_hypothesis_lineage l, "
+                "json_each(CAST(l.receipt_bytes AS TEXT),'$.outputs') output "
+                "WHERE json_extract(output.value,'$.version_id')=? LIMIT 1",
+                (node.version_id,),
+            ).fetchone()
+            if prior is not None:
+                raise HypothesisLineageContractError(
+                    "lineage output Version has already been seen"
+                )
+        candidate_history = (*history, receipt)
+        roots, versions, proofs, _, _, _ = self._replay_inputs(
+            candidate_history,
+            current_version_ids=tuple(
+                sorted({
+                    node.version_id
+                    for node in (*receipt.inputs, *receipt.outputs)
+                })
+            ),
+            proof=proof,
+        )
+        replay = replay_hypothesis_lineage(
+            candidate_history,
+            initial_heads=roots,
+            versions=versions,
+            relationship_proofs=proofs,
+        )
         verified = replay.history[-1]
         recorded_at = self._clock().to_text()
         committed = self._commit_grant_in_transaction(
@@ -584,8 +812,27 @@ class _LineageStore(_EventAuthorityStore):
                 recorded_at,
             ),
         )
-        self._rebuild_heads(replay)
-        self._verify()
+        self._connection.executemany(
+            "DELETE FROM event_hypothesis_lineage_heads WHERE hypothesis_id=?",
+            [(node.hypothesis_id,) for node in verified.inputs],
+        )
+        self._connection.executemany(
+            "INSERT INTO event_hypothesis_lineage_heads VALUES(?,?,?,?,?,?)",
+            [
+                (
+                    node.hypothesis_id,
+                    node.version_id,
+                    node.version_digest,
+                    verified.expected_generation + 1,
+                    verified.lineage_id,
+                    recorded_at,
+                )
+                for node in verified.outputs
+            ],
+        )
+        if self._load_row(verified.lineage_id) != verified:
+            raise HypothesisLineageContractError("lineage readback differs")
+        self._require_materialised_heads(candidate_history, replay)
         return verified
 
     def retain(
@@ -784,7 +1031,7 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
         payload_schemas=payload_schemas, clock=clock,
         current_candidate_citations=current_candidate_citations,
         hypotheses=hypotheses)
-    verifier = object.__new__(_LineageStore); verifier._conn = connection; verifier._closed = False; verifier._port = port
+    verifier = object.__new__(_LineageStore); verifier._conn = connection; verifier._closed = False; verifier._lock = threading.RLock(); verifier._port = port
     if object_admission_payload_validator is not None:
         verifier._validate_object_admission_payload_record = object_admission_payload_validator
     relationship_commands, relationship_schemas = merge_relationship_authority_registries(command_registry, payload_schemas)
@@ -804,25 +1051,37 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
         )
 
     def candidate_inputs(version_id: str, digests: tuple[str, ...], proof: object):
-        current_ids = tuple(sorted({
+        receipts = verifier._lineage_closure((version_id,))
+        producer_ids = tuple(item.lineage_id for item in receipts)
+        if producer_ids:
+            placeholders = ",".join("?" for _ in producer_ids)
+            current_ids = tuple(sorted({
                 version_id,
                 *(
                     str(row[0])
                     for row in connection.execute(
-                        "SELECT version_id FROM event_hypothesis_lineage_heads"
+                        "SELECT version_id FROM event_hypothesis_lineage_heads "
+                        f"WHERE producing_lineage_id IN ({placeholders})",
+                        producer_ids,
                     )
                 ),
             }))
+        else:
+            current_ids = (version_id,)
         (
-            receipts,
             roots,
             versions,
             proofs,
-            replay,
             relationships,
             current_versions,
             current_dispositions,
-        ) = verified(digests, current_ids, proof=proof)
+        ) = verifier._replay_inputs(receipts, digests, current_ids, proof=proof)
+        replay = replay_hypothesis_lineage(
+            receipts,
+            initial_heads=roots,
+            versions=versions,
+            relationship_proofs=proofs,
+        )
         current_by_id = {item.version_id: item for item in current_versions}
         current = current_by_id[version_id]
         if current.version_id not in {item.version_id for item in versions}:
@@ -831,7 +1090,9 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
         heads = {head.node.version_id: head for head in replay.active_heads}
         for head in replay.active_heads:
             retained = current_by_id[head.node.version_id]
-            if retained.canonical_digest != head.node.version_digest: raise HypothesisLineageContractError("Candidate D3 head is stale")
+            if retained.canonical_digest != head.node.version_digest:
+                raise HypothesisLineageContractError("Candidate D3 head is stale")
+        verifier._require_materialised_heads(receipts, replay)
         subject_head = heads.get(current.version_id)
         if subject_head is None or subject_head.node.version_digest != current.canonical_digest:
             raise HypothesisLineageContractError("Candidate D3 head is stale")

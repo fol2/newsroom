@@ -512,9 +512,44 @@ def advance_native_triage(
     )
     if all(value is None for value in candidate_inputs):
         return result
+    return _admit_native_triage_candidate(
+        system,
+        triage=result,
+        collision_request=collision_request,
+        collision_decision=collision_decision,
+        candidate_request=candidate_request,
+        current_candidate_version=current_candidate_version,
+        proof=proof,
+    )
+
+
+def _admit_native_triage_candidate(
+    system: object,
+    *,
+    triage: NativeTriageResult,
+    collision_request: CurrentCollisionEligibilityRequest,
+    collision_decision: CurrentCollisionEligibilityDecision,
+    candidate_request: CandidateAdmissionRequest,
+    current_candidate_version: StoryCandidateVersion | None,
+    proof: AuthenticationProof,
+) -> NativeTriageResult:
+    """Continue one exact prepared native result through Candidate admission."""
+
+    if (
+        type(triage) is not NativeTriageResult
+        or triage.state not in {"CANDIDATE_READY", "SAME_STATE_ASSOCIATED"}
+        or triage.hypothesis is None
+        or triage.relationship is None
+        or type(collision_request) is not CurrentCollisionEligibilityRequest
+        or type(collision_decision) is not CurrentCollisionEligibilityDecision
+        or type(candidate_request) is not CandidateAdmissionRequest
+        or type(current_candidate_version) not in (type(None), StoryCandidateVersion)
+        or type(proof) is not AuthenticationProof
+    ):
+        raise NativeTriageError("Candidate continuation requires exact typed inputs")
     manifest = system.build_candidate_manifest(
-        hypothesis.version_id,
-        relationship.canonical_digest,
+        triage.hypothesis.version_id,
+        triage.relationship.canonical_digest,
         collision_decision,
         proof=proof,
     )
@@ -530,15 +565,15 @@ def advance_native_triage(
     )
     if admission.outcome is not CandidateAdmissionOutcome.ADMISSIBLE:
         return NativeTriageResult(
-            work,
+            triage.work,
             "CANDIDATE_HOLD",
-            batch,
-            attempt,
-            lease,
-            proposal,
-            dispositions,
-            hypothesis,
-            relationship,
+            triage.batch,
+            triage.attempt,
+            triage.lease,
+            triage.proposal,
+            triage.dispositions,
+            triage.hypothesis,
+            triage.relationship,
             admission,
             None,
         )
@@ -548,15 +583,15 @@ def advance_native_triage(
         proof=proof,
     )
     return NativeTriageResult(
-        work,
+        triage.work,
         "CANDIDATE_ADMITTED",
-        batch,
-        attempt,
-        lease,
-        proposal,
-        dispositions,
-        hypothesis,
-        relationship,
+        triage.batch,
+        triage.attempt,
+        triage.lease,
+        triage.proposal,
+        triage.dispositions,
+        triage.hypothesis,
+        triage.relationship,
         admission,
         candidate,
     )

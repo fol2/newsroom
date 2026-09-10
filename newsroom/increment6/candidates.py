@@ -1780,6 +1780,29 @@ class StoryCandidateAuthority:
         _require(type(value) is tuple and all(type(item) is StoryCandidateVersion for item in value), "Candidate history is forged")
         return value
 
+    def _exact_current_producers(
+        self, candidate_id: str, *, proof: object
+    ) -> tuple[StoryCandidateVersion, EventHypothesisVersion]:
+        value = _normalise(
+            lambda: self.__authority.exact_current_producers(
+                candidate_id, proof=proof
+            ),
+            "Candidate exact current producer read failed",
+        )
+        _require(
+            type(value) is tuple
+            and len(value) == 2
+            and type(value[0]) is StoryCandidateVersion
+            and type(value[1]) is EventHypothesisVersion,
+            "Candidate exact current producer read is forged",
+        )
+        return value
+
+    def _exact_current_candidate(self, candidate_id: str) -> StoryCandidateVersion:
+        return self._call(
+            "exact_current_candidate", candidate_id, expected=StoryCandidateVersion
+        )
+
     def current(self, candidate_id: str, *, collision_request: CurrentCollisionEligibilityRequest, proof: object) -> StoryCandidateVersion:
         return self._call("current", candidate_id, collision_request=collision_request, proof=proof, expected=StoryCandidateVersion)
 

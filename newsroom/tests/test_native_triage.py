@@ -24,6 +24,7 @@ from newsroom.discovery import (
     TimeValidity,
 )
 from newsroom.control_plane.native_triage import (
+    _admit_native_triage_candidate,
     advance_native_triage,
     build_native_triage_work,
     plan_native_schedule,
@@ -448,14 +449,28 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
             manifest.governing_state_binding.canonical_digest,
             None,
         )
-        admitted = advance_native_triage(
+        stale = _admit_native_triage_candidate(
             reopened,
-            work=work,
-            scheduling_decision=schedule.decision,
+            triage=reopened_result,
+            collision_request=collision_request_value,
+            collision_decision=collision_decision,
+            candidate_request=replace(
+                candidate_request,
+                expected_governing_state_digest="sha256:" + "0" * 64,
+            ),
+            current_candidate_version=None,
             proof=proof(),
+        )
+        assert stale.state == "CANDIDATE_HOLD"
+        assert stale.candidate is None
+        admitted = _admit_native_triage_candidate(
+            reopened,
+            triage=reopened_result,
             collision_request=collision_request_value,
             collision_decision=collision_decision,
             candidate_request=candidate_request,
+            current_candidate_version=None,
+            proof=proof(),
         )
         assert admitted.state == "CANDIDATE_ADMITTED"
         assert admitted.admission is not None

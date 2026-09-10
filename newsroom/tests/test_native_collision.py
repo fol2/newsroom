@@ -33,6 +33,7 @@ from newsroom.increment6.collision import (
     CandidateUseOperation,
     CurrentCollisionEligibilityBlocked,
 )
+from newsroom.increment6.candidates import CandidateContractError
 from newsroom.increment6.hypotheses import EventHypothesis
 from newsroom.increment6.dispositions import CurrentCandidateCitation
 from newsroom.increment6.work_items import RetrievalBindingState, RetrievalInputBinding
@@ -339,6 +340,20 @@ def test_native_collision_reads_current_candidate_and_replays_after_restart(
             if field != "citation_id"
         }
         stale_values["candidate_version_digest"] = "sha256:" + "0" * 64
+        monkeypatch.setattr(
+            type(reopened.candidates),
+            "versions",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("successor used unbounded Candidate history")
+            ),
+        )
+        monkeypatch.setattr(
+            type(reopened.hypotheses),
+            "current",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("successor used unbounded Hypothesis history")
+            ),
+        )
         with pytest.raises(NativeCollisionHold, match="CURRENT_CANDIDATE_CITATION_STALE"):
             _revision_successor(
                 reopened,
@@ -362,6 +377,22 @@ def test_native_collision_reads_current_candidate_and_replays_after_restart(
         )
         assert occupied.binding.operation is CandidateUseOperation.USE_CURRENT_CANDIDATE
         assert occupied.binding.expected_candidate_id == candidate.candidate_id
+
+        with sqlite3.connect(tmp_path / "native.sqlite3") as connection:
+            trigger = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name='candidate_head_update_guard'"
+            ).fetchone()[0]
+            connection.execute("DROP TRIGGER candidate_head_update_guard")
+            connection.execute(
+                "UPDATE story_candidate_heads SET current_version_ordinal="
+                "current_version_ordinal+1 WHERE candidate_id=?",
+                (candidate.candidate_id,),
+            )
+            connection.execute(trigger)
+        with pytest.raises(CandidateContractError, match="Candidate head"):
+            _revision_successor(
+                reopened, status.lead, citation, proof=proof()
+            )
 
     with sqlite3.connect(tmp_path / "native-collision.sqlite3") as journal:
         states = {

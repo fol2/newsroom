@@ -10,6 +10,7 @@ from newsroom.authority.auth import StaticAuthorizer
 from newsroom.authority.persistence import AuthoritySchemaError
 from newsroom.increment6.lineage import (
     EventHypothesisLineageAuthority,
+    HypothesisLineageHead,
     HypothesisLineageReceipt,
     HypothesisLineageRelationshipProof,
     lineage_command_definition,
@@ -555,6 +556,159 @@ def test_disjoint_lineages_preserve_each_head_producer_time(tmp_path) -> None:
         authority.close()
 
 
+def test_candidate_closure_keeps_untouched_split_sibling_current(tmp_path) -> None:
+    from newsroom.authority._event_hypothesis_lineage_system import (
+        _create_event_hypothesis_lineage_read_port,
+    )
+    from newsroom.increment6.lineage import merge_lineage_authority_registries
+    from newsroom.increment6.relationships import (
+        merge_relationship_authority_registries,
+    )
+
+    cached_seed = d2._SEED_CACHE
+    d2._SEED_CACHE = None
+    try:
+        seed = d2._seed_location(tmp_path / "partial-component", subjects=7)
+    finally:
+        d2._SEED_CACHE = cached_seed
+    args = d2._open_arguments(seed)
+    args["authorizer"] = _seed_authorizer()
+    commands, schemas = merge_relationship_authority_registries(
+        args["command_registry"], args["payload_schemas"]
+    )
+    commands, schemas = merge_lineage_authority_registries(commands, schemas)
+    checked = {**args, "command_registry": commands, "payload_schemas": schemas}
+    source, left, untouched, other_source, extra, other_untouched, combined = (
+        seed[3][:7]
+    )
+    relationships = open_event_hypothesis_relationship_authority(**checked)
+    try:
+        split_receipts = []
+        split_assessment = None
+        for split_source, outputs in (
+            (source, (left, untouched)),
+            (other_source, (extra, other_untouched)),
+        ):
+            split_proofs = []
+            for output in outputs:
+                other = outputs[1] if output is outputs[0] else outputs[0]
+                assessment, evidence = d3._decision(
+                    output,
+                    tuple(
+                        sorted(
+                            (split_source, other),
+                            key=lambda item: item.version_id,
+                        )
+                    ),
+                    CanonicalOutcome.REL_RELATED_DISTINCT,
+                )
+                relationships.retain(
+                    assessment.canonical_bytes,
+                    tuple(item.canonical_bytes for item in evidence),
+                    proof=seed[0][3],
+                )
+                split_proofs.append(
+                    HypothesisLineageRelationshipProof.from_assessment(
+                        assessment, evidence
+                    )
+                )
+                if output is untouched:
+                    split_assessment = assessment
+            split_receipts.append(
+                HypothesisLineageReceipt.split(
+                    expected_generation=0,
+                    source=split_source,
+                    outputs=outputs,
+                    relationship_proofs=tuple(split_proofs),
+                )
+            )
+        merge_inputs = tuple(sorted((left, extra), key=lambda item: item.version_id))
+        merge_assessment, merge_evidence = d3._decision(
+            combined, merge_inputs, CanonicalOutcome.REL_SAME_STATE
+        )
+        relationships.retain(
+            merge_assessment.canonical_bytes,
+            tuple(item.canonical_bytes for item in merge_evidence),
+            proof=seed[0][3],
+        )
+    finally:
+        relationships.close()
+    consolidation = HypothesisLineageReceipt.consolidation(
+        expected_generation=1,
+        inputs=merge_inputs,
+        output=combined,
+        relationship_proofs=(
+            HypothesisLineageRelationshipProof.from_assessment(
+                merge_assessment, merge_evidence
+            ),
+        ),
+    )
+    authority = open_event_hypothesis_lineage_authority(**checked)
+    try:
+        for split in split_receipts:
+            authority.retain(split.canonical_bytes, proof=seed[0][3])
+        authority.retain(consolidation.canonical_bytes, proof=seed[0][3])
+    finally:
+        authority.close()
+    assert split_assessment is not None
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    port = _create_event_hypothesis_lineage_read_port(
+        connection,
+        retrieval_authority=checked["retrieval_authority"],
+        authenticator=checked["authenticator"],
+        command_registry=commands,
+        payload_schemas=schemas,
+        clock=checked["clock"],
+    )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        snapshot, _, _ = port._require_candidate_inputs_in_transaction(
+            untouched.version_id,
+            split_assessment.canonical_digest,
+            proof=seed[0][3],
+        )
+        assert snapshot.subject == untouched
+        assert {head.node.version_id for head in snapshot.replay.active_heads} == {
+            untouched.version_id,
+            other_untouched.version_id,
+            combined.version_id,
+        }
+        with pytest.raises(ValueError, match="lineage|stale"):
+            port._require_candidate_inputs_in_transaction(
+                source.version_id,
+                split_assessment.canonical_digest,
+                proof=seed[0][3],
+            )
+    finally:
+        connection.execute("ROLLBACK")
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'event_hypothesis_lineage_head_update_guard'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER event_hypothesis_lineage_head_update_guard")
+    connection.execute(
+        "UPDATE event_hypothesis_lineage_heads SET producing_lineage_id=? "
+        "WHERE version_id=?",
+        (split_receipts[1].lineage_id, untouched.version_id),
+    )
+    connection.execute(trigger)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(ValueError, match="lineage|stale"):
+            port._require_candidate_inputs_in_transaction(
+                untouched.version_id,
+                split_assessment.canonical_digest,
+                proof=seed[0][3],
+            )
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
 def test_semantic_replay_rejects_divergent_output_and_actor(tmp_path) -> None:
     seed, args, receipt = _seed(tmp_path)
     divergent_output = seed[3][3]
@@ -595,6 +749,101 @@ def test_semantic_replay_rejects_divergent_output_and_actor(tmp_path) -> None:
         assert authority.history() == (receipt,)
     finally:
         authority.close()
+
+
+def test_lineage_replay_rejects_changed_exact_input_version(tmp_path) -> None:
+    seed, args, receipt = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_version_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET canonical_bytes=? WHERE version_id=?",
+        (b"{}", receipt.inputs[0].version_id),
+    )
+    connection.execute(trigger)
+    connection.close()
+    with pytest.raises(ValueError, match="lineage|retention"):
+        authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    authority.close()
+
+
+def test_lineage_rejects_second_consumption_of_generation_zero_input(tmp_path) -> None:
+    seed, args, first = _seed(tmp_path)
+    consumed = next(
+        version
+        for version in seed[3]
+        if version.version_id == first.inputs[0].version_id
+    )
+    other = seed[3][3]
+    output = seed[3][4]
+    inputs = tuple(sorted((consumed, other), key=lambda item: item.version_id))
+    assessment, evidence = d3._decision(
+        output, inputs, CanonicalOutcome.REL_SAME_STATE
+    )
+    relationships = open_event_hypothesis_relationship_authority(**args)
+    try:
+        relationships.retain(
+            assessment.canonical_bytes,
+            tuple(item.canonical_bytes for item in evidence),
+            proof=seed[0][3],
+        )
+    finally:
+        relationships.close()
+    second = HypothesisLineageReceipt.consolidation(
+        expected_generation=0,
+        inputs=inputs,
+        output=output,
+        relationship_proofs=(
+            HypothesisLineageRelationshipProof.from_assessment(assessment, evidence),
+        ),
+    )
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        authority.retain(first.canonical_bytes, proof=seed[0][3])
+        with pytest.raises(ValueError, match="lineage|current|stale"):
+            authority.retain(second.canonical_bytes, proof=seed[0][3])
+    finally:
+        authority.close()
+
+
+def test_empty_component_rejects_forged_generation_zero_materialised_head(
+    tmp_path,
+) -> None:
+    from newsroom.authority._event_hypothesis_lineage_system import _LineageStore
+
+    seed, _, receipt = _seed(tmp_path)
+    node = receipt.inputs[0]
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute(
+        "CREATE TABLE event_hypothesis_lineage_heads("
+        "hypothesis_id,version_id,version_digest,generation,"
+        "producing_lineage_id,updated_at)"
+    )
+    connection.execute(
+        "INSERT INTO event_hypothesis_lineage_heads VALUES(?,?,?,?,?,?)",
+        (
+            node.hypothesis_id,
+            node.version_id,
+            node.version_digest,
+            0,
+            "forged-lineage",
+            "2042-01-01T00:00:00.000000Z",
+        ),
+    )
+    store = object.__new__(_LineageStore)
+    store._conn = connection
+    store._closed = False
+    replay = type(
+        "Replay", (), {"active_heads": (HypothesisLineageHead(node, 0),)}
+    )()
+    with pytest.raises(ValueError, match="materialised heads"):
+        store._require_materialised_heads((), replay)
+    connection.close()
 
 
 @pytest.mark.parametrize("field", ("generation", "timestamp"))

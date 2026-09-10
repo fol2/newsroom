@@ -470,7 +470,6 @@ class _RelationshipEventStore(_EventAuthorityStore):
             )
         stored_evidence, evidence_values = _evidence_bytes(evidence)
         conn = self._connection
-        self._verify_relationships()
         existing = conn.execute(
             "SELECT decision_id,authority_aggregate_id,evidence_bytes,actor_identity_digest "
             "FROM event_hypothesis_relationship_decisions WHERE subject_version_id=?",
@@ -487,7 +486,27 @@ class _RelationshipEventStore(_EventAuthorityStore):
             grant.authentication
         )
         if existing is not None:
-            retained = self._load_row(str(existing["decision_id"]))
+            with self._hypothesis_rows():
+                version_ids = (
+                    assessment.subject.version_id,
+                    *(item.version_id for item in assessment.comparator_manifest.comparators),
+                )
+                verified_versions = {
+                    version_id: self._hypotheses._exact_version(version_id)
+                    for version_id in version_ids
+                }
+            retained_receipt = _load_retained_relationship_receipt_in_transaction(
+                conn,
+                self._hypotheses,
+                self._command_registry,
+                self._payload_schemas,
+                str(existing["decision_id"]),
+                verified_versions=verified_versions,
+            )
+            retained = retained_receipt.assessment
+            self._validate_retained_event(
+                str(self._row(retained.canonical_digest)["authority_event_id"])
+            )
             if (
                 retained.canonical_bytes != assessment_bytes
                 or bytes(existing["evidence_bytes"]) != stored_evidence
@@ -558,7 +577,21 @@ class _RelationshipEventStore(_EventAuthorityStore):
                 recorded_at,
             ),
         )
-        self._verify_relationships()
+        verified_versions = {
+            subject.version_id: subject,
+            **{value.version_id: value for value in comparators},
+        }
+        retained = _load_retained_relationship_receipt_in_transaction(
+            conn,
+            self._hypotheses,
+            self._command_registry,
+            self._payload_schemas,
+            verified.canonical_digest,
+            verified_versions=verified_versions,
+        )
+        self._validate_retained_event(committed.event_id)
+        if retained.assessment != verified:
+            raise RelationshipContractError("relationship readback differs")
         return verified
 
     def retain(
@@ -851,30 +884,24 @@ class _EventHypothesisRelationshipReadAuthority:
             tuple[EventHypothesisVersion, ...],
             tuple[ProposalDisposition, ...],
         ]:
-            versions, receipts = _verify_relationship_reads_in_transaction(
-                self.__connection,
-                self.__hypotheses,
-                *self.__registries,
-                self.__event_validator,
-            )
-            _verify_relationship_event_coverage(
-                self.__connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
-            )
             try:
-                retained_receipts = tuple(
-                    receipts[item] for item in assessment_digests
+                retained_receipts, retained_versions = (
+                    self.require_exact_retained_inputs_in_transaction(
+                        assessment_digests, version_ids
+                    )
                 )
-                retained_versions = tuple(versions[item] for item in version_ids)
-            except KeyError as exc:
+            except (KeyError, RelationshipContractError) as exc:
+                if isinstance(exc, RelationshipContractError):
+                    raise
                 raise RelationshipContractError(
                     "unknown Candidate relationship input"
                 ) from exc
-            current_versions, dispositions = (
-                self.__hypotheses
-                ._require_current_versions_after_integrity_in_transaction(
-                    current_version_ids, versions, proof=proof
+            with _transaction_hypothesis_rows(self.__connection):
+                current_versions, dispositions = (
+                    self.__hypotheses._exact_current_versions_in_transaction(
+                        current_version_ids, proof=proof
+                    )
                 )
-            )
             return (
                 retained_receipts,
                 retained_versions,
@@ -883,6 +910,56 @@ class _EventHypothesisRelationshipReadAuthority:
             )
 
         return self.__read(value)
+
+    def require_exact_retained_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+    ]:
+        rows = tuple(
+            _relationship_row(self.__connection, item)
+            for item in assessment_digests
+        )
+        assessments = tuple(
+            RelationshipAssessment.from_canonical_bytes(bytes(row["assessment_bytes"]))
+            for row in rows
+        )
+        required_version_ids = tuple(sorted({
+            *version_ids,
+            *(item.subject.version_id for item in assessments),
+            *(
+                comparator.version_id
+                for item in assessments
+                for comparator in item.comparator_manifest.comparators
+            ),
+        }))
+        with _transaction_hypothesis_rows(self.__connection):
+            versions = {
+                version_id: self.__hypotheses._exact_version(version_id)
+                for version_id in required_version_ids
+            }
+        receipts = tuple(
+            _load_retained_relationship_receipt_in_transaction(
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                digest,
+                verified_versions=versions,
+            )
+            for digest in assessment_digests
+        )
+        for row in rows:
+            self.__event_validator(str(row["authority_event_id"]))
+        try:
+            retained_versions = tuple(versions[item] for item in version_ids)
+        except KeyError as exc:
+            raise RelationshipContractError(
+                "unknown retained relationship input"
+            ) from exc
+        return receipts, retained_versions
 
     def require_retained_version_in_transaction(
         self, version_id: str

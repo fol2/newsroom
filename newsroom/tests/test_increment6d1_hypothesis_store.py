@@ -1060,6 +1060,35 @@ def test_target_bearing_create_pins_current_target_and_reopens(
         connection.close()
 
 
+def test_target_bearing_replay_rejects_changed_target_canonical_bytes(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    connection, _, _, proof, proposal, dispositions, *_ = fixture
+    authority = _open(fixture)
+    target = authority.retain(proposal, dispositions, proof=proof)
+    raw, source = _targeted_proposal(
+        fixture,
+        proposal_id="00000000-0000-4000-8000-000000000103",
+        local_id="hypothesis:changed-target",
+        relationship="RELATED_DISTINCT",
+        target=target.hypothesis_id,
+    )
+    authority.retain(raw, source, proof=proof, expected_target_version=target)
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_version_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET canonical_bytes=? "
+        "WHERE version_id=?",
+        (b"{}", target.version_id),
+    )
+    connection.execute(trigger)
+    with pytest.raises(HypothesisContractError):
+        authority.retain(raw, source, proof=proof, expected_target_version=target)
+    authority.close()
+
+
 def test_target_comparators_reject_arbitrary_wrong_and_stale_heads_without_rows(
     tmp_path,
 ) -> None:
@@ -1209,6 +1238,143 @@ def test_append_replay_stale_cas_and_reopen_exact_chain(
     finally:
         reopened.close()
         reopened_connection.close()
+
+
+def test_exact_current_accepts_successor_recorded_at_a_later_instant(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    current_time = [UtcTimestamp.parse("2042-01-01T00:00:00.000000Z")]
+    store = _HypothesisStore(
+        fixture[0], fixture[1], fixture[2], lambda: current_time[0]
+    )
+    from newsroom.increment6.hypotheses import _compose_event_hypothesis_authority
+
+    authority = _compose_event_hypothesis_authority(
+        _compose_event_hypothesis_authority_for_test(store, lambda: None)
+    )
+    first = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    raw, source = _targeted_proposal(
+        fixture,
+        proposal_id="00000000-0000-4000-8000-000000000124",
+        local_id="hypothesis:later-successor",
+        relationship="DEVELOPMENT_OF",
+        target=first.hypothesis_id,
+    )
+    current_time[0] = UtcTimestamp.parse("2042-01-01T00:05:00.000000Z")
+    second = authority.retain(
+        raw, source, proof=fixture[3], expected_target_version=first
+    )
+    assert second.recorded_at == current_time[0].to_text()
+    assert authority.current(first.hypothesis_id, proof=fixture[3]) == second
+    authority.close()
+
+
+def test_exact_current_rejects_rehashed_summary_and_creation_drift(tmp_path) -> None:
+    fixture = _authority_fixture(tmp_path)
+    authority = _open(fixture)
+    first = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    connection = fixture[0]
+    version_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_version_update'"
+    ).fetchone()[0]
+    head_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'event_hypothesis_head_update_guard'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
+    connection.execute("DROP TRIGGER event_hypothesis_head_update_guard")
+    changed = replace(first, proposed_summary=first.proposed_summary + " drift")
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET canonical_bytes=?,canonical_digest=? "
+        "WHERE version_id=?",
+        (changed.canonical_bytes, changed.canonical_digest, first.version_id),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_heads_v2 SET version_digest=? WHERE hypothesis_id=?",
+        (changed.canonical_digest, first.hypothesis_id),
+    )
+    connection.execute(version_trigger)
+    connection.execute(head_trigger)
+    with pytest.raises(HypothesisContractError, match="Proposal retargeted"):
+        authority.current(first.hypothesis_id, proof=fixture[3])
+    authority.close()
+
+    fixture = _authority_fixture(tmp_path / "creation")
+    authority = _open(fixture)
+    first = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    connection = fixture[0]
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_update")
+    drifted_at = "2042-01-01T00:01:00.000000Z"
+    connection.execute(
+        "UPDATE event_hypotheses_v2 SET authority_event_id=?,recorded_at=? "
+        "WHERE hypothesis_id=?",
+        (
+            _creation_event_id(
+                first.hypothesis_id, first.actor_identity_digest, drifted_at
+            ),
+            drifted_at,
+            first.hypothesis_id,
+        ),
+    )
+    connection.execute(trigger)
+    with pytest.raises(HypothesisContractError, match="creation provenance"):
+        authority.current(first.hypothesis_id, proof=fixture[3])
+    authority.close()
+
+    fixture = _authority_fixture(tmp_path / "actor")
+    authority = _open(fixture)
+    first = authority.retain(fixture[4], fixture[5], proof=fixture[3])
+    connection = fixture[0]
+    version_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_version_update'"
+    ).fetchone()[0]
+    head_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'event_hypothesis_head_update_guard'"
+    ).fetchone()[0]
+    document = json.loads(first.canonical_bytes)
+    document["version"]["actor_identity_digest"] = _D2
+    document["version"]["authority_event_id"] = _version_event_id(
+        first.hypothesis_id,
+        first.ordinal,
+        first.previous_version_digest,
+        first.proposal_canonical_digest,
+        first.proposal_local_id,
+        first.target_version_digest,
+        first.source_bindings,
+        _D2,
+        first.recorded_at,
+    )
+    changed_bytes = canonical_json_bytes(document)
+    changed_digest = digest_bytes(changed_bytes)
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
+    connection.execute("DROP TRIGGER event_hypothesis_head_update_guard")
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET actor_identity_digest=?,"
+        "authority_event_id=?,canonical_bytes=?,canonical_digest=? "
+        "WHERE version_id=?",
+        (
+            _D2,
+            document["version"]["authority_event_id"],
+            changed_bytes,
+            changed_digest,
+            first.version_id,
+        ),
+    )
+    connection.execute(
+        "UPDATE event_hypothesis_heads_v2 SET version_digest=? WHERE hypothesis_id=?",
+        (changed_digest, first.hypothesis_id),
+    )
+    connection.execute(version_trigger)
+    connection.execute(head_trigger)
+    with pytest.raises(HypothesisContractError, match="source actor differs"):
+        authority.current(first.hypothesis_id, proof=fixture[3])
+    authority.close()
 
 
 def test_upstream_advance_invalidates_current_but_not_history_or_replay(
@@ -1390,22 +1556,22 @@ def test_transaction_owner_lock_isolates_failure_from_replay_and_current(
         lambda: UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
     )
     first = store.retain(proposal, dispositions, proof=proof)
-    original_verify = _HypothesisStore._verify
+    original_verify = _HypothesisStore._exact_version
     failure_started = threading.Event()
     release_failure = threading.Event()
     reader_started = threading.Event()
     injected = False
 
-    def verify(candidate):
+    def verify(candidate, version_id):
         nonlocal injected
         if not injected:
             injected = True
             failure_started.set()
             assert release_failure.wait(5)
             raise RuntimeError("ordinary injected failure")
-        return original_verify(candidate)
+        return original_verify(candidate, version_id)
 
-    monkeypatch.setattr(_HypothesisStore, "_verify", verify)
+    monkeypatch.setattr(_HypothesisStore, "_exact_version", verify)
 
     def fail():
         with pytest.raises(HypothesisContractError):

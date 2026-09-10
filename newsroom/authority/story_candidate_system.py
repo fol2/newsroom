@@ -918,6 +918,45 @@ class _CandidateStore(_EventAuthorityStore):
             self._verify()
             return self.load_candidate_in_transaction(candidate_id)
 
+    def exact_current_producers(self, candidate_id: str, *, proof: AuthenticationProof):
+        if not self._connection.in_transaction:
+            with self._lock, self._transaction():
+                return self.exact_current_producers(candidate_id, proof=proof)
+        admission, _, version, collision, _, disposition_ids, _ = (
+            self._exact_current_receipt(candidate_id)
+        )
+
+        producers = self._producers(admission.governing_manifest, proof)
+        if (
+            producers[2] != disposition_ids
+            or self._manifest(producers, collision) != version.governing_manifest
+        ):
+            raise CandidateContractError("Candidate current governing material differs")
+        return version, producers[0].subject
+
+    def _exact_current_receipt(self, candidate_id: str):
+        verified = self._verify_local()
+        row = self._connection.execute(
+            "SELECT current_admission_digest FROM "
+            "story_candidate_heads WHERE candidate_id=?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise CandidateContractError("unknown Candidate")
+        try:
+            current = verified[str(row[0])]
+        except KeyError as exc:
+            raise CandidateContractError("Candidate head differs") from exc
+        if current[2].candidate_id != candidate_id:
+            raise CandidateContractError("Candidate head differs")
+        return current
+
+    def exact_current_candidate(self, candidate_id: str):
+        if not self._connection.in_transaction:
+            with self._lock, self._transaction():
+                return self.exact_current_candidate(candidate_id)
+        return self._exact_current_receipt(candidate_id)[2]
+
     def versions(self, candidate_id: str):
         with self._lock, self._transaction():
             self._verify()
