@@ -30,6 +30,13 @@ from newsroom.increment6.collision import (
     TrustedCurrentCollisionAuthorityContext,
 )
 from newsroom.increment6.candidates import StoryCandidateVersion
+from newsroom.increment6.hypotheses import EventHypothesisVersion
+from newsroom.increment6.relationships import (
+    CanonicalOutcome,
+    ComparatorEvidence,
+    RelationshipAssessment,
+    assess_relationships,
+)
 from newsroom.increment6.dispositions import (
     CurrentCandidateCitation,
     CurrentCandidateCitationReadPort,
@@ -144,7 +151,7 @@ class NativeCollisionAuthority:
         *,
         proof: AuthenticationProof,
     ) -> CurrentCandidateCitation | None:
-        """Retain the actual current stable source-item Candidate head, if any."""
+        """Read the actual current stable source-item Candidate head, if any."""
 
         if type(lead) is not NewsLead:
             raise TypeError("native collision citation requires an exact Lead")
@@ -185,8 +192,44 @@ class NativeCollisionAuthority:
             authorization_receipt_digest=authorization_receipt_digest,
             authorization_decision_id=authorization_decision_id,
         )
-        self._retain_candidate_citation(citation)
         return citation
+
+    def retain_associated_candidate_citation(
+        self,
+        citation: CurrentCandidateCitation,
+        candidate: StoryCandidateVersion,
+        hypothesis: EventHypothesisVersion,
+    ) -> CurrentCandidateCitation:
+        """Bind a collision-slot Candidate to its checked current association."""
+        if (
+            type(citation) is not CurrentCandidateCitation
+            or type(candidate) is not StoryCandidateVersion
+            or type(hypothesis) is not EventHypothesisVersion
+            or candidate.candidate_id != citation.candidate_id
+            or candidate.version_id != citation.candidate_version_id
+            or candidate.canonical_digest != citation.candidate_version_digest
+            or candidate.governing_manifest.hypothesis_id != citation.hypothesis_id
+            or candidate.governing_manifest.hypothesis_id != hypothesis.hypothesis_id
+        ):
+            raise NativeCollisionHold("CURRENT_CANDIDATE_ASSOCIATION_DIFFERS")
+        associated = CurrentCandidateCitation.create(
+            candidate_id=citation.candidate_id,
+            candidate_version_id=citation.candidate_version_id,
+            candidate_version_digest=citation.candidate_version_digest,
+            hypothesis_id=hypothesis.hypothesis_id,
+            hypothesis_version_id=hypothesis.version_id,
+            hypothesis_version_digest=hypothesis.canonical_digest,
+            collision_namespace=citation.collision_namespace,
+            collision_key_digest=citation.collision_key_digest,
+            source_definition_id=citation.source_definition_id,
+            source_item_id=citation.source_item_id,
+            retrieval_context_digest=citation.retrieval_context_digest,
+            authorization_receipt_digest=citation.authorization_receipt_digest,
+            authorization_decision_id=citation.authorization_decision_id,
+        )
+        self._validate_retained_association(associated)
+        self._retain_candidate_citation(associated)
+        return associated
 
     def candidate_citation_read_port(self) -> CurrentCandidateCitationReadPort:
         return _create_current_candidate_citation_read_port(
@@ -342,7 +385,185 @@ class NativeCollisionAuthority:
         citation = CurrentCandidateCitation.from_canonical_bytes(bytes(row[1]))
         if citation.citation_id != citation_id or citation.canonical_digest != citation_digest:
             raise NativeCollisionHold("CURRENT_COLLISION_CITATION_DIFFERS")
+        self._validate_retained_association(citation)
         return citation
+
+    def _validate_retained_association(
+        self, citation: CurrentCandidateCitation
+    ) -> None:
+        """Recheck the immutable SAME_STATE chain named by a citation."""
+        uri = f"file:{self._path.resolve()}?mode=ro"
+        try:
+            with closing(
+                sqlite3.connect(uri, uri=True, isolation_level=None)
+            ) as connection:
+                candidate_row = connection.execute(
+                    "SELECT candidate_id,version_id,version_digest,version_bytes FROM "
+                    "story_candidate_admission_receipts_v2 WHERE version_id=?",
+                    (citation.candidate_version_id,),
+                ).fetchone()
+                target_row = connection.execute(
+                    "SELECT hypothesis_id,version_id,ordinal,canonical_digest,"
+                    "canonical_bytes FROM event_hypothesis_versions_v2 "
+                    "WHERE version_id=?",
+                    (citation.hypothesis_version_id,),
+                ).fetchone()
+                if candidate_row is None or target_row is None:
+                    raise NativeCollisionHold(
+                        "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                    )
+                candidate = StoryCandidateVersion.from_canonical_bytes(
+                    bytes(candidate_row[3])
+                )
+                target = EventHypothesisVersion.from_canonical_bytes(
+                    bytes(target_row[4])
+                )
+                if (
+                    str(candidate_row[0]) != candidate.candidate_id
+                    or str(candidate_row[1]) != candidate.version_id
+                    or str(candidate_row[2]) != candidate.canonical_digest
+                    or candidate.canonical_bytes != bytes(candidate_row[3])
+                    or candidate.candidate_id != citation.candidate_id
+                    or candidate.version_id != citation.candidate_version_id
+                    or candidate.canonical_digest
+                    != citation.candidate_version_digest
+                    or candidate.governing_manifest.hypothesis_id
+                    != citation.hypothesis_id
+                    or str(target_row[0]) != target.hypothesis_id
+                    or str(target_row[1]) != target.version_id
+                    or int(target_row[2]) != target.ordinal
+                    or str(target_row[3]) != target.canonical_digest
+                    or target.canonical_bytes != bytes(target_row[4])
+                    or target.hypothesis_id != citation.hypothesis_id
+                    or target.version_id != citation.hypothesis_version_id
+                    or target.canonical_digest
+                    != citation.hypothesis_version_digest
+                ):
+                    raise NativeCollisionHold(
+                        "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                    )
+                previous_id = candidate.governing_manifest.hypothesis_version_id
+                previous_digest = (
+                    candidate.governing_manifest.hypothesis_version_digest
+                )
+                previous_ordinal_row = connection.execute(
+                    "SELECT ordinal FROM event_hypothesis_versions_v2 "
+                    "WHERE version_id=? AND hypothesis_id=?",
+                    (previous_id, citation.hypothesis_id),
+                ).fetchone()
+                if previous_ordinal_row is None:
+                    raise NativeCollisionHold(
+                        "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                    )
+                previous_ordinal = int(previous_ordinal_row[0])
+                while previous_id != target.version_id:
+                    rows = connection.execute(
+                        "SELECT version_id,ordinal,previous_version_id,"
+                        "previous_version_digest,proposed_relationship,"
+                        "canonical_digest,canonical_bytes "
+                        "FROM event_hypothesis_versions_v2 "
+                        "WHERE hypothesis_id=? AND previous_version_id=? LIMIT 2",
+                        (citation.hypothesis_id, previous_id),
+                    ).fetchall()
+                    if len(rows) != 1:
+                        raise NativeCollisionHold(
+                            "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                        )
+                    successor = EventHypothesisVersion.from_canonical_bytes(
+                        bytes(rows[0][6])
+                    )
+                    relationship_rows = connection.execute(
+                        "SELECT decision_id,subject_hypothesis_id,"
+                        "subject_version_id,subject_version_digest,"
+                        "selected_comparator_hypothesis_id,"
+                        "selected_comparator_version_id,"
+                        "selected_comparator_version_digest,decision,"
+                        "assessment_bytes,assessment_digest,evidence_bytes,"
+                        "evidence_digest "
+                        "FROM event_hypothesis_relationship_decisions "
+                        "WHERE subject_version_id=? LIMIT 2",
+                        (successor.version_id,),
+                    ).fetchall()
+                    if len(relationship_rows) != 1:
+                        raise NativeCollisionHold(
+                            "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                        )
+                    relationship = RelationshipAssessment.from_canonical_bytes(
+                        bytes(relationship_rows[0][8])
+                    )
+                    evidence_bytes = bytes(relationship_rows[0][10])
+                    evidence_value = json.loads(evidence_bytes)
+                    if type(evidence_value) is not list:
+                        raise NativeCollisionHold(
+                            "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                        )
+                    evidence = tuple(
+                        ComparatorEvidence.from_value(item)
+                        for item in evidence_value
+                    )
+                    replay = assess_relationships(
+                        relationship.subject,
+                        relationship.comparator_manifest,
+                        evidence,
+                    )
+                    selected = relationship.comparator
+                    previous_ordinal += 1
+                    if (
+                        successor.version_id != str(rows[0][0])
+                        or successor.ordinal != int(rows[0][1])
+                        or successor.ordinal != previous_ordinal
+                        or successor.previous_version_id != str(rows[0][2])
+                        or successor.previous_version_digest != str(rows[0][3])
+                        or successor.proposed_relationship.value != str(rows[0][4])
+                        or successor.canonical_digest != str(rows[0][5])
+                        or successor.canonical_bytes != bytes(rows[0][6])
+                        or successor.previous_version_id != previous_id
+                        or successor.previous_version_digest != previous_digest
+                        or successor.proposed_relationship.value != "SAME_STATE"
+                        or relationship.canonical_digest
+                        != str(relationship_rows[0][0])
+                        or relationship.canonical_digest
+                        != str(relationship_rows[0][9])
+                        or relationship.subject.hypothesis_id
+                        != str(relationship_rows[0][1])
+                        or relationship.subject.version_id
+                        != str(relationship_rows[0][2])
+                        or relationship.subject.version_digest
+                        != str(relationship_rows[0][3])
+                        or selected is None
+                        or selected.hypothesis_id
+                        != str(relationship_rows[0][4])
+                        or selected.version_id != str(relationship_rows[0][5])
+                        or selected.version_digest != str(relationship_rows[0][6])
+                        or relationship.decision.value
+                        != str(relationship_rows[0][7])
+                        or relationship.evidence_digest
+                        != str(relationship_rows[0][11])
+                        or canonical_json_bytes(evidence_value) != evidence_bytes
+                        or replay != relationship
+                        or relationship.decision
+                        is not CanonicalOutcome.REL_SAME_STATE
+                        or relationship.subject.version_id != successor.version_id
+                        or relationship.subject.version_digest
+                        != successor.canonical_digest
+                        or selected.version_id != previous_id
+                        or selected.version_digest != previous_digest
+                    ):
+                        raise NativeCollisionHold(
+                            "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                        )
+                    previous_id = successor.version_id
+                    previous_digest = successor.canonical_digest
+                if previous_ordinal != target.ordinal:
+                    raise NativeCollisionHold(
+                        "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+                    )
+        except NativeCollisionHold:
+            raise
+        except Exception as exc:
+            raise NativeCollisionHold(
+                "CURRENT_CANDIDATE_ASSOCIATION_DIFFERS"
+            ) from exc
 
     def __call__(
         self, request: CurrentCollisionEligibilityRequest

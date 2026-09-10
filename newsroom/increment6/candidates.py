@@ -1798,6 +1798,26 @@ class StoryCandidateAuthority:
         )
         return value
 
+    def _exact_associated_current_producers(
+        self, candidate_id: str, *, proof: object
+    ) -> tuple[StoryCandidateVersion, EventHypothesisVersion]:
+        value = _normalise(
+            lambda: self.__authority.exact_associated_current_producers(
+                candidate_id, proof=proof
+            ),
+            "Candidate associated current producer read failed",
+        )
+        _require(
+            type(value) is tuple
+            and len(value) == 2
+            and type(value[0]) is StoryCandidateVersion
+            and type(value[1]) is EventHypothesisVersion
+            and value[0].governing_manifest.hypothesis_id
+            == value[1].hypothesis_id,
+            "Candidate associated current producer read is forged",
+        )
+        return value
+
     def _exact_current_candidate(self, candidate_id: str) -> StoryCandidateVersion:
         return self._call(
             "exact_current_candidate", candidate_id, expected=StoryCandidateVersion

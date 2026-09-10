@@ -154,7 +154,10 @@ class NativePipeline:
                         candidate_version_id=candidate_version_id,
                     )
                 continue
-            if previous.get("stage") == "ACKNOWLEDGED":
+            if previous.get("stage") in {
+                "ACKNOWLEDGED",
+                "SAME_STATE_ASSOCIATED",
+            }:
                 continue
             if (
                 previous.get("stage") == "EVIDENCE_HOLD"

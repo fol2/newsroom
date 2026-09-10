@@ -1791,6 +1791,41 @@ class EventHypothesisLineageReadPort:
             )
         return value
 
+    def _require_exact_candidate_manifest_in_transaction(
+        self,
+        version_id: str,
+        assessment_digest: str,
+        lineage_history_digests: tuple[str, ...],
+        lineage_generation: int,
+    ) -> RetainedRelationshipDecisionReceipt:
+        if (
+            type(version_id) is not str
+            or type(assessment_digest) is not str
+            or type(lineage_history_digests) is not tuple
+            or any(type(item) is not str for item in lineage_history_digests)
+            or type(lineage_generation) is not int
+            or lineage_generation < 0
+        ):
+            raise HypothesisLineageContractError(
+                "lineage Candidate manifest binding differs"
+            )
+        value = self._call(
+            "require_exact_candidate_manifest_in_transaction",
+            version_id,
+            assessment_digest,
+            lineage_history_digests,
+            lineage_generation,
+            expected=RetainedRelationshipDecisionReceipt,
+        )
+        if (
+            value.assessment.canonical_digest != assessment_digest
+            or value.assessment.subject.version_id != version_id
+        ):
+            raise HypothesisLineageContractError(
+                "lineage Candidate manifest result differs"
+            )
+        return value
+
     def _require_exact_retained_relationships_in_transaction(
         self, assessment_digests: tuple[str, ...]
     ) -> tuple[RetainedRelationshipDecisionReceipt, ...]:
@@ -1811,9 +1846,8 @@ class EventHypothesisLineageReadPort:
                 type(item) is not RetainedRelationshipDecisionReceipt
                 for item in value
             )
-            or tuple(
-                item.assessment.canonical_digest for item in value
-            ) != assessment_digests
+            or tuple(item.assessment.canonical_digest for item in value)
+            != assessment_digests
         ):
             raise HypothesisLineageContractError(
                 "lineage exact relationship batch differs"

@@ -15,7 +15,9 @@ from newsroom.discovery import NewsLead, NewsLeadId
 from newsroom.sources import SourceRevisionId
 from newsroom.discovery.read_models import DiscoveryCurrentStatus
 from newsroom.increment6.candidates import CandidateAdmissionRequest
+from newsroom.increment6.candidates import StoryCandidateVersion
 from newsroom.increment6.dispositions import CurrentCandidateCitation
+from newsroom.increment6.hypotheses import EventHypothesisVersion
 from newsroom.increment6.proposals import HypothesisRelationship
 from newsroom.increment6.collision import (
     CandidateUseOperation,
@@ -51,6 +53,13 @@ class NativeCollisionRequestPort(Protocol):
         *,
         proof: AuthenticationProof,
     ) -> CurrentCandidateCitation | None: ...
+
+    def retain_associated_candidate_citation(
+        self,
+        citation: CurrentCandidateCitation,
+        candidate: StoryCandidateVersion,
+        hypothesis: EventHypothesisVersion,
+    ) -> CurrentCandidateCitation: ...
 
     def request(
         self,
@@ -88,10 +97,6 @@ def _revision_successor(
         current.version_id != citation.candidate_version_id
         or current.canonical_digest != citation.candidate_version_digest
         or current.governing_manifest.hypothesis_id != citation.hypothesis_id
-        or current.governing_manifest.hypothesis_version_id
-        != citation.hypothesis_version_id
-        or current.governing_manifest.hypothesis_version_digest
-        != citation.hypothesis_version_digest
     ):
         raise NativeCollisionHold("CURRENT_CANDIDATE_CITATION_STALE")
     if (
@@ -99,11 +104,11 @@ def _revision_successor(
         or target.canonical_digest != citation.hypothesis_version_digest
     ):
         raise NativeCollisionHold("CURRENT_HYPOTHESIS_CITATION_STALE")
-    bindings = current.governing_manifest.lead_signal_bindings
+    bindings = target.source_bindings
     if len(bindings) != 1:
         raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
     prior_lead = system.discovery.lead(
-        NewsLeadId.parse(bindings[0].lead_id), proof=proof
+        NewsLeadId.parse(bindings[0].decision_lead_id), proof=proof
     )
     previous = system.sources.revision(
         SourceRevisionId.parse(str(prior_lead.request.revision_id)), proof=proof
@@ -199,18 +204,52 @@ def advance_native_cycle(
             if citation is None:
                 current_candidate = target_hypothesis = relationship = None
             else:
-                cited_current, cited_target = system.candidates._exact_current_producers(
-                    citation.candidate_id, proof=proof
+                cited_current, cited_target = (
+                    system.candidates._exact_associated_current_producers(
+                        citation.candidate_id, proof=proof
+                    )
                 )
+                retain_association = getattr(
+                    collision_requests,
+                    "retain_associated_candidate_citation",
+                    None,
+                )
+                if retain_association is not None:
+                    citation = retain_association(
+                        citation, cited_current, cited_target
+                    )
+                elif (
+                    citation.hypothesis_version_id != cited_target.version_id
+                    or citation.hypothesis_version_digest
+                    != cited_target.canonical_digest
+                ):
+                    raise NativeCollisionHold(
+                        "CURRENT_CANDIDATE_ASSOCIATION_UNAVAILABLE"
+                    )
                 bindings = cited_current.governing_manifest.lead_signal_bindings
                 exact_replay = any(
                     item.lead_id == str(lead.request.lead_id)
                     and item.lead_digest == lead.canonical_digest
                     for item in bindings
                 )
+                associated_replay = any(
+                    item.decision_lead_id == str(lead.request.lead_id)
+                    and item.decision_lead_digest == lead.canonical_digest
+                    for item in cited_target.source_bindings
+                )
                 if exact_replay:
                     current_candidate = cited_current
                     citation = target_hypothesis = relationship = None
+                elif associated_replay:
+                    outcomes.append(
+                        NativeCycleOutcome(
+                            revision_id,
+                            "SAME_STATE_ASSOCIATED",
+                            None,
+                            None,
+                        )
+                    )
+                    continue
                 else:
                     current_candidate, target_hypothesis, relationship = _revision_successor(
                         system,
@@ -326,8 +365,10 @@ def advance_native_cycle(
                 or current.version_id != citation.candidate_version_id
                 or current.canonical_digest != citation.candidate_version_digest
                 or current.governing_manifest.hypothesis_id != triage.hypothesis.hypothesis_id
-                or current.governing_manifest.hypothesis_version_id
+                or citation.hypothesis_version_id
                 != triage.hypothesis.previous_version_id
+                or citation.hypothesis_version_digest
+                != triage.hypothesis.previous_version_digest
             ):
                 outcomes.append(NativeCycleOutcome(
                     revision_id, "COLLISION_HOLD", triage,

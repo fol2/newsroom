@@ -70,6 +70,46 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         connection.close()
 
 
+def test_native_pipeline_retains_same_state_association_without_retry(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    triage_calls = []
+
+    def associate(**kwargs):
+        unit = kwargs["statuses"][0].lead
+        triage_calls.append(unit.revision_id)
+        return (
+            NS(
+                revision_id=unit.revision_id,
+                state="SAME_STATE_ASSOCIATED",
+                triage=NS(candidate=None),
+                reason=None,
+            ),
+        )
+
+    monkeypatch.setattr(n, "advance_native_cycle", associate)
+    try:
+        first = pipeline.tick(cycle_id="same-state")
+        assert first.revision_states == {"SAME_STATE_ASSOCIATED": 2}
+        assert triage_calls == [item.revision_id for item in units]
+        assert not any(call[0] == "publish" for call in calls)
+
+        dispositions[0] = ()
+        second = pipeline.tick(cycle_id="same-state-replay")
+        assert second.revision_states == {"SAME_STATE_ASSOCIATED": 2}
+        assert triage_calls == [item.revision_id for item in units]
+        assert all(
+            journal.progress[item.revision_id]["stage"]
+            == "SAME_STATE_ASSOCIATED"
+            for item in units
+        )
+    finally:
+        connection.close()
+
+
 def test_native_pipeline_drains_between_revisions_and_restart_reuses_settled_work(
     tmp_path, monkeypatch,
 ):

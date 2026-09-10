@@ -319,6 +319,25 @@ def test_exact_identity_cycle_with_evidenced_hold_qualifies(tmp_path):
         typed_hold.close()
 
 
+def test_retained_same_state_association_is_a_terminal_nonpublication(
+    tmp_path,
+) -> None:
+    connection = _open(tmp_path / "same-state.sqlite3")
+    try:
+        journal = _cycle(
+            connection,
+            revision_state="SAME_STATE_ASSOCIATED",
+            reason=None,
+        )
+        retained = record_qualification(connection, IDENTITY)
+        assert validate_qualification(connection, IDENTITY) == retained
+        assert {
+            value["stage"] for value in journal.progress.values()
+        } == {"SAME_STATE_ASSOCIATED"}
+    finally:
+        connection.close()
+
+
 def test_legacy_drift_failed_and_unfinished_cycles_never_qualify(tmp_path):
     for case in (
         "legacy", "drift", "failed", "queued", "invented", "generic",

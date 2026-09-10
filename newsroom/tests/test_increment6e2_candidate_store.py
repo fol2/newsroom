@@ -63,6 +63,7 @@ from newsroom.increment6.dispositions import ProposalDispositionStore
 from newsroom.increment6.lineage import (
     lineage_command_definition,
     merge_lineage_authority_registries,
+    open_event_hypothesis_lineage_authority,
 )
 from newsroom.increment6.outcomes import CanonicalOutcome
 from newsroom.increment6.relationships import (
@@ -1421,6 +1422,111 @@ def test_retained_successor_read_uses_only_exact_historical_upstream(
     try:
         with pytest.raises(ValueError, match="Candidate|Hypothesis|relationship"):
             port.require_retained_version_in_transaction(first.version_id)
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_exact_candidate_manifest_replays_bound_lineage_and_rejects_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_lineage_system as lineage_system
+    from newsroom.tests import test_increment6d3_lineage_store as lineage_store
+
+    seed, args, receipt = lineage_store._seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    finally:
+        authority.close()
+    commands, schemas = merge_relationship_authority_registries(
+        args["command_registry"], args["payload_schemas"]
+    )
+    commands, schemas = merge_lineage_authority_registries(commands, schemas)
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    port = _create_event_hypothesis_lineage_read_port(
+        connection,
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        command_registry=commands,
+        payload_schemas=schemas,
+        clock=args["clock"],
+    )
+    output = seed[3][0]
+    assessment_digest = receipt.relationships[0].assessment_digest
+    monkeypatch.setattr(
+        lineage_system._LineageStore,
+        "_history_rows",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("bound Candidate lineage scanned unrelated history")
+        ),
+    )
+    connection.execute("BEGIN")
+    try:
+        retained = port._require_exact_candidate_manifest_in_transaction(
+            output.version_id,
+            assessment_digest,
+            (receipt.canonical_digest,),
+            1,
+        )
+        assert retained.assessment.canonical_digest == assessment_digest
+        with pytest.raises(ValueError, match="lineage.*head"):
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                0,
+            )
+    finally:
+        connection.execute("ROLLBACK")
+    proposal, dispositions = seed[7]["authority"]
+    upstream = d2.hypothesis_helpers._open((connection, *seed[0][1:]))
+    try:
+        successor = upstream.retain(
+            proposal,
+            dispositions,
+            proof=seed[0][3],
+            expected_target_version=output,
+        )
+        assert successor.previous_version_id == output.version_id
+    finally:
+        upstream.close()
+    connection.execute("BEGIN")
+    try:
+        assert (
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                1,
+            ).assessment.canonical_digest
+            == assessment_digest
+        )
+    finally:
+        connection.execute("ROLLBACK")
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_lineage_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_lineage_update")
+    connection.execute(
+        "UPDATE event_hypothesis_lineage SET receipt_bytes=? WHERE lineage_id=?",
+        (b"{}", receipt.lineage_id),
+    )
+    connection.execute(trigger)
+    connection.execute("BEGIN")
+    try:
+        with pytest.raises(ValueError, match="lineage"):
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                1,
+            )
     finally:
         connection.execute("ROLLBACK")
         connection.close()
