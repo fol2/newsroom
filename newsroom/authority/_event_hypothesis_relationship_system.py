@@ -910,6 +910,7 @@ def _create_event_hypothesis_relationship_read_port(
     payload_schemas: PayloadSchemaRegistry,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
+    hypotheses: _HypothesisStore | None = None,
 ) -> EventHypothesisRelationshipReadPort:
     """Bind the private owner reads to one exact idle checked connection."""
 
@@ -920,6 +921,17 @@ def _create_event_hypothesis_relationship_read_port(
             or type(command_registry) is not CommandRegistry
             or type(payload_schemas) is not PayloadSchemaRegistry
             or not callable(clock)
+            or (
+                hypotheses is not None
+                and (
+                    type(hypotheses) is not _HypothesisStore
+                    or hypotheses._connection is not connection
+                    or hypotheses._retrieval is not retrieval_authority
+                    or hypotheses._authenticator is not authenticator
+                    or hypotheses._dispositions._current_candidate_citations
+                    is not current_candidate_citations
+                )
+            )
         ):
             raise RelationshipContractError(
                 "relationship read-port factory collaborators differ"
@@ -927,14 +939,15 @@ def _create_event_hypothesis_relationship_read_port(
         merged_commands, merged_schemas = merge_relationship_authority_registries(
             command_registry, payload_schemas
         )
-        with _transaction_hypothesis_rows(connection):
-            hypotheses = _HypothesisStore(
-                connection,
-                retrieval_authority,
-                authenticator,
-                clock,
-                current_candidate_citations,
-            )
+        if hypotheses is None:
+            with _transaction_hypothesis_rows(connection):
+                hypotheses = _HypothesisStore(
+                    connection,
+                    retrieval_authority,
+                    authenticator,
+                    clock,
+                    current_candidate_citations,
+                )
         _require_checked_connection(connection, active=False)
         private = _EventHypothesisRelationshipReadAuthority(
             _READ_AUTHORITY_TOKEN,

@@ -8,18 +8,23 @@ import pytest
 
 from newsroom.authority import ObjectLimits, StaticAuthenticator, StaticAuthorizer, StaticPrincipal
 from newsroom.authority._hermes_native_system import open_hermes_native_authority_system
+from newsroom.authority._event_hypothesis_relationship_system import (
+    _create_event_hypothesis_relationship_read_port,
+)
 from newsroom.authority.persistence import EventReadPolicy, MetadataClass
 from newsroom.authority.persistence import AuthorityWriterBusy
 from newsroom.authority.types import TrustScope
 from newsroom.increment4 import increment4_admitted_contract_registry
 from newsroom.increment6.collision import CurrentCollisionEffectEnforcer, TrustedCurrentCollisionAuthorityBoundary
 from newsroom.increment6.candidates import CandidateContractError
+from newsroom.increment6.relationships import RelationshipContractError
 from newsroom.increment6.work_items import (
     DecisionLeadBinding,
     RetrievalContextAuthority,
     RetrievalInputBinding,
     TriageWorkItem,
     WorkItemContractError,
+    TriageWorkItemStore,
 )
 from newsroom.tests.authority_a2b_helpers import _policy_registries
 from newsroom.tests.authority_event_helpers import payload_schemas, registry_v1
@@ -92,6 +97,23 @@ def test_hermes_composition_opens_one_writer_and_all_native_facades(
         metadata_classes=frozenset({MetadataClass.ROUTING}),
     )
     retrieval, retrieval_binding = _retrieval_authority(tmp_path / "retrieval")
+    work_item_constructions: list[sqlite3.Connection] = []
+    context_authentications: list[str] = []
+    original_work_item_init = TriageWorkItemStore.__init__
+    original_context_require = RetrievalContextAuthority.verify_retained_integrity
+
+    def counted_work_item_init(self, connection, retrieval_authority=None):
+        work_item_constructions.append(connection)
+        original_work_item_init(self, connection, retrieval_authority)
+
+    def counted_context_require(self, connection, binding):
+        context_authentications.append(binding.context_id)
+        return original_context_require(self, connection, binding)
+
+    monkeypatch.setattr(TriageWorkItemStore, "__init__", counted_work_item_init)
+    monkeypatch.setattr(
+        RetrievalContextAuthority, "verify_retained_integrity", counted_context_require
+    )
     kwargs = dict(
         path=tmp_path / "authority.sqlite3", object_root=tmp_path / "objects",
         workspace_root=tmp_path.resolve(), registry=registry_v1(),
@@ -136,6 +158,44 @@ def test_hermes_composition_opens_one_writer_and_all_native_facades(
                 "00000000-0000-4000-8000-000000000001"
             )
         assert system.work_items.current_version(item.work_item_id) is not None
+        hypothesis_store = (
+            system.hypotheses._EventHypothesisAuthority__authority._authority
+        )
+        other_authenticator = StaticAuthenticator(
+            credentials={"token-2": StaticPrincipal("principal.beta")},
+            authority_domain="newsroom.authority",
+        )
+        with pytest.raises(
+            RelationshipContractError,
+            match="read-port factory collaborators differ",
+        ):
+            _create_event_hypothesis_relationship_read_port(
+                hypothesis_store._connection,
+                retrieval_authority=retrieval,
+                authenticator=other_authenticator,
+                command_registry=registry_v1(),
+                payload_schemas=payload_schemas(),
+                hypotheses=hypothesis_store,
+            )
+        with sqlite3.connect(
+            tmp_path / "authority.sqlite3", isolation_level=None
+        ) as other_connection:
+            other_connection.row_factory = sqlite3.Row
+            other_connection.execute("PRAGMA foreign_keys=ON")
+            other_connection.execute("PRAGMA journal_mode=WAL")
+            other_connection.execute("PRAGMA synchronous=FULL")
+            with pytest.raises(
+                RelationshipContractError,
+                match="read-port factory collaborators differ",
+            ):
+                _create_event_hypothesis_relationship_read_port(
+                    other_connection,
+                    retrieval_authority=retrieval,
+                    authenticator=authenticator,
+                    command_registry=registry_v1(),
+                    payload_schemas=payload_schemas(),
+                    hypotheses=hypothesis_store,
+                )
         monkeypatch.setattr(
             "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
             lambda _: MemoryNeo4jAdapter(),
@@ -145,17 +205,35 @@ def test_hermes_composition_opens_one_writer_and_all_native_facades(
     finally:
         system.close()
 
-    with sqlite3.connect(tmp_path / "authority.sqlite3") as connection:
-        trigger_name = "immutable_triage_work_item_versions_update"
-        trigger_sql = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE name=?", (trigger_name,)
-        ).fetchone()[0]
-        connection.execute(f"DROP TRIGGER {trigger_name}")
-        connection.execute(
-            "UPDATE triage_work_item_versions SET canonical_bytes=?",
-            (b'{"tampered":true}',),
-        )
-        connection.execute(trigger_sql)
+    work_item_constructions.clear()
+    context_authentications.clear()
+    monkeypatch.setattr(
+        "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
+        lambda _: MemoryNeo4jAdapter(),
+    )
+    reopened = open_hermes_native_authority_system(**kwargs)
+    try:
+        assert len(work_item_constructions) == 1
+        assert context_authentications == [
+            retrieval_binding.context_id,
+            retrieval_binding.context_id,
+        ]
+        with sqlite3.connect(tmp_path / "authority.sqlite3") as connection:
+            trigger_name = "immutable_triage_work_item_versions_update"
+            trigger_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name=?", (trigger_name,)
+            ).fetchone()[0]
+            connection.execute(f"DROP TRIGGER {trigger_name}")
+            connection.execute(
+                "UPDATE triage_work_item_versions SET canonical_bytes=?",
+                (b'{"tampered":true}',),
+            )
+            connection.execute(trigger_sql)
+        with pytest.raises(WorkItemContractError, match="fields are not exact"):
+            reopened.work_items.current_version(item.work_item_id)
+    finally:
+        reopened.close()
+
     monkeypatch.setattr(
         "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
         lambda _: MemoryNeo4jAdapter(),
