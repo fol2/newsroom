@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -1862,10 +1862,55 @@ class ProposalDispositionStore:
             raise DispositionContractError(
                 "transaction-aware disposition use requires an active transaction"
             )
-        self._verify_integrity()
-        return self._require_current_after_integrity_in_transaction(
-            disposition_id, proof=proof
+        disposition = self._verify_requested_disposition_in_transaction(
+            disposition_id
         )
+        return self._require_current_value_after_integrity_in_transaction(
+            disposition, proof=proof
+        )
+
+    def _verify_requested_disposition_in_transaction(
+        self, disposition_id: str
+    ) -> ProposalDisposition:
+        """Verify one complete proposal group in the caller's transaction."""
+        _digest(disposition_id, "disposition_id")
+        if not self._connection.in_transaction:
+            raise DispositionContractError(
+                "transaction-aware disposition use requires an active transaction"
+            )
+        requested = self._connection.execute(
+            "SELECT work_item_version_id,proposal_id "
+            "FROM triage_proposal_dispositions WHERE disposition_id=?",
+            (disposition_id,),
+        ).fetchone()
+        if requested is None:
+            raise DispositionContractError("unknown disposition")
+        group = (str(requested[0]), str(requested[1]))
+        dispositions = self._verify_retained_disposition_rows(
+            self._connection.execute(
+                "SELECT finding_id,work_item_id,work_item_version_id,"
+                "work_item_version_digest,proposal_id,proposal_content_identity,"
+                "proposal_canonical_digest,decision_lead_id,validator_input_digest,"
+                "finding_set_digest,severity,canonical_bytes,canonical_digest "
+                "FROM triage_proposal_validation_findings "
+                "WHERE work_item_version_id=? AND proposal_id=?",
+                group,
+            ),
+            self._connection.execute(
+                "SELECT disposition_id,work_item_id,work_item_version_id,"
+                "work_item_version_digest,proposal_id,proposal_content_identity,"
+                "proposal_canonical_digest,decision_lead_id,lead_head_id,"
+                "lead_head_digest,validator_input_digest,finding_set_digest,"
+                "finding_id,selection_digest,canonical_bytes,canonical_digest "
+                "FROM triage_proposal_dispositions "
+                "WHERE work_item_version_id=? AND proposal_id=?",
+                group,
+            ),
+        )
+        disposition = dispositions.get(disposition_id)
+        if disposition is None:
+            raise DispositionContractError("unknown disposition")
+        return disposition
 
     def _require_current_after_integrity_in_transaction(
         self, disposition_id: str, *, proof: AuthenticationProof
@@ -1876,7 +1921,6 @@ class ProposalDispositionStore:
             raise DispositionContractError(
                 "transaction-aware disposition use requires an active transaction"
             )
-        _, authenticated_identity = self._authenticate(proof)
         row = self._connection.execute(
             "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
             (disposition_id,),
@@ -1884,6 +1928,22 @@ class ProposalDispositionStore:
         if row is None:
             raise DispositionContractError("unknown disposition")
         disposition = ProposalDisposition.from_canonical_bytes(bytes(row[0]))
+        return self._require_current_value_after_integrity_in_transaction(
+            disposition, proof=proof
+        )
+
+    def _require_current_value_after_integrity_in_transaction(
+        self,
+        disposition: ProposalDisposition,
+        *,
+        proof: AuthenticationProof,
+    ) -> ProposalDisposition:
+        """Recheck current authority for an integrity-verified disposition."""
+        if not self._connection.in_transaction:
+            raise DispositionContractError(
+                "transaction-aware disposition use requires an active transaction"
+            )
+        _, authenticated_identity = self._authenticate(proof)
         version = _WORK_ITEM_REQUIRE_CURRENT(self._work_items, disposition.work_item_id)
         _RETRIEVAL_VERIFY(
             self._retrieval_authority, self._connection, version.retrieval
@@ -1946,15 +2006,34 @@ class ProposalDispositionStore:
         }
         if not required <= tables:
             raise DispositionContractError("v19 disposition schema is absent")
+        self._verify_retained_disposition_rows(
+            self._connection.execute(
+                "SELECT finding_id,work_item_id,work_item_version_id,"
+                "work_item_version_digest,proposal_id,proposal_content_identity,"
+                "proposal_canonical_digest,decision_lead_id,validator_input_digest,"
+                "finding_set_digest,severity,canonical_bytes,canonical_digest "
+                "FROM triage_proposal_validation_findings"
+            ),
+            self._connection.execute(
+                "SELECT disposition_id,work_item_id,work_item_version_id,"
+                "work_item_version_digest,proposal_id,proposal_content_identity,"
+                "proposal_canonical_digest,decision_lead_id,lead_head_id,"
+                "lead_head_digest,validator_input_digest,finding_set_digest,"
+                "finding_id,selection_digest,canonical_bytes,canonical_digest "
+                "FROM triage_proposal_dispositions"
+            ),
+        )
+
+    def _verify_retained_disposition_rows(
+        self,
+        finding_rows: Iterable[sqlite3.Row],
+        disposition_rows: Iterable[sqlite3.Row],
+    ) -> dict[str, ProposalDisposition]:
+        """Verify canonical finding/disposition groups supplied by one snapshot."""
         findings_by_group: dict[tuple[str, str], dict[str, ProposalValidationFinding]] = {}
         finding_sets: dict[tuple[str, str], str] = {}
         finding_meta: dict[tuple[str, str, str], tuple[str, str]] = {}
-        for row in self._connection.execute(
-            "SELECT finding_id,work_item_id,work_item_version_id,work_item_version_digest,"
-            "proposal_id,proposal_content_identity,proposal_canonical_digest,decision_lead_id,"
-            "validator_input_digest,finding_set_digest,severity,canonical_bytes,canonical_digest "
-            "FROM triage_proposal_validation_findings"
-        ):
+        for row in finding_rows:
             finding = ProposalValidationFinding.from_canonical_bytes(bytes(row[11]))
             group = (str(row[2]), str(row[4]))
             if (
@@ -1976,12 +2055,7 @@ class ProposalDispositionStore:
             if previous != row[9]:
                 raise DispositionContractError("retained finding set differs")
         dispositions_by_group: dict[tuple[str, str], dict[str, ProposalDisposition]] = {}
-        for row in self._connection.execute(
-            "SELECT disposition_id,work_item_id,work_item_version_id,work_item_version_digest,"
-            "proposal_id,proposal_content_identity,proposal_canonical_digest,decision_lead_id,"
-            "lead_head_id,lead_head_digest,validator_input_digest,finding_set_digest,finding_id,"
-            "selection_digest,canonical_bytes,canonical_digest FROM triage_proposal_dispositions"
-        ):
+        for row in disposition_rows:
             disposition = ProposalDisposition.from_canonical_bytes(bytes(row[14]))
             group = (str(row[2]), str(row[4]))
             findings = findings_by_group.get(group, {})
@@ -2091,6 +2165,12 @@ class ProposalDispositionStore:
                 for item in dispositions.values()
             ):
                 raise DispositionContractError("retained finding-set digest differs")
+
+        return {
+            item.disposition_id: item
+            for dispositions in dispositions_by_group.values()
+            for item in dispositions.values()
+        }
 
     def _recorded_at(self) -> str:
         return str(self._connection.execute(

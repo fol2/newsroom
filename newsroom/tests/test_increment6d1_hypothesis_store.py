@@ -1390,22 +1390,22 @@ def test_transaction_owner_lock_isolates_failure_from_replay_and_current(
         lambda: UtcTimestamp.parse("2042-01-01T00:00:00.000000Z"),
     )
     first = store.retain(proposal, dispositions, proof=proof)
-    original_verify = _HypothesisStore._verify
+    original_verify = _HypothesisStore._exact_version
     failure_started = threading.Event()
     release_failure = threading.Event()
     reader_started = threading.Event()
     injected = False
 
-    def verify(candidate):
+    def verify(candidate, version_id):
         nonlocal injected
         if not injected:
             injected = True
             failure_started.set()
             assert release_failure.wait(5)
             raise RuntimeError("ordinary injected failure")
-        return original_verify(candidate)
+        return original_verify(candidate, version_id)
 
-    monkeypatch.setattr(_HypothesisStore, "_verify", verify)
+    monkeypatch.setattr(_HypothesisStore, "_exact_version", verify)
 
     def fail():
         with pytest.raises(HypothesisContractError):

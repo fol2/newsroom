@@ -1394,9 +1394,13 @@ def test_candidate_read_verifies_shared_upstream_once_for_all_relationships(
         handle.close()
 
 
-def test_candidate_admission_verifies_hypothesis_and_dispositions_once(
+def test_candidate_admission_uses_only_exact_producer_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from newsroom.authority import _event_hypothesis_lineage_system as lineage_system
+    from newsroom.authority import (
+        _event_hypothesis_relationship_system as relationship_system,
+    )
     from newsroom.authority import _event_hypothesis_system as system
 
     adapter = _Adapter(tmp_path)
@@ -1405,24 +1409,20 @@ def test_candidate_admission_verifies_hypothesis_and_dispositions_once(
     try:
         command = _generic("record-a")
         admission, collision = _admission(location, command)
-        hypothesis_calls = 0
-        disposition_calls = 0
-        original_hypotheses = system._HypothesisStore._verify
-        original_dispositions = system._VERIFY_DISPOSITION_INTEGRITY
+        def unqualified_history(*_args, **_kwargs):
+            raise AssertionError("Candidate admission scanned unrelated history")
 
-        def counted_hypotheses(store):
-            nonlocal hypothesis_calls
-            hypothesis_calls += 1
-            return original_hypotheses(store)
-
-        def counted_dispositions(store) -> None:
-            nonlocal disposition_calls
-            disposition_calls += 1
-            original_dispositions(store)
-
-        monkeypatch.setattr(system._HypothesisStore, "_verify", counted_hypotheses)
+        monkeypatch.setattr(system._HypothesisStore, "_verify", unqualified_history)
         monkeypatch.setattr(
-            system, "_VERIFY_DISPOSITION_INTEGRITY", counted_dispositions
+            system, "_VERIFY_DISPOSITION_INTEGRITY", unqualified_history
+        )
+        monkeypatch.setattr(
+            relationship_system,
+            "_verify_relationship_reads_in_transaction",
+            unqualified_history,
+        )
+        monkeypatch.setattr(
+            lineage_system._LineageStore, "_verify", unqualified_history
         )
         retained = handle._opened().admit(
             admission.canonical_bytes,
@@ -1434,8 +1434,6 @@ def test_candidate_admission_verifies_hypothesis_and_dispositions_once(
             retained.governing_manifest.hypothesis_version_id
             == location.subjects["record-a"].version_id
         )
-        assert hypothesis_calls == 1
-        assert disposition_calls == 1
     finally:
         handle.close()
 

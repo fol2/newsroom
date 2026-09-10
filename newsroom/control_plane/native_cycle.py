@@ -30,6 +30,7 @@ from .native_discovery import NativeDiscovery
 from .native_collision import NativeCollisionHold
 from .native_triage import (
     NativeTriageResult,
+    _admit_native_triage_candidate,
     advance_native_triage,
     build_native_triage_work,
     plan_native_schedule,
@@ -350,18 +351,14 @@ def advance_native_cycle(
             None,
         )
         with owner_stop_fence():
-            admitted = advance_native_triage(
+            admitted = _admit_native_triage_candidate(
                 system,
-                work=work,
-                scheduling_decision=schedule.decision,
-                proof=proof,
+                triage=triage,
                 collision_request=collision_request,
                 collision_decision=collision,
                 candidate_request=candidate_request,
-                current_candidate=citation,
-                revision_relationship=relationship,
-                expected_target_version=target_hypothesis,
                 current_candidate_version=current,
+                proof=proof,
             )
         outcomes.append(
             NativeCycleOutcome(revision_id, admitted.state, admitted, None)
