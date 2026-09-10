@@ -47,19 +47,19 @@ def _native_lead(tmp_path):
         )
 
 
-def _retrieval(*, no_match: bool, native: bool = False) -> RetrievalInputBinding:
+def _retrieval(
+    *, no_match: bool, native: bool = False, tmp_path=None
+) -> RetrievalInputBinding:
+    if native:
+        assert tmp_path is not None
+        assert not no_match
+        return work_item_helpers._large_native_binding(
+            tmp_path, document_count=14
+        )[0]
     request_id = "00000000-0000-4000-8000-000000009001"
     context_id = "00000000-0000-4000-8000-000000009002"
     request = canonical_json_bytes(
         {
-            **(
-                {
-                    "schema_identity":
-                    "newsroom.increment5.native-retrieval-context-request.v1"
-                }
-                if native
-                else {}
-            ),
             "idempotency_key": "autonomous-worker",
             "request_id": request_id,
         }
@@ -214,7 +214,9 @@ def test_current_repromoted_gate_does_not_rewrite_immutable_lead(tmp_path) -> No
         disposition_ordinal=2,
         previous_disposition_id=binding.disposition_id,
     )
-    version = _version(current, _retrieval(no_match=False, native=True))
+    version = _version(
+        current, _retrieval(no_match=False, native=True, tmp_path=tmp_path)
+    )
 
     assert autonomous_worker_input_digest(version, (lead,)).startswith("sha256:")
     with pytest.raises(AutonomousWorkerError, match="authority differs"):
@@ -233,7 +235,9 @@ def test_native_factual_match_stays_provisional_until_candidate_collision(
     tmp_path,
 ) -> None:
     lead, binding = _native_lead(tmp_path)
-    version = _version(binding, _retrieval(no_match=False, native=True))
+    version = _version(
+        binding, _retrieval(no_match=False, native=True, tmp_path=tmp_path)
+    )
     proposal = build_autonomous_proposal(
         work_item_version=version,
         attempt=_attempt(version, lead),
@@ -269,7 +273,9 @@ def test_native_direct_revision_uses_authenticated_current_candidate_citation(
     tmp_path, relationship, route
 ) -> None:
     lead, binding = _native_lead(tmp_path)
-    version = _version(binding, _retrieval(no_match=False, native=True))
+    version = _version(
+        binding, _retrieval(no_match=False, native=True, tmp_path=tmp_path)
+    )
     citation = _current_candidate()
     attempt = _attempt(
         version,
