@@ -154,6 +154,7 @@ def _observed_metadata_shape(document_type: str):
             ),
             "final_outcome_attachments": ["9494911"],
             "attachments": [{
+                "id": "9494911",
                 "url": "https://assets.publishing.service.gov.uk/media/id/response.pdf",
                 "title": "Consultation response",
             }],
@@ -214,6 +215,42 @@ def test_observed_content_shape_hold_never_masks_incomplete_metadata(document_ty
         value["details"]["attachments"] = []
     else:
         value["details"]["final_outcome_attachments"] = []
+    with pytest.raises(ValueError) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk" + value["base_path"],
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 10, 18, tzinfo=UTC),
+        )
+    assert type(caught.value) is ValueError
+
+
+@pytest.mark.parametrize("mutation", [
+    "collection_nonempty_fallback",
+    "consultation_missing_attachment_id",
+    "consultation_duplicate_attachment_id",
+    "consultation_unresolved_outcome_id",
+])
+def test_observed_coverage_hold_rejects_ambiguous_child_identity(mutation):
+    document_type = (
+        "document_collection"
+        if mutation == "collection_nonempty_fallback"
+        else "consultation_outcome"
+    )
+    value = _observed_metadata_shape(document_type)
+    if mutation == "collection_nonempty_fallback":
+        value["details"]["collection_groups"][0]["documents"] = [{
+            "base_path": "//unsafe.example/item",
+            "title": "Unsafe child",
+        }]
+    elif mutation == "consultation_missing_attachment_id":
+        value["details"]["attachments"][0].pop("id")
+    elif mutation == "consultation_duplicate_attachment_id":
+        value["details"]["attachments"].append({
+            **value["details"]["attachments"][0],
+            "url": "https://assets.publishing.service.gov.uk/media/id/other.pdf",
+        })
+    else:
+        value["details"]["final_outcome_attachments"] = ["unresolved"]
     with pytest.raises(ValueError) as caught:
         parse_govuk_content_document(
             "https://www.gov.uk" + value["base_path"],

@@ -299,6 +299,14 @@ def parse_govuk_content_document(
         ):
             raise ValueError("source consultation outcome inventory differs")
         _require_attachment_inventory(value)
+        attachments = details["attachments"]
+        attachment_ids = [item.get("id") for item in attachments]
+        if (
+            any(type(item) is not str or not item for item in attachment_ids)
+            or len(set(attachment_ids)) != len(attachment_ids)
+            or any(item not in attachment_ids for item in outcome_attachments)
+        ):
+            raise ValueError("source consultation outcome inventory differs")
         raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
     else:
         raise ValueError("source document type is unsupported")
@@ -372,6 +380,7 @@ def _require_collection_inventory(value: dict) -> None:
             or not group["title"].strip()
             or type(group.get("body")) is not str
             or type(group.get("documents")) is not list
+            or group["documents"]
         ):
             raise ValueError("source child inventory differs")
 
