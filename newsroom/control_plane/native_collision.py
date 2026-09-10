@@ -199,10 +199,19 @@ class NativeCollisionAuthority:
         citation: CurrentCandidateCitation,
         candidate: StoryCandidateVersion,
         hypothesis: EventHypothesisVersion,
+        *,
+        lead: NewsLead,
+        retrieval: RetrievalInputBinding,
+        proof: AuthenticationProof,
     ) -> CurrentCandidateCitation:
         """Bind a collision-slot Candidate to its checked current association."""
+        trusted_citation = self.current_candidate_citation(
+            lead, retrieval, proof=proof
+        )
         if (
             type(citation) is not CurrentCandidateCitation
+            or trusted_citation is None
+            or citation != trusted_citation
             or type(candidate) is not StoryCandidateVersion
             or type(hypothesis) is not EventHypothesisVersion
             or candidate.candidate_id != citation.candidate_id

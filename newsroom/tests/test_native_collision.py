@@ -679,6 +679,50 @@ def test_same_state_association_replays_then_allows_development(
                     candidate_v1.candidate_id, proof=proof()
                 )
             )
+            non_hypothesis_forgery = {
+                "candidate_id": str(uuid.uuid4()),
+                "candidate_version_id": str(uuid.uuid4()),
+                "candidate_version_digest": _digest("0"),
+                "collision_namespace": "forged-collision-namespace",
+                "collision_key_digest": _digest("1"),
+                "source_definition_id": str(uuid.uuid4()),
+                "source_item_id": str(uuid.uuid4()),
+                "retrieval_context_digest": _digest("2"),
+                "authorization_receipt_digest": _digest("3"),
+                "authorization_decision_id": str(uuid.uuid4()),
+            }
+            forged_citation_ids = []
+            for field, forged_value in non_hypothesis_forgery.items():
+                forged_values = {
+                    name: getattr(raw_historical_citation, name)
+                    for name in raw_historical_citation.__dataclass_fields__
+                    if name != "citation_id"
+                }
+                forged_values[field] = forged_value
+                forged = CurrentCandidateCitation.create(**forged_values)
+                forged_citation_ids.append(forged.citation_id)
+                with pytest.raises(
+                    NativeCollisionHold,
+                    match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
+                ):
+                    collision.retain_associated_candidate_citation(
+                        forged,
+                        associated_candidate,
+                        associated_hypothesis,
+                        lead=second_same.lead,
+                        retrieval=second_binding,
+                        proof=proof(),
+                    )
+            with sqlite3.connect(tmp_path / "native-collision.sqlite3") as journal:
+                assert all(
+                    journal.execute(
+                        "SELECT 1 FROM native_current_candidate_citations "
+                        "WHERE citation_id=?",
+                        (citation_id,),
+                    ).fetchone()
+                    is None
+                    for citation_id in forged_citation_ids
+                )
             with pytest.raises(
                 NativeCollisionHold,
                 match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
@@ -693,11 +737,17 @@ def test_same_state_association_replays_then_allows_development(
                     CurrentCandidateCitation.create(**wrong_association_values),
                     associated_candidate,
                     associated_hypothesis,
+                    lead=second_same.lead,
+                    retrieval=second_binding,
+                    proof=proof(),
                 )
             historical_citation = collision.retain_associated_candidate_citation(
                 raw_historical_citation,
                 associated_candidate,
                 associated_hypothesis,
+                lead=second_same.lead,
+                retrieval=second_binding,
+                proof=proof(),
             )
             with sqlite3.connect(tmp_path / "native.sqlite3") as connection:
                 trigger = connection.execute(
@@ -786,15 +836,6 @@ def test_same_state_association_replays_then_allows_development(
             assert developed.state == "CANDIDATE_ADMITTED", developed.reason
             assert developed.triage.candidate.candidate_id == candidate_v1.candidate_id
             assert developed.triage.candidate.ordinal == 2
-            with pytest.raises(
-                NativeCollisionHold,
-                match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
-            ):
-                collision.retain_associated_candidate_citation(
-                    raw_historical_citation,
-                    candidate_v1,
-                    developed.triage.hypothesis,
-                )
     finally:
         proving.close()
 

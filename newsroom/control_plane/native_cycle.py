@@ -59,6 +59,10 @@ class NativeCollisionRequestPort(Protocol):
         citation: CurrentCandidateCitation,
         candidate: StoryCandidateVersion,
         hypothesis: EventHypothesisVersion,
+        *,
+        lead: NewsLead,
+        retrieval: RetrievalInputBinding,
+        proof: AuthenticationProof,
     ) -> CurrentCandidateCitation: ...
 
     def request(
@@ -216,7 +220,12 @@ def advance_native_cycle(
                 )
                 if retain_association is not None:
                     citation = retain_association(
-                        citation, cited_current, cited_target
+                        citation,
+                        cited_current,
+                        cited_target,
+                        lead=lead,
+                        retrieval=binding,
+                        proof=proof,
                     )
                 elif (
                     citation.hypothesis_version_id != cited_target.version_id
