@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsroom.authority import AuthorityEvents
+from newsroom.authority import AuthorityEvents, UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import AggregateId, ObjectAdmissionId
 from newsroom.control_plane.native_collision import (
@@ -18,6 +18,11 @@ from newsroom.control_plane.native_collision import (
     NativeCollisionIdentity,
 )
 from newsroom.control_plane.native_cycle import _revision_successor, advance_native_cycle
+from newsroom.control_plane.corpus import CorpusAuthorityBinding
+from newsroom.control_plane.graphiti_operational_readiness import _source_requests
+from newsroom.control_plane.native_discovery import NativeDiscovery
+from newsroom.effective_revision import EffectiveRevisionIdentity
+from newsroom.graphiti_adapter.identity import observation_authority_ids
 from newsroom.increment5.branch_contracts import BranchMode, BranchOutcome
 from newsroom.increment5.native_retrieval import (
     NATIVE_VECTOR_PROFILE,
@@ -37,6 +42,7 @@ from newsroom.increment6.candidates import CandidateContractError
 from newsroom.increment6.hypotheses import EventHypothesis
 from newsroom.increment6.dispositions import CurrentCandidateCitation
 from newsroom.increment6.work_items import RetrievalBindingState, RetrievalInputBinding
+from newsroom.sources import SourceRevisionId
 from newsroom.tests.discovery_3d_authority_helpers import (
     exact_admission_request,
     proof,
@@ -52,6 +58,12 @@ from newsroom.tests.test_native_triage import (
     _no_match_retrieval,
     _shared_system,
 )
+from newsroom.tests.test_native_discovery import _controller, _current_rights
+from newsroom.tests.test_graphiti_operational_readiness import (
+    _next_revision,
+    _rights,
+    _unit,
+)
 
 
 def _digest(character: str) -> str:
@@ -60,7 +72,7 @@ def _digest(character: str) -> str:
 
 def _native_binding(tmp_path, lead):
     root = tmp_path / "branches"
-    root.mkdir()
+    root.mkdir(parents=True)
     dispatcher, requests = _coherent_system(root)
     raw = []
     for index in (0, 1, 3):
@@ -196,6 +208,98 @@ def _read_port(contexts):
     port = object.__new__(NativeRetrievalContextReadPort)
     object.__setattr__(port, "_read", lambda receipt: contexts[receipt.context_id])
     return port
+
+
+def _same_state_revision(
+    unit,
+    *,
+    observed_at="2026-09-02T12:15:00.000000Z",
+    updated_at="2026-09-02T12:10:00.000000Z",
+):
+    base = replace(
+        unit,
+        body=unit.body,
+        updated_at=updated_at,
+        effective_revision=EffectiveRevisionIdentity(
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            revision_digest=unit.revision_digest,
+            first_observed_at=observed_at,
+        ),
+        effective_pull_first_observed_at=observed_at,
+        authority=None,
+    )
+    admission_id, access_id, definition_id, item_id, revision_id, representation_id = (
+        observation_authority_ids(
+            source_id=base.source_id,
+            item_key=base.item_key,
+            revision_digest=base.revision_digest,
+            representation_digest=base.representation_digest,
+            rights_authority_run_id="rights-run-1",
+            rights_gate_id="RIGHTS_UK-01",
+            rights_gate_reason="retained PASS",
+            published_at=base.published_at,
+            updated_at=base.updated_at,
+        )
+    )
+    records = (
+        {"record_type": "SOURCE_DEFINITION", "record_id": str(definition_id)},
+        {
+            "record_type": "SOURCE_DEFINITION_VERSION",
+            "record_id": unit.authority.definition_version_id,
+        },
+        {"record_type": "SOURCE_ITEM", "record_id": str(item_id)},
+        {"record_type": "SOURCE_REVISION", "record_id": str(revision_id)},
+        {
+            "record_type": "DISCOVERY_REPRESENTATION",
+            "record_id": str(representation_id),
+        },
+        {"record_type": "OBJECT_ADMISSION", "record_id": str(admission_id)},
+        {"record_type": "OBJECT_ACCESS_DECISION", "record_id": str(access_id)},
+    )
+    return replace(
+        base,
+        authority=CorpusAuthorityBinding(
+            admission_id=str(admission_id),
+            access_decision_id=str(access_id),
+            definition_id=str(definition_id),
+            definition_version_id=unit.authority.definition_version_id,
+            item_id=str(item_id),
+            revision_id=str(revision_id),
+            representation_id=str(representation_id),
+            records=records,
+        ),
+    )
+
+
+def _retain_source_revision(system, unit, *, prior_revision_id=None):
+    requests = _source_requests(
+        unit,
+        _rights(),
+        prior_revision_id=(
+            None
+            if prior_revision_id is None
+            else SourceRevisionId.parse(prior_revision_id)
+        ),
+    )
+    if prior_revision_id is not None:
+        requests = (
+            *requests[:3],
+            replace(
+                requests[3],
+                source_native_revision_token=unit.updated_at,
+            ),
+            requests[4],
+        )
+    methods = (
+        system.sources.register_definition,
+        system.sources.record_definition_version,
+        system.sources.register_item,
+        system.sources.record_revision,
+        system.sources.record_representation,
+    )
+    for method, request in zip(methods, requests, strict=True):
+        method(request, proof=proof())
 
 
 def _native_collision(tmp_path, contexts, receipts, *, authorized=True) -> NativeCollisionAuthority:
@@ -406,6 +510,357 @@ def test_native_collision_reads_current_candidate_and_replays_after_restart(
         ).fetchone()[0] == 3
     assert states == {"UNOCCUPIED", "OCCUPIED"}
     assert NativeRetrievalContextReceipt.from_bytes(receipt.canonical_bytes) == receipt
+
+
+def test_same_state_association_replays_then_allows_development(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "newsroom.control_plane.cycle._dispatch_rights_decision",
+        lambda *args, **kwargs: _current_rights(),
+    )
+    retrieval_authority, _ = _no_match_retrieval(tmp_path)
+    contexts: dict[str, NativeRetrievalContext] = {}
+    receipts: dict[str, NativeRetrievalContextReceipt] = {}
+    retrieval_authority._native_context_read_port = _read_port(contexts)
+    collision = _native_collision(tmp_path, contexts, receipts)
+    proving = sqlite3.connect(":memory:")
+    try:
+        with _shared_system(
+            tmp_path,
+            monkeypatch,
+            retrieval_authority,
+            collision=collision.enforcer,
+            candidate_citations=collision.candidate_citation_read_port(),
+        ) as system:
+            controller = _controller(system, proving)
+            first_unit = _unit()
+            _retain_source_revision(system, first_unit)
+            first_delivery = controller.deliver(
+                first_unit,
+                now=UtcTimestamp.parse(first_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            first = controller.admit_lead(
+                first_delivery,
+                now=UtcTimestamp.parse(first_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            first_binding, first_receipt, first_context = _native_binding(
+                tmp_path / "first-retrieval", first.lead
+            )
+            contexts[first_context.context_id] = first_context
+            receipts[first_receipt.event_id] = first_receipt
+            admitted = advance_native_cycle(
+                system,
+                (first,),
+                retrieval=SimpleNamespace(
+                    retrieve=lambda lead, *, proof: first_binding
+                ),
+                collision_requests=collision,
+                actor_identity_digest=_actor_digest(),
+                proof=proof(),
+                owner_stop_check=lambda: None,
+                owner_stop_fence=nullcontext,
+            )[0]
+            assert admitted.state == "CANDIDATE_ADMITTED"
+            candidate_v1 = admitted.triage.candidate
+
+            same_unit = _same_state_revision(first_unit)
+            _retain_source_revision(
+                system,
+                same_unit,
+                prior_revision_id=first_unit.authority.revision_id,
+            )
+            same_delivery = controller.deliver(
+                same_unit,
+                now=UtcTimestamp.parse(same_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            same = controller.admit_lead(
+                same_delivery,
+                now=UtcTimestamp.parse(same_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            same_binding, same_receipt, same_context = _native_binding(
+                tmp_path / "same-retrieval", same.lead
+            )
+            contexts[same_context.context_id] = same_context
+            receipts[same_receipt.event_id] = same_receipt
+            associated = advance_native_cycle(
+                system,
+                (same,),
+                retrieval=SimpleNamespace(
+                    retrieve=lambda lead, *, proof: same_binding
+                ),
+                collision_requests=collision,
+                actor_identity_digest=_actor_digest(),
+                proof=proof(),
+                owner_stop_check=lambda: None,
+                owner_stop_fence=nullcontext,
+            )[0]
+            assert associated.state == "SAME_STATE_ASSOCIATED", (
+                associated.triage.hypothesis.proposed_relationship,
+                first_unit.revision_digest,
+                same_unit.revision_digest,
+                first.lead.request.item_id,
+                same.lead.request.item_id,
+            )
+            assert associated.triage.hypothesis.ordinal == 2
+            hypothesis_count = len(system.hypotheses.versions(
+                associated.triage.hypothesis.hypothesis_id
+            ))
+            replay = advance_native_cycle(
+                system,
+                (same,),
+                retrieval=SimpleNamespace(
+                    retrieve=lambda lead, *, proof: same_binding
+                ),
+                collision_requests=collision,
+                actor_identity_digest=_actor_digest(),
+                proof=proof(),
+                owner_stop_check=lambda: None,
+                owner_stop_fence=nullcontext,
+            )[0]
+            assert replay.state == "SAME_STATE_ASSOCIATED"
+            assert replay.triage is None
+            assert len(system.hypotheses.versions(
+                associated.triage.hypothesis.hypothesis_id
+            )) == hypothesis_count
+
+            second_same_unit = _same_state_revision(
+                same_unit,
+                observed_at="2026-09-02T12:20:00.000000Z",
+                updated_at="2026-09-02T12:15:00.000000Z",
+            )
+            _retain_source_revision(
+                system,
+                second_same_unit,
+                prior_revision_id=same_unit.authority.revision_id,
+            )
+            second_delivery = controller.deliver(
+                second_same_unit,
+                now=UtcTimestamp.parse(
+                    second_same_unit.effective_revision.first_observed_at
+                ),
+                proof=proof(),
+            )
+            second_same = controller.admit_lead(
+                second_delivery,
+                now=UtcTimestamp.parse(
+                    second_same_unit.effective_revision.first_observed_at
+                ),
+                proof=proof(),
+            )
+            second_binding, second_receipt, second_context = _native_binding(
+                tmp_path / "second-same-retrieval", second_same.lead
+            )
+            contexts[second_context.context_id] = second_context
+            receipts[second_receipt.event_id] = second_receipt
+            second_associated = advance_native_cycle(
+                system,
+                (second_same,),
+                retrieval=SimpleNamespace(
+                    retrieve=lambda lead, *, proof: second_binding
+                ),
+                collision_requests=collision,
+                actor_identity_digest=_actor_digest(),
+                proof=proof(),
+                owner_stop_check=lambda: None,
+                owner_stop_fence=nullcontext,
+            )[0]
+            assert second_associated.state == "SAME_STATE_ASSOCIATED"
+            assert second_associated.triage.hypothesis.ordinal == 3
+            raw_historical_citation = collision.current_candidate_citation(
+                second_same.lead, second_binding, proof=proof()
+            )
+            associated_candidate, associated_hypothesis = (
+                system.candidates._exact_associated_current_producers(
+                    candidate_v1.candidate_id, proof=proof()
+                )
+            )
+            non_hypothesis_forgery = {
+                "candidate_id": str(uuid.uuid4()),
+                "candidate_version_id": str(uuid.uuid4()),
+                "candidate_version_digest": _digest("0"),
+                "collision_namespace": "forged-collision-namespace",
+                "collision_key_digest": _digest("1"),
+                "source_definition_id": str(uuid.uuid4()),
+                "source_item_id": str(uuid.uuid4()),
+                "retrieval_context_digest": _digest("2"),
+                "authorization_receipt_digest": _digest("3"),
+                "authorization_decision_id": str(uuid.uuid4()),
+            }
+            forged_citation_ids = []
+            for field, forged_value in non_hypothesis_forgery.items():
+                forged_values = {
+                    name: getattr(raw_historical_citation, name)
+                    for name in raw_historical_citation.__dataclass_fields__
+                    if name != "citation_id"
+                }
+                forged_values[field] = forged_value
+                forged = CurrentCandidateCitation.create(**forged_values)
+                forged_citation_ids.append(forged.citation_id)
+                with pytest.raises(
+                    NativeCollisionHold,
+                    match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
+                ):
+                    collision.retain_associated_candidate_citation(
+                        forged,
+                        associated_candidate,
+                        associated_hypothesis,
+                        lead=second_same.lead,
+                        retrieval=second_binding,
+                        proof=proof(),
+                    )
+            with sqlite3.connect(tmp_path / "native-collision.sqlite3") as journal:
+                assert all(
+                    journal.execute(
+                        "SELECT 1 FROM native_current_candidate_citations "
+                        "WHERE citation_id=?",
+                        (citation_id,),
+                    ).fetchone()
+                    is None
+                    for citation_id in forged_citation_ids
+                )
+            with pytest.raises(
+                NativeCollisionHold,
+                match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
+            ):
+                wrong_association_values = {
+                    field: getattr(raw_historical_citation, field)
+                    for field in raw_historical_citation.__dataclass_fields__
+                    if field != "citation_id"
+                }
+                wrong_association_values["hypothesis_id"] = str(uuid.uuid4())
+                collision.retain_associated_candidate_citation(
+                    CurrentCandidateCitation.create(**wrong_association_values),
+                    associated_candidate,
+                    associated_hypothesis,
+                    lead=second_same.lead,
+                    retrieval=second_binding,
+                    proof=proof(),
+                )
+            historical_citation = collision.retain_associated_candidate_citation(
+                raw_historical_citation,
+                associated_candidate,
+                associated_hypothesis,
+                lead=second_same.lead,
+                retrieval=second_binding,
+                proof=proof(),
+            )
+            with sqlite3.connect(tmp_path / "native.sqlite3") as connection:
+                trigger = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE name="
+                    "'immutable_event_hypothesis_relationship_update'"
+                ).fetchone()[0]
+                connection.execute(
+                    "DROP TRIGGER immutable_event_hypothesis_relationship_update"
+                )
+                connection.execute(
+                    "UPDATE event_hypothesis_relationship_decisions "
+                    "SET decision='REL_DEVELOPMENT_OF' WHERE subject_version_id=?",
+                    (associated_hypothesis.version_id,),
+                )
+            try:
+                with pytest.raises(
+                    NativeCollisionHold,
+                    match="CURRENT_CANDIDATE_ASSOCIATION_DIFFERS",
+                ):
+                    collision.candidate_citation_read_port().require(
+                        historical_citation.citation_id,
+                        historical_citation.canonical_digest,
+                    )
+            finally:
+                with sqlite3.connect(tmp_path / "native.sqlite3") as connection:
+                    connection.execute(
+                        "UPDATE event_hypothesis_relationship_decisions "
+                        "SET decision='REL_SAME_STATE' WHERE subject_version_id=?",
+                        (associated_hypothesis.version_id,),
+                    )
+                    connection.execute(trigger)
+
+            changed_unit = _next_revision(second_same_unit)
+            _retain_source_revision(
+                system,
+                changed_unit,
+                prior_revision_id=second_same_unit.authority.revision_id,
+            )
+            changed_delivery = controller.deliver(
+                changed_unit,
+                now=UtcTimestamp.parse(changed_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            changed = controller.admit_lead(
+                changed_delivery,
+                now=UtcTimestamp.parse(changed_unit.effective_revision.first_observed_at),
+                proof=proof(),
+            )
+            wrong_source_values = {
+                field: getattr(historical_citation, field)
+                for field in historical_citation.__dataclass_fields__
+                if field != "citation_id"
+            }
+            wrong_source_values["source_item_id"] = str(uuid.uuid4())
+            with pytest.raises(
+                NativeCollisionHold,
+                match="SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS",
+            ):
+                _revision_successor(
+                    system,
+                    changed.lead,
+                    CurrentCandidateCitation.create(**wrong_source_values),
+                    proof=proof(),
+                    current_producers=(
+                        associated_candidate,
+                        associated_hypothesis,
+                    ),
+                )
+            changed_binding, changed_receipt, changed_context = _native_binding(
+                tmp_path / "changed-retrieval", changed.lead
+            )
+            contexts[changed_context.context_id] = changed_context
+            receipts[changed_receipt.event_id] = changed_receipt
+            developed = advance_native_cycle(
+                system,
+                (changed,),
+                retrieval=SimpleNamespace(
+                    retrieve=lambda lead, *, proof: changed_binding
+                ),
+                collision_requests=collision,
+                actor_identity_digest=_actor_digest(),
+                proof=proof(),
+                owner_stop_check=lambda: None,
+                owner_stop_fence=nullcontext,
+            )[0]
+            assert developed.state == "CANDIDATE_ADMITTED", developed.reason
+            assert developed.triage.candidate.candidate_id == candidate_v1.candidate_id
+            assert developed.triage.candidate.ordinal == 2
+    finally:
+        proving.close()
+
+    reopened_collision = _native_collision(tmp_path, contexts, receipts)
+    with _shared_system(
+        tmp_path,
+        monkeypatch,
+        retrieval_authority,
+        collision=reopened_collision.enforcer,
+        candidate_citations=reopened_collision.candidate_citation_read_port(),
+    ) as reopened:
+        current_candidate, current_hypothesis = (
+            reopened.candidates._exact_associated_current_producers(
+                candidate_v1.candidate_id, proof=proof()
+            )
+        )
+        assert current_candidate.ordinal == 2
+        assert current_hypothesis.version_id == current_candidate.governing_manifest.hypothesis_version_id
+        assert (
+            reopened_collision.candidate_citation_read_port().require(
+                historical_citation.citation_id,
+                historical_citation.canonical_digest,
+            )
+            == historical_citation
+        )
 
 
 def test_native_collision_rechecks_watermark_and_rejects_cross_work_binding(

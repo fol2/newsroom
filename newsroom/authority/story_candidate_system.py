@@ -63,7 +63,12 @@ from newsroom.increment6.dispositions import (
     ProposalDispositionStore,
 )
 from newsroom.increment6.lineage import merge_lineage_authority_registries
-from newsroom.increment6.relationships import merge_relationship_authority_registries
+from newsroom.increment6.hypotheses import EventHypothesisVersion
+from newsroom.increment6.proposals import HypothesisRelationship
+from newsroom.increment6.relationships import (
+    CanonicalOutcome,
+    merge_relationship_authority_registries,
+)
 from newsroom.increment6.work_items import RetrievalContextAuthority
 
 from ._event_hypothesis_system import _HypothesisStore
@@ -502,24 +507,37 @@ class _CandidateStore(_EventAuthorityStore):
         self._verify_upstream(verified)
         return verified
 
-    def _verify_upstream(self, verified):
-        digests = {
-            admission.governing_manifest.relationship_assessment_digest
-            for admission, *_ in verified.values()
-        }
-        ordered_digests = tuple(sorted(digests))
-        # The lineage batch verifies its relationship, Hypothesis and disposition
-        # authority chain once, including when this Candidate history is empty.
-        relationships = {
-            digest: receipt.assessment
-            for digest, receipt in zip(
-                ordered_digests,
-                self._lineage.require_retained_relationships_in_transaction(
-                    ordered_digests
-                ),
-                strict=True,
-            )
-        }
+    def _verify_upstream(self, verified, *, exact: bool = False):
+        if exact:
+            relationships = {}
+            for admission, *_ in verified.values():
+                manifest = admission.governing_manifest
+                receipt = self._lineage._require_exact_candidate_manifest_in_transaction(
+                    manifest.hypothesis_version_id,
+                    manifest.relationship_assessment_digest,
+                    manifest.lineage_history_digests,
+                    manifest.lineage_generation,
+                )
+                relationships[manifest.relationship_assessment_digest] = (
+                    receipt.assessment
+                )
+        else:
+            digests = {
+                admission.governing_manifest.relationship_assessment_digest
+                for admission, *_ in verified.values()
+            }
+            ordered_digests = tuple(sorted(digests))
+            # Opening verifies the complete retained relationship authority.
+            relationships = {
+                digest: receipt.assessment
+                for digest, receipt in zip(
+                    ordered_digests,
+                    self._lineage.require_retained_relationships_in_transaction(
+                        ordered_digests
+                    ),
+                    strict=True,
+                )
+            }
         for admission, *_ in verified.values():
             manifest = admission.governing_manifest
             assessment = relationships[manifest.relationship_assessment_digest]
@@ -934,6 +952,138 @@ class _CandidateStore(_EventAuthorityStore):
             raise CandidateContractError("Candidate current governing material differs")
         return version, producers[0].subject
 
+    def exact_associated_current_producers(
+        self, candidate_id: str, *, proof: AuthenticationProof
+    ):
+        """Read a Candidate and its current Hypothesis through SAME_STATE only."""
+        if not self._connection.in_transaction:
+            with self._lock, self._transaction():
+                return self.exact_associated_current_producers(
+                    candidate_id, proof=proof
+                )
+        retained = self._exact_current_receipt(candidate_id)
+        admission, _, candidate, *_ = retained
+        self._verify_upstream(
+            {admission.canonical_digest: retained}, exact=True
+        )
+        manifest = candidate.governing_manifest
+        head = self._connection.execute(
+            "SELECT version_id,ordinal,version_digest FROM "
+            "event_hypothesis_heads_v2 WHERE hypothesis_id=?",
+            (manifest.hypothesis_id,),
+        ).fetchone()
+        if head is None:
+            raise CandidateContractError("Candidate associated Hypothesis is absent")
+        head_id = str(head["version_id"])
+        if head_id == manifest.hypothesis_version_id:
+            producers = self._producers(manifest, proof)
+            if self._manifest(producers, retained[3]) != manifest:
+                raise CandidateContractError(
+                    "Candidate current governing material differs"
+                )
+            return candidate, producers[0].subject
+
+        base = self._connection.execute(
+            "SELECT ordinal FROM event_hypothesis_versions_v2 WHERE version_id=?",
+            (manifest.hypothesis_version_id,),
+        ).fetchone()
+        if base is None:
+            raise CandidateContractError("Candidate associated Hypothesis is absent")
+        previous_id = manifest.hypothesis_version_id
+        previous_digest = manifest.hypothesis_version_digest
+        expected_ordinal = int(base[0])
+        relationship_digests: list[str] = []
+        while previous_id != head_id:
+            rows = self._connection.execute(
+                "SELECT version_id,ordinal,previous_version_id,"
+                "previous_version_digest,proposed_relationship,canonical_bytes,"
+                "canonical_digest FROM event_hypothesis_versions_v2 "
+                "WHERE hypothesis_id=? AND previous_version_id=? LIMIT 2",
+                (manifest.hypothesis_id, previous_id),
+            ).fetchall()
+            if len(rows) != 1:
+                raise CandidateContractError(
+                    "Candidate SAME_STATE association chain differs"
+                )
+            row = rows[0]
+            successor = EventHypothesisVersion.from_canonical_bytes(
+                bytes(row["canonical_bytes"])
+            )
+            expected_ordinal += 1
+            if (
+                successor.version_id != str(row["version_id"])
+                or successor.ordinal != int(row["ordinal"])
+                or successor.ordinal != expected_ordinal
+                or successor.previous_version_id != previous_id
+                or successor.previous_version_digest != previous_digest
+                or successor.proposed_relationship is not HypothesisRelationship.SAME_STATE
+                or successor.canonical_digest != str(row["canonical_digest"])
+            ):
+                raise CandidateContractError(
+                    "Candidate SAME_STATE association chain differs"
+                )
+            relationship_rows = self._connection.execute(
+                "SELECT decision_id FROM event_hypothesis_relationship_decisions "
+                "WHERE subject_version_id=? LIMIT 2",
+                (successor.version_id,),
+            ).fetchall()
+            if len(relationship_rows) != 1:
+                raise CandidateContractError(
+                    "Candidate SAME_STATE relationship differs"
+                )
+            relationship_digests.append(str(relationship_rows[0][0]))
+            previous_id = successor.version_id
+            previous_digest = successor.canonical_digest
+        if (
+            int(head["ordinal"]) != expected_ordinal
+            or str(head["version_digest"]) != previous_digest
+        ):
+            raise CandidateContractError("Candidate associated Hypothesis head differs")
+
+        receipts = (
+            self._lineage._require_exact_retained_relationships_in_transaction(
+                tuple(relationship_digests)
+            )
+        )
+        previous_id = manifest.hypothesis_version_id
+        previous_digest = manifest.hypothesis_version_digest
+        for receipt in receipts:
+            relationship = receipt.assessment
+            selected = relationship.comparator
+            if (
+                relationship.decision is not CanonicalOutcome.REL_SAME_STATE
+                or selected is None
+                or selected.version_id != previous_id
+                or selected.version_digest != previous_digest
+            ):
+                raise CandidateContractError(
+                    "Candidate SAME_STATE relationship differs"
+                )
+            previous_id = relationship.subject.version_id
+            previous_digest = relationship.subject.version_digest
+        snapshot, _, dispositions = (
+            self._lineage._require_candidate_inputs_in_transaction(
+                head_id, relationship_digests[-1], proof=proof
+            )
+        )
+        if (
+            snapshot.subject.version_id != head_id
+            or snapshot.subject.canonical_digest != str(head["version_digest"])
+        ):
+            raise CandidateContractError("Candidate associated Hypothesis head differs")
+        lead_ids = tuple(
+            sorted(
+                {NewsLeadId.parse(item.decision_lead_id) for item in dispositions},
+                key=str,
+            )
+        )
+        _create_discovery_governing_producer_read_port(
+            self._connection,
+            object_admission_payload_validator=self._validate_object_admission_payload_record,
+            validate_retained_event=self._validate_retained_event,
+        ).require_current_governing_producers(lead_ids)
+        return candidate, snapshot.subject
+
     def _exact_current_receipt(self, candidate_id: str):
         verified = self._verify_local()
         row = self._connection.execute(
@@ -1077,55 +1227,51 @@ class _StoryCandidateReadAuthority:
         _require_candidate_read_connection(self.__connection, active=True)
         return self.__verifier._verify()
 
+    def __verified_receipts(self, *, version_id=None, candidate_id=None):
+        _require_candidate_read_connection(self.__connection, active=True)
+        verified = self.__verifier._verify_local()
+        matches = tuple(
+            item
+            for item in verified.values()
+            if (version_id is None or item[2].version_id == version_id)
+            and (candidate_id is None or item[2].candidate_id == candidate_id)
+        )
+        if not matches:
+            raise CandidateContractError(
+                "unknown Candidate" if candidate_id is not None
+                else "unknown Candidate Version"
+            )
+        if version_id is not None and len(matches) != 1:
+            raise CandidateContractError("unknown Candidate Version")
+        self.__verifier._verify_upstream(
+            {item[0].canonical_digest: item for item in matches}, exact=True
+        )
+        return matches
+
     def verify_retained_integrity_in_transaction(self) -> None:
         self.__verified()
 
     def require_retained_candidate_in_transaction(
         self, candidate_id: str
     ) -> StoryCandidate:
-        verified = self.__verified()
-        candidates = {
-            candidate.candidate_id: candidate for _, candidate, *_ in verified.values()
-        }
-        try:
-            return candidates[candidate_id]
-        except KeyError as exc:
-            raise CandidateContractError("unknown Candidate") from exc
+        matches = self.__verified_receipts(candidate_id=candidate_id)
+        candidate = matches[0][1]
+        if any(item[1] != candidate for item in matches):
+            raise CandidateContractError("Candidate identity differs")
+        return candidate
 
     def require_retained_version_in_transaction(
         self, version_id: str
     ) -> StoryCandidateVersion:
-        verified = self.__verified()
-        versions = {
-            version.version_id: version for *_, version, _, _, _, _ in verified.values()
-        }
-        try:
-            return versions[version_id]
-        except KeyError as exc:
-            raise CandidateContractError("unknown Candidate Version") from exc
+        return self.__verified_receipts(version_id=version_id)[0][2]
 
     def require_current_head_in_transaction(
         self, candidate_id: str, *, proof: AuthenticationProof
     ) -> StoryCandidateVersion:
-        verified = self.__verified()
-        row = self.__connection.execute(
-            "SELECT current_admission_digest,current_version_id,"
-            "current_version_digest FROM "
-            "story_candidate_heads WHERE candidate_id=?",
-            (candidate_id,),
-        ).fetchone()
-        if row is None:
-            raise CandidateContractError("unknown Candidate")
-        try:
-            admission, _, version, collision, *_ = verified[str(row[0])]
-        except KeyError as exc:
-            raise CandidateContractError("Candidate head differs") from exc
-        if tuple(row[1:]) != (version.version_id, version.canonical_digest):
-            raise CandidateContractError("Candidate head differs")
-        producers = self.__verifier._producers(admission.governing_manifest, proof)
-        rebuilt = self.__verifier._manifest(producers, collision)
-        if rebuilt != version.governing_manifest:
-            raise CandidateContractError("Candidate current governing material differs")
+        _require_candidate_read_connection(self.__connection, active=True)
+        version, _ = self.__verifier.exact_current_producers(
+            candidate_id, proof=proof
+        )
         return version
 
 

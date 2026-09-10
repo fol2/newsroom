@@ -147,7 +147,9 @@ def _authenticator():
     )
 
 
-def _shared_system(tmp_path, monkeypatch, retrieval, *, collision=None):
+def _shared_system(
+    tmp_path, monkeypatch, retrieval, *, collision=None, candidate_citations=None
+):
     adapter = MemoryNeo4jAdapter()
     monkeypatch.setattr(
         "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
@@ -186,6 +188,13 @@ def _shared_system(tmp_path, monkeypatch, retrieval, *, collision=None):
         allowed_trust_scopes=frozenset({TrustScope.ADMITTED}),
         metadata_classes=frozenset({MetadataClass.ROUTING}),
     )
+    dependencies = None
+    if candidate_citations is not None:
+        dependencies = lambda **_: (
+            retrieval,
+            collision,
+            candidate_citations,
+        )
     return open_hermes_native_authority_system(
         path=tmp_path / "native.sqlite3",
         object_root=tmp_path / "objects",
@@ -217,8 +226,9 @@ def _shared_system(tmp_path, monkeypatch, retrieval, *, collision=None):
             max_range_bytes=1024 * 1024,
         ),
         neo4j_config=config(),
-        retrieval_authority=retrieval,
-        collision_enforcer=collision,
+        retrieval_authority=None if dependencies is not None else retrieval,
+        collision_enforcer=None if dependencies is not None else collision,
+        native_dependency_factory=dependencies,
         clock=lambda: FIXED_NOW,
     )
 

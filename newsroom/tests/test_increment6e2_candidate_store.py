@@ -32,6 +32,7 @@ from newsroom.authority.persistence import (
     AuthoritySchemaError,
 )
 from newsroom.authority.story_candidate_system import (
+    _create_story_candidate_read_port,
     _open_unlocked_story_candidate_authority_for_test,
 )
 from newsroom.authority.types import UtcTimestamp
@@ -62,6 +63,7 @@ from newsroom.increment6.dispositions import ProposalDispositionStore
 from newsroom.increment6.lineage import (
     lineage_command_definition,
     merge_lineage_authority_registries,
+    open_event_hypothesis_lineage_authority,
 )
 from newsroom.increment6.outcomes import CanonicalOutcome
 from newsroom.increment6.relationships import (
@@ -1288,6 +1290,246 @@ def test_real_successor_commits_then_history_current_and_reopen_retain_both_vers
         )
     finally:
         reopened.close()
+
+
+def test_retained_successor_read_uses_only_exact_historical_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_lineage_system as lineage_system
+    from newsroom.authority import (
+        _event_hypothesis_relationship_system as relationship_system,
+    )
+    from newsroom.authority import _event_hypothesis_system as hypothesis_system
+
+    adapter = _Adapter(tmp_path)
+    location = adapter.create_location()
+    first_handle = adapter.open_handle(location)
+    first_admission, first_collision = _admission(location, _generic("record-1"))
+    first = first_handle._opened().admit(
+        first_admission.canonical_bytes,
+        collision_request=first_collision,
+        proof=location.seed[0][3],
+    )
+    first_handle.close()
+    _, advanced = _advance_record_one(location)
+    binding = CandidateUseCollisionBinding(
+        advanced.hypothesis_id,
+        advanced.version_id,
+        advanced.canonical_digest,
+        CandidateUseOperation.USE_CURRENT_CANDIDATE,
+        first.candidate_id,
+        first.governing_manifest.collision_namespace,
+        first.governing_manifest.collision_key_digest,
+        "retrieval-generation-v2",
+        QUERY_VALID,
+        SERVING,
+        42,
+    )
+    collision_request_value, collision = _named_snapshot(
+        location, binding, occupied_candidate_id=first.candidate_id
+    )
+    manifest = _manifest(location, advanced, collision)
+    admission = evaluate_candidate_admission(
+        request=CandidateAdmissionRequest(
+            str(uuid.uuid4()),
+            _actor_digest(location.seed, "actor-1"),
+            "candidate:bounded-successor-record-1",
+            first.version_id,
+            first.canonical_digest,
+            first.ordinal,
+            manifest.semantic_scope_digest,
+            collision_request_value.request_digest,
+            manifest.governing_state_binding.canonical_digest,
+            None,
+        ),
+        manifest=manifest,
+        collision=collision,
+        current_version=first,
+        governing_state=CandidateGoverningState(
+            CandidateGoverningStateStatus.COMPLETE,
+            manifest.governing_state_binding,
+        ),
+    )
+    handle = adapter.open_handle(location)
+    second = handle._opened().admit(
+        admission.canonical_bytes,
+        collision_request=collision_request_value,
+        proof=location.seed[0][3],
+    )
+    handle.close()
+
+    connection = sqlite3.connect(location.seed[1], isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    port = _create_story_candidate_read_port(
+        connection,
+        retrieval_authority=location.seed[0][1],
+        authenticator=location.seed[0][2],
+        command_registry=location.seed[4],
+        payload_schemas=location.seed[5],
+        clock=lambda: UtcTimestamp.parse("2042-01-02T00:00:00.000000Z"),
+    )
+
+    def global_history(*_args, **_kwargs):
+        raise AssertionError("retained Candidate read scanned unrelated history")
+
+    monkeypatch.setattr(lineage_system._LineageStore, "_verify", global_history)
+    monkeypatch.setattr(
+        relationship_system,
+        "_verify_relationship_reads_in_transaction",
+        global_history,
+    )
+    monkeypatch.setattr(hypothesis_system._HypothesisStore, "_verify", global_history)
+    monkeypatch.setattr(
+        hypothesis_system, "_VERIFY_DISPOSITION_INTEGRITY", global_history
+    )
+    with pytest.raises(ValueError, match="active checked connection"):
+        port.require_current_head_in_transaction(
+            first.candidate_id, proof=location.seed[0][3]
+        )
+    assert not connection.in_transaction
+    connection.execute("BEGIN")
+    try:
+        assert (
+            port.require_retained_candidate_in_transaction(first.candidate_id)
+            .candidate_id
+            == first.candidate_id
+        )
+        assert port.require_retained_version_in_transaction(first.version_id) == first
+        assert port.require_retained_version_in_transaction(second.version_id) == second
+        assert (
+            port.require_current_head_in_transaction(
+                first.candidate_id, proof=location.seed[0][3]
+            )
+            == second
+        )
+    finally:
+        connection.execute("ROLLBACK")
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_version_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_version_update")
+    connection.execute(
+        "UPDATE event_hypothesis_versions_v2 SET canonical_bytes=? "
+        "WHERE version_id=?",
+        (b"{}", first.governing_manifest.hypothesis_version_id),
+    )
+    connection.execute(trigger)
+    connection.execute("BEGIN")
+    try:
+        with pytest.raises(ValueError, match="Candidate|Hypothesis|relationship"):
+            port.require_retained_version_in_transaction(first.version_id)
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
+def test_exact_candidate_manifest_replays_bound_lineage_and_rejects_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_lineage_system as lineage_system
+    from newsroom.tests import test_increment6d3_lineage_store as lineage_store
+
+    seed, args, receipt = lineage_store._seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    finally:
+        authority.close()
+    commands, schemas = merge_relationship_authority_registries(
+        args["command_registry"], args["payload_schemas"]
+    )
+    commands, schemas = merge_lineage_authority_registries(commands, schemas)
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    port = _create_event_hypothesis_lineage_read_port(
+        connection,
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        command_registry=commands,
+        payload_schemas=schemas,
+        clock=args["clock"],
+    )
+    output = seed[3][0]
+    assessment_digest = receipt.relationships[0].assessment_digest
+    monkeypatch.setattr(
+        lineage_system._LineageStore,
+        "_history_rows",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("bound Candidate lineage scanned unrelated history")
+        ),
+    )
+    connection.execute("BEGIN")
+    try:
+        retained = port._require_exact_candidate_manifest_in_transaction(
+            output.version_id,
+            assessment_digest,
+            (receipt.canonical_digest,),
+            1,
+        )
+        assert retained.assessment.canonical_digest == assessment_digest
+        with pytest.raises(ValueError, match="lineage.*head"):
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                0,
+            )
+    finally:
+        connection.execute("ROLLBACK")
+    proposal, dispositions = seed[7]["authority"]
+    upstream = d2.hypothesis_helpers._open((connection, *seed[0][1:]))
+    try:
+        successor = upstream.retain(
+            proposal,
+            dispositions,
+            proof=seed[0][3],
+            expected_target_version=output,
+        )
+        assert successor.previous_version_id == output.version_id
+    finally:
+        upstream.close()
+    connection.execute("BEGIN")
+    try:
+        assert (
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                1,
+            ).assessment.canonical_digest
+            == assessment_digest
+        )
+    finally:
+        connection.execute("ROLLBACK")
+    trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name="
+        "'immutable_event_hypothesis_lineage_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_event_hypothesis_lineage_update")
+    connection.execute(
+        "UPDATE event_hypothesis_lineage SET receipt_bytes=? WHERE lineage_id=?",
+        (b"{}", receipt.lineage_id),
+    )
+    connection.execute(trigger)
+    connection.execute("BEGIN")
+    try:
+        with pytest.raises(ValueError, match="lineage"):
+            port._require_exact_candidate_manifest_in_transaction(
+                output.version_id,
+                assessment_digest,
+                (receipt.canonical_digest,),
+                1,
+            )
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
 
 
 def test_candidate_read_rejects_exact_authority_payload_tamper(tmp_path: Path) -> None:

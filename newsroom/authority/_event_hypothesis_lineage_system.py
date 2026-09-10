@@ -1113,6 +1113,76 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
         )
         return snapshot, relationships, subject_dispositions
 
+    def exact_candidate_manifest(
+        version_id: str,
+        assessment_digest: str,
+        history_digests: tuple[str, ...],
+        generation: int,
+    ):
+        receipts = []
+        for digest in history_digests:
+            rows = connection.execute(
+                "SELECT lineage_id FROM event_hypothesis_lineage "
+                "WHERE receipt_digest=? LIMIT 2",
+                (digest,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise HypothesisLineageContractError(
+                    "Candidate bound lineage receipt differs"
+                )
+            receipts.append(verifier._load_row(str(rows[0][0])))
+        retained = tuple(receipts)
+        if tuple(item.canonical_digest for item in retained) != history_digests:
+            raise HypothesisLineageContractError(
+                "Candidate bound lineage history differs"
+            )
+        if retained:
+            roots, versions, proofs, relationships, _, _ = verifier._replay_inputs(
+                retained, (assessment_digest,), exact_relationships=True
+            )
+        else:
+            relationship_values, versions = (
+                verifier._port._require_exact_retained_inputs_in_transaction(
+                    (assessment_digest,), (version_id,)
+                )
+            )
+            relationships = {assessment_digest: relationship_values[0]}
+            roots = (HypothesisLineageHead.from_version(versions[0]),)
+            proofs = ()
+        replay = replay_hypothesis_lineage(
+            retained,
+            initial_heads=roots,
+            versions=versions,
+            relationship_proofs=proofs,
+        )
+        if tuple(item.canonical_digest for item in replay.history) != history_digests:
+            raise HypothesisLineageContractError(
+                "Candidate bound lineage replay differs"
+            )
+        heads = tuple(
+            head for head in replay.active_heads if head.node.version_id == version_id
+        )
+        relationship = relationships[assessment_digest]
+        subject = relationship.assessment.subject
+        if (
+            len(heads) != 1
+            or heads[0].generation != generation
+            or (
+                heads[0].node.hypothesis_id,
+                heads[0].node.version_id,
+                heads[0].node.version_digest,
+            )
+            != (
+                subject.hypothesis_id,
+                subject.version_id,
+                subject.version_digest,
+            )
+        ):
+            raise HypothesisLineageContractError(
+                "Candidate bound lineage head differs"
+            )
+        return relationship
+
     class _ReadAuthority:
         def verify_retained_integrity_in_transaction(self) -> None: verified()
 
@@ -1122,6 +1192,28 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
         def require_retained_relationships_in_transaction(self, digests: tuple[str, ...]):
             *_, relationships, _, _ = verified(digests)
             return tuple(relationships[digest] for digest in digests)
+
+        def require_exact_candidate_manifest_in_transaction(
+            self,
+            version_id: str,
+            assessment_digest: str,
+            history_digests: tuple[str, ...],
+            generation: int,
+        ):
+            return exact_candidate_manifest(
+                version_id,
+                assessment_digest,
+                history_digests,
+                generation,
+            )
+
+        def require_exact_retained_relationships_in_transaction(
+            self, digests: tuple[str, ...]
+        ):
+            receipts, _ = verifier._port._require_exact_retained_inputs_in_transaction(
+                digests, ()
+            )
+            return receipts
 
         def require_candidate_inputs_in_transaction(
             self, version_id: str, assessment_digest: str, *, proof: object
