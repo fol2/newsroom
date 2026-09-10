@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1006,7 +1007,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
             guard_events.append("complete")
 
     delegate = SimpleNamespace(
-        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        client=SimpleNamespace(embeddings=SimpleNamespace(), close=AsyncMock()),
         config=SimpleNamespace(
             embedding_model="openai/text-embedding-3-large",
             embedding_dim=2,
@@ -1068,6 +1069,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
     assert validation_states == ["metered"]
     assert guard_events == ["begin", "metered", "complete"]
     assert saves == ["episode-id"]
+    delegate.client.close.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -1120,7 +1122,7 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
             events.append("rollback_pending")
 
     delegate = SimpleNamespace(
-        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        client=SimpleNamespace(embeddings=SimpleNamespace(), close=AsyncMock()),
         config=SimpleNamespace(embedding_model="model", embedding_dim=2),
     )
     runtime = SimpleNamespace(
@@ -1230,7 +1232,7 @@ def test_only_proven_pipeline_rollback_is_classified_complete(
         )
 
     delegate = SimpleNamespace(
-        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        client=SimpleNamespace(embeddings=SimpleNamespace(), close=AsyncMock()),
         config=SimpleNamespace(embedding_model="model", embedding_dim=2),
     )
     runtime = SimpleNamespace(
@@ -1325,8 +1327,13 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
     async def created_episode(**_values: object) -> tuple[SimpleNamespace, str]:
         return SimpleNamespace(uuid="episode-id"), "CREATED"
 
+    async def close_embedding() -> None:
+        events.append("embedding-close")
+        if slow_cleanup:
+            await asyncio.Event().wait()
+
     delegate = SimpleNamespace(
-        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        client=SimpleNamespace(embeddings=SimpleNamespace(), close=close_embedding),
         config=SimpleNamespace(embedding_model="model", embedding_dim=2),
     )
     runtime = SimpleNamespace(
@@ -1381,7 +1388,9 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
             )
         )
     elapsed = time.monotonic() - started
-    assert events == ["provider-start", "telemetry", "rollback", "close"]
+    assert events == [
+        "provider-start", "telemetry", "rollback", "embedding-close", "close"
+    ]
     if slow_cleanup:
         assert elapsed < 0.2
         assert [
@@ -2456,7 +2465,9 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
 
     runtime = SimpleNamespace(
         Graphiti=Graphiti,
-        OpenAIEmbedder=lambda **_values: object(),
+        OpenAIEmbedder=lambda **_values: SimpleNamespace(
+            client=SimpleNamespace(close=AsyncMock())
+        ),
         OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
         MeteredOpenAIEmbedder=Embedder,
         IdentityCrossEncoder=lambda: object(),

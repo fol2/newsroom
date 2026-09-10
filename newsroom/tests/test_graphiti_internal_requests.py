@@ -1941,6 +1941,158 @@ def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
     ]
 
 
+@pytest.mark.parametrize(
+    ("error", "mark_dispatched", "usage_status", "pre_dispatch_zero"),
+    (
+        (ValueError("invalid local request"), False, "REPORTED", True),
+        (TypeError("invalid returned value"), True, "UNREPORTED", False),
+    ),
+)
+def test_cli_software_failure_after_allocation_retains_a_terminal_before_work_outcome(
+    tmp_path: Path,
+    error: Exception,
+    mark_dispatched: bool,
+    usage_status: str,
+    pre_dispatch_zero: bool,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-cli-software-failure",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-cli-software-failure",
+        graphiti_attempt_id="ingest-cli-software-failure:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    invocations: list[dict[str, object]] = []
+
+    def cursor(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object = None,
+        idempotency_key: str | None = None,
+    ) -> CliExecution:
+        del max_tokens, idempotency_key
+        if mark_dispatched:
+            assert callable(dispatch_started)
+            dispatch_started()
+        raise error
+
+    with pytest.raises(type(error), match=str(error)):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=cursor,
+                grok_runner=lambda *_args, **_kwargs: pytest.fail("fallback ran"),
+                invocations=invocations,
+                invocation_observer=observer,
+                fallback_permitted=False,
+            )
+        )
+
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="PRODUCER_INTERNAL_ERROR",
+        outcome_record_id="software-failure-outcome",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=11),
+    )
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["invocation_outcome"] == "FAILED"
+    assert leaf["usage_status"] == usage_status
+    assert leaf["pre_dispatch_zero_proved"] is pre_dispatch_zero
+    assert invocations[0]["failure"] == type(error).__name__
+
+
+def test_fallback_software_failure_after_allocation_retains_a_terminal(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-fallback-software-failure",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-fallback-software-failure",
+        graphiti_attempt_id="ingest-fallback-software-failure:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    invocations: list[dict[str, object]] = []
+
+    def fallback(
+        _prompt: str,
+        _schema: str | None,
+        *,
+        max_tokens: int,
+        dispatch_started: object = None,
+    ) -> CliExecution:
+        del max_tokens, dispatch_started
+        raise ValueError("invalid fallback request")
+
+    with pytest.raises(ValueError, match="invalid fallback request"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_EDGES_SCHEMA,
+                semantic_request_class="ExtractedEdges",
+                max_tokens=100,
+                cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
+                    text="malformed",
+                    usage={
+                        "usage_basis": "PROVIDER_REPORTED",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cached_read_tokens": 0,
+                        "cached_write_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 2,
+                    },
+                ),
+                grok_runner=fallback,
+                invocations=invocations,
+                invocation_observer=observer,
+            )
+        )
+
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="PRODUCER_INTERNAL_ERROR",
+        outcome_record_id="fallback-software-failure-outcome",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=11),
+    )
+    leaves = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
+    assert [leaf["invocation_outcome"] for leaf in leaves] == [
+        "MALFORMED_OUTPUT",
+        "FAILED",
+    ]
+    assert leaves[1]["pre_dispatch_zero_proved"] is True
+    assert invocations[1]["failure"] == "ValueError"
+
+
 def test_observer_refuses_fallback_without_a_malformed_primary(
     tmp_path: Path,
 ) -> None:

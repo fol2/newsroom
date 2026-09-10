@@ -105,19 +105,26 @@ class NativeRetrievalContinuation:
         retained = self._facts(revision_id).get("retrieval_binding")
         if retained is None:
             self._prepare(units, proof=proof)
-        subjects, document_inventory, rights_inventory = self._current_subjects(
-            proof=proof
-        )
+        subjects, rights_inventory = self._current_subjects()
+        rights_inventory_digest = digest_canonical(rights_inventory)
         if retained is not None:
             binding = RetrievalInputBinding.from_value(retained)
             receipt = NativeRetrievalContextReceipt.from_bytes(binding.receipt_bytes)
             context = self._documents.read_context(receipt, proof=proof)
             if context.lead_id != str(lead.request.lead_id) or context.lead_digest != lead.canonical_digest:
                 raise ValueError("retained native context belongs to another Lead")
-            if self._facts(revision_id).get("retrieval_rights_inventory") == rights_inventory:
+            if context.generation_id != self._generation:
+                raise ValueError("retained native context identity changed")
+            if (
+                context.rights_inventory_digest == rights_inventory_digest
+                and self._facts(revision_id).get("retrieval_rights_inventory")
+                == rights_inventory
+            ):
                 return binding
 
-        rights_inventory_digest = digest_canonical(rights_inventory)
+        document_inventory = self._authenticated_inventory(
+            subjects, proof=proof,
+        )
         port = self._port_for(
             subjects, document_inventory, rights_inventory_digest
         )
@@ -151,7 +158,7 @@ class NativeRetrievalContinuation:
         )
         return binding
 
-    def _current_subjects(self, *, proof: AuthenticationProof):
+    def _current_subjects(self):
         subjects = []
         inventory = []
         # Historical documents are re-authorised independently. A held source
@@ -199,25 +206,32 @@ class NativeRetrievalContinuation:
                     stage=self._journal.progress[source_revision]["stage"],
                     facts={**facts, "retrieval_exclusions": exclusions},
                 )
-        retained_subjects = tuple(subjects)
+        return tuple(subjects), sorted(
+            inventory, key=lambda item: (item["revision_id"], item["ingest_id"]),
+        )
+
+    def _authenticated_inventory(
+        self,
+        subjects: tuple[NativeRetrievalSubject, ...],
+        *,
+        proof: AuthenticationProof,
+    ):
         document_inventory = self._documents.authenticated_document_inventory(
-            tuple(item.document_receipt for item in retained_subjects), proof=proof,
+            tuple(item.document_receipt for item in subjects), proof=proof,
         )
         retained_by_event = self._documents.require_authenticated_inventory(
             document_inventory,
-            tuple(item.document_receipt for item in retained_subjects),
+            tuple(item.document_receipt for item in subjects),
         )
         if any(
             retained_by_event[item.document_receipt.event_id].revision_id
             != item.revision_id
             or retained_by_event[item.document_receipt.event_id].generation_id
             != self._generation
-            for item in retained_subjects
+            for item in subjects
         ):
             raise ValueError("native passage continuation identity changed")
-        return retained_subjects, document_inventory, sorted(
-            inventory, key=lambda item: (item["revision_id"], item["ingest_id"]),
-        )
+        return document_inventory
 
     def _prepare(self, units: tuple[CorpusIngestUnit, ...], *, proof: AuthenticationProof) -> None:
         revision_id = units[0].revision_id

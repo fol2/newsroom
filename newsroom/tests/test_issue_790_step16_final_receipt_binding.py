@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -172,7 +173,7 @@ def _install_provider_free_runtime(
             return fixture_raw
 
     delegate = SimpleNamespace(
-        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        client=SimpleNamespace(embeddings=SimpleNamespace(), close=AsyncMock()),
         config=SimpleNamespace(
             embedding_model="openai/text-embedding-3-large",
             embedding_dim=2,

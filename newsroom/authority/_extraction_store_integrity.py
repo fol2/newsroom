@@ -43,12 +43,12 @@ class _ExtractionIntegrityMixin:
     def _validate_all_extraction_rows(self, conn: sqlite3.Connection) -> None:
         for row in conn.execute(
             "SELECT * FROM extractor_contracts ORDER BY contract_id"
-        ).fetchall():
+        ):
             self._contract_from_row(conn, row, replayed=False)
         for row in conn.execute(
             "SELECT * FROM extraction_run_versions "
             "ORDER BY run_id,version_number"
-        ).fetchall():
+        ):
             # This reconstructs and verifies the stable run, passages, request,
             # retained output, proposal set, every proposal and evidence range.
             # Current rights are deliberately not re-evaluated here: revocation
@@ -69,7 +69,7 @@ class _ExtractionIntegrityMixin:
 
         for head in conn.execute(
             "SELECT * FROM extraction_run_heads ORDER BY run_id"
-        ).fetchall():
+        ):
             rows = conn.execute(
                 "SELECT run_version_id,version_number,previous_run_version_id,"
                 "outcome,recorded_at FROM extraction_run_versions "

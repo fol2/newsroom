@@ -22,7 +22,7 @@ class _GraphitiAdapterIntegrityMixin:
                 self._graphiti_workspace_policy_from_row(row)
                 for row in conn.execute(
                     "SELECT * FROM graphiti_workspace_policies ORDER BY policy_id"
-                ).fetchall()
+                )
             )
             if len(policies) != 3:
                 raise AuthoritySchemaError(
@@ -31,33 +31,33 @@ class _GraphitiAdapterIntegrityMixin:
             for row in conn.execute(
                 "SELECT * FROM graphiti_adapter_configurations "
                 "ORDER BY configuration_id"
-            ).fetchall():
+            ):
                 self._graphiti_configuration_from_row(conn, row, replayed=False)
             for row in conn.execute(
                 "SELECT * FROM graphiti_workspaces ORDER BY workspace_id"
-            ).fetchall():
+            ):
                 workspace = self._graphiti_workspace_from_row(row)
                 self._validate_graphiti_workspace_lifecycle(conn, workspace)
                 self._require_graphiti_workspace_absent(workspace)
             for row in conn.execute(
                 "SELECT * FROM graphiti_input_manifests ORDER BY manifest_id"
-            ).fetchall():
+            ):
                 self._graphiti_manifest_from_row(conn, row)
             for row in conn.execute(
                 "SELECT * FROM graphiti_cleanup_receipts ORDER BY receipt_id"
-            ).fetchall():
+            ):
                 self._graphiti_cleanup_from_row(row)
             for row in conn.execute(
                 "SELECT * FROM graphiti_adapter_attempts "
                 "ORDER BY run_id,attempt_number"
-            ).fetchall():
+            ):
                 attempt = self._graphiti_attempt_from_row(
                     conn, row, replayed=False
                 )
                 self._validate_graphiti_attempt_lineage(conn, attempt)
             for row in conn.execute(
                 "SELECT * FROM graphiti_replay_sources ORDER BY replay_source_id"
-            ).fetchall():
+            ):
                 source = self._graphiti_replay_source_from_row(
                     conn, row, replayed=False
                 )
@@ -174,7 +174,7 @@ class _GraphitiAdapterIntegrityMixin:
     def _validate_graphiti_replay_bindings(conn: sqlite3.Connection) -> None:
         for row in conn.execute(
             "SELECT * FROM graphiti_adapter_attempt_replays ORDER BY attempt_id"
-        ).fetchall():
+        ):
             value = {
                 "attempt_id": str(row["attempt_id"]),
                 "replay_source_id": str(row["replay_source_id"]),

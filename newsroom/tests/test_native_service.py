@@ -77,6 +77,85 @@ def test_native_service_runs_two_ticks_without_story_cap_and_closes(tmp_path, mo
         ]
 
 
+def test_continuous_service_qualifies_first_complete_cycle_before_second_tick(
+    tmp_path, monkeypatch,
+):
+    order = []
+    factory, opened = _pipeline(
+        monkeypatch,
+        lambda cycle_id: (
+            order.append(f"tick:{cycle_id}")
+            or NativePipelineReport((), {"ACKNOWLEDGED": 1}, 0)
+        ),
+    )
+    identity = digest_canonical({"runtime": "single-open"})
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = identity
+            yield pipeline
+
+    def qualify(connection, actual_identity):
+        assert actual_identity == identity
+        assert connection.execute(
+            "SELECT kind FROM ledger ORDER BY seq DESC LIMIT 1"
+        ).fetchone()[0] == "NATIVE_SERVICE_CYCLE_TERMINAL"
+        order.append("qualified")
+
+    waits = []
+
+    def wait(_seconds):
+        waits.append(True)
+        return len(waits) == 2
+
+    report = _service(
+        tmp_path, bound, wait=wait, qualify_once=qualify,
+    ).run()
+
+    assert report is not None and report.outcome == "COMPLETE"
+    assert order == ["tick:cycle-1", "qualified", "tick:cycle-2"]
+    assert opened == ["open", "close"]
+
+
+def test_continuous_qualification_failure_closes_without_second_cycle(
+    tmp_path, monkeypatch,
+):
+    ticks = []
+    factory, opened = _pipeline(
+        monkeypatch,
+        lambda cycle_id: (
+            ticks.append(cycle_id) or NativePipelineReport((), {}, 0)
+        ),
+    )
+    identity = digest_canonical({"runtime": "qualification-rejected"})
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = identity
+            yield pipeline
+
+    with pytest.raises(ValueError, match="qualification rejected"):
+        _service(
+            tmp_path,
+            bound,
+            qualify_once=lambda *_: (_ for _ in ()).throw(
+                ValueError("qualification rejected")
+            ),
+            wait=lambda _: pytest.fail("qualification failure entered wait"),
+        ).run()
+
+    assert ticks == ["cycle-1"]
+    assert opened == ["open", "close"]
+    with sqlite3.connect(tmp_path / "unpublished.sqlite3") as connection:
+        terminal = connection.execute(
+            "SELECT json_extract(payload_json,'$.outcome') FROM ledger "
+            "WHERE kind='NATIVE_SERVICE_CYCLE_TERMINAL'"
+        ).fetchone()
+        assert terminal == ("COMPLETE",)
+
+
 def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, monkeypatch):
     factory, opened = _pipeline(
         monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(RuntimeError("secret")),

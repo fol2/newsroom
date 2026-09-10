@@ -118,6 +118,7 @@ class NativeService:
                     if identity is not None:
                         validate_sha256_digest(identity)
                     binding = {} if identity is None else {"runtime_identity_digest": identity}
+                    qualified = False
                     while not self._shutdown.is_set():
                         self._stop_check()
                         cycle_id = self._cycle_id()
@@ -166,13 +167,15 @@ class NativeService:
                             ),
                         })
                         if (
-                            once and last.outcome == "COMPLETE"
+                            not qualified
+                            and last.outcome == "COMPLETE"
                             and not self._shutdown.is_set()
                             and self._qualify_once is not None
                         ):
                             if identity is None:
                                 raise ValueError("native qualification requires a runtime identity")
                             self._qualify_once(ledger, identity)
+                            qualified = True
                         if last.outcome == "DRAINED" or once or self._wait(
                             self._interval if last.outcome == "COMPLETE" else self._backoff
                         ):

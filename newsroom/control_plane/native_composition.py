@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -237,19 +237,17 @@ def deployed_native_service(args):
             "retrieval": private_root / "retrieval.sqlite3",
         }
 
-        def identity():
+        def identity(paths=identity_paths):
             return _deployment_identity(
-                revision=revision, tree=tree, paths=identity_paths,
+                revision=revision, tree=tree, paths=paths,
                 embedding_policy=embedding, assessment_policy=assessment,
             )
 
-        qualified_identity = None
-        if not args.once:
-            from .native_qualification import validate_qualification
-            qualified_identity = identity()
-            with closing(sqlite3.connect(CANONICAL_UNPUBLISHED_STORE.as_uri() + "?mode=ro", uri=True)) as retained:
-                retained.execute("PRAGMA query_only=ON")
-                validate_qualification(retained, qualified_identity)
+        opening_paths = {
+            name: path for name, path in identity_paths.items()
+            if Path(path).exists()
+        }
+        opening_identity = identity(opening_paths)
         # Discovery only: each selected identity is authenticated again by the
         # Source facade before an observation. No Source Definition is invented.
         connection = sqlite3.connect(CANONICAL_INCREMENT4_AUTHORITY_STORE.as_uri() + "?mode=ro", uri=True)
@@ -280,9 +278,9 @@ def deployed_native_service(args):
             licence=None, stop_check=check, stop_fence=fence, implementation_worktree_clean=clean,
             service_event=service_event,
         ) as composed:
-            composed.runtime_identity_digest = identity()
-            if qualified_identity is not None and composed.runtime_identity_digest != qualified_identity:
+            if identity(opening_paths) != opening_identity:
                 raise ValueError("native deployment identity changed during open")
+            composed.runtime_identity_digest = identity()
             yield composed
 
     return NativeService(
@@ -309,7 +307,7 @@ def open_native_pipeline(
     service_event: threading.Event | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ):
-    """Open one real runtime; qualification policies must already be retained.
+    """Open one real runtime after its invocation policies are qualified.
 
     Credentials remain process-local. No route fallback, legacy intake writer,
     fixture rights renewal, historical campaign or public target is composed.

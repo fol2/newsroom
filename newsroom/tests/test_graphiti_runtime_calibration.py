@@ -22,6 +22,13 @@ def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         "newsroom.control_plane.graphiti._graphiti_implementation_identity",
         lambda: ("a" * 40, True),
     )
+    # The calibration uses fake CLI runners. Give those runners the recorded
+    # fixture identity, not a hash of unrelated current production source bytes.
+    # Keep the complete checked packet and its policy/evidence digests intact.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_transport_implementation_revision",
+        lambda _leaf: "sha256:1cf4e3f26c1d2edac9c52107589f8be34e4635188662224fd5fb9d99e45c0247",
+    )
 
 
 def _valid_receipts() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
