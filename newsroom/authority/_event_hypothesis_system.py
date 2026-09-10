@@ -648,7 +648,8 @@ class _HypothesisStore:
 
     def _head(self, hypothesis_id: str) -> EventHypothesisVersion:
         row = self._connection.execute(
-            "SELECT version_id,ordinal,version_digest FROM event_hypothesis_heads_v2 "
+            "SELECT version_id,ordinal,version_digest,updated_at "
+            "FROM event_hypothesis_heads_v2 "
             "WHERE hypothesis_id=?",
             (hypothesis_id,),
         ).fetchone()
@@ -659,6 +660,13 @@ class _HypothesisStore:
             version.hypothesis_id != hypothesis_id
             or version.ordinal != int(row[1])
             or version.canonical_digest != str(row[2])
+            or version.recorded_at != str(row[3])
+            or self._connection.execute(
+                "SELECT max(ordinal) FROM event_hypothesis_versions_v2 "
+                "WHERE hypothesis_id=?",
+                (hypothesis_id,),
+            ).fetchone()[0]
+            != version.ordinal
         ):
             raise HypothesisContractError("Hypothesis head binding differs")
         return version
@@ -701,7 +709,102 @@ class _HypothesisStore:
             raise HypothesisContractError("retained Proposal differs")
         return value, proposal
 
-    def _exact_version(self, version_id: str) -> EventHypothesisVersion:
+    @staticmethod
+    def _version_recommendations(
+        value: EventHypothesisVersion, proposal: TriageProposal
+    ) -> tuple[LeadRecommendation, ...]:
+        recommendations = tuple(
+            item
+            for item in proposal.recommendations
+            if item.hypothesis is not None
+            and item.hypothesis.proposal_local_id == value.proposal_local_id
+        )
+        if not recommendations or any(
+            item.hypothesis.summary != value.proposed_summary
+            or item.hypothesis.relationship_kind is not value.proposed_relationship
+            or item.hypothesis.target_hypothesis_id
+            != value.proposed_target_hypothesis_id
+            for item in recommendations
+        ):
+            raise HypothesisContractError("retained Proposal retargeted")
+        if tuple(item.decision_lead_id for item in recommendations) != tuple(
+            binding.decision_lead_id for binding in value.source_bindings
+        ):
+            raise HypothesisContractError(
+                "retained Proposal group coverage differs"
+            )
+        return recommendations
+
+    def _require_version_source_closure(
+        self,
+        value: EventHypothesisVersion,
+        proposal: TriageProposal,
+        dispositions: tuple[ProposalDisposition, ...],
+    ) -> None:
+        recommendations = self._version_recommendations(value, proposal)
+        if len(recommendations) != len(dispositions):
+            raise HypothesisContractError("retained source bindings differ")
+        for disposition, recommendation in zip(
+            dispositions, recommendations, strict=True
+        ):
+            _require_exact_proposal_authorisation(
+                disposition,
+                recommendation,
+                proposal,
+                value.proposal_canonical_digest,
+            )
+            if (
+                disposition.proposal_id != value.proposal_id
+                or disposition.proposal_content_identity
+                != value.proposal_content_identity
+                or disposition.proposal_canonical_digest
+                != value.proposal_canonical_digest
+                or disposition.work_item_id != value.work_item_id
+                or disposition.work_item_version_id != value.work_item_version_id
+                or disposition.work_item_version_digest
+                != value.work_item_version_digest
+                or disposition.retrieval_context_id != value.retrieval_context_id
+                or disposition.retrieval_context_digest
+                != value.retrieval_context_digest
+            ):
+                raise HypothesisContractError("retained source disposition retargeted")
+            if (
+                disposition.validator_input.authenticated_context_identity
+                != value.actor_identity_digest
+            ):
+                raise HypothesisContractError("retained source actor differs")
+        if self._bindings(dispositions) != value.source_bindings:
+            raise HypothesisContractError("retained source bindings differ")
+
+    def _require_creation_provenance(
+        self, first: EventHypothesisVersion
+    ) -> None:
+        identity = self._connection.execute(
+            "SELECT canonical_bytes,canonical_digest,actor_identity_digest,"
+            "authority_event_id,recorded_at FROM event_hypotheses_v2 "
+            "WHERE hypothesis_id=?",
+            (first.hypothesis_id,),
+        ).fetchone()
+        expected = EventHypothesis(first.hypothesis_id)
+        if (
+            first.ordinal != 1
+            or identity is None
+            or bytes(identity[0]) != expected.canonical_bytes
+            or str(identity[1]) != expected.canonical_digest
+            or str(identity[2]) != first.actor_identity_digest
+            or str(identity[3]) != _creation_event_id(
+                first.hypothesis_id, first.actor_identity_digest, first.recorded_at
+            )
+            or str(identity[4]) != first.recorded_at
+        ):
+            raise HypothesisContractError("Hypothesis creation provenance differs")
+
+    def _exact_version(
+        self, version_id: str, _visited: frozenset[str] = frozenset()
+    ) -> EventHypothesisVersion:
+        if version_id in _visited:
+            raise HypothesisContractError("Hypothesis target cycle differs")
+        visited = _visited | {version_id}
         row = self._connection.execute(
             "SELECT version_id,hypothesis_id,ordinal,previous_version_id,"
             "previous_version_digest,proposal_id,proposal_local_id,"
@@ -728,30 +831,15 @@ class _HypothesisStore:
         ):
             raise HypothesisContractError("retained Hypothesis Version differs")
         _require_exact_proposal_provenance(value, proposal)
-        recommendations = tuple(
-            item
-            for item in proposal.recommendations
-            if item.hypothesis is not None
-            and item.hypothesis.proposal_local_id == value.proposal_local_id
-        )
         retained_dispositions = tuple(
             self._dispositions._verify_requested_disposition_in_transaction(
                 binding.disposition_id
             )
             for binding in value.source_bindings
         )
-        if (
-            not recommendations
-            or len(recommendations) != len(retained_dispositions)
-            or self._bindings(retained_dispositions) != value.source_bindings
-        ):
-            raise HypothesisContractError("retained source bindings differ")
-        for disposition, recommendation in zip(
-            retained_dispositions, recommendations, strict=True
-        ):
-            _require_exact_proposal_authorisation(
-                disposition, recommendation, proposal, value.proposal_canonical_digest
-            )
+        self._require_version_source_closure(
+            value, proposal, retained_dispositions
+        )
         predecessor = None
         if value.previous_version_id is not None:
             predecessor_row = self._connection.execute(
@@ -776,7 +864,7 @@ class _HypothesisStore:
         ):
             raise HypothesisContractError("Hypothesis predecessor binding differs")
         if value.previous_version_id is not None:
-            self._exact_version(value.previous_version_id)
+            self._exact_version(value.previous_version_id, visited)
         if value.target_version_id is not None:
             target = self._connection.execute(
                 "SELECT hypothesis_id,canonical_digest FROM "
@@ -788,23 +876,30 @@ class _HypothesisStore:
                 value.target_version_digest,
             ):
                 raise HypothesisContractError("Hypothesis target binding differs")
-        identity = self._connection.execute(
-            "SELECT canonical_bytes,canonical_digest,actor_identity_digest,"
-            "authority_event_id,recorded_at "
-            "FROM event_hypotheses_v2 WHERE hypothesis_id=?",
+            if value.target_version_id != value.previous_version_id:
+                target_value = self._exact_version(value.target_version_id, visited)
+                if (
+                    target_value.hypothesis_id
+                    != value.proposed_target_hypothesis_id
+                    or target_value.canonical_digest != value.target_version_digest
+                ):
+                    raise HypothesisContractError("Hypothesis target binding differs")
+        first_row = self._connection.execute(
+            "SELECT version_id,hypothesis_id,ordinal,previous_version_id,"
+            "previous_version_digest,proposal_id,proposal_local_id,"
+            "proposal_content_identity,proposal_canonical_digest,"
+            "proposal_canonical_bytes,proposed_relationship,"
+            "proposed_target_hypothesis_id,target_version_id,target_version_digest,"
+            "work_item_id,work_item_version_id,work_item_version_digest,"
+            "retrieval_context_id,retrieval_context_digest,actor_identity_digest,"
+            "authority_event_id,canonical_bytes,canonical_digest,recorded_at "
+            "FROM event_hypothesis_versions_v2 WHERE hypothesis_id=? AND ordinal=1",
             (value.hypothesis_id,),
         ).fetchone()
-        expected_identity = EventHypothesis(value.hypothesis_id)
-        if (
-            identity is None
-            or bytes(identity[0]) != expected_identity.canonical_bytes
-            or str(identity[1]) != expected_identity.canonical_digest
-            or str(identity[2]) != value.actor_identity_digest
-            or str(identity[3]) != _creation_event_id(
-                value.hypothesis_id, str(identity[2]), str(identity[4])
-            )
-        ):
-            raise HypothesisContractError("retained Hypothesis identity differs")
+        if first_row is None:
+            raise HypothesisContractError("Hypothesis creation provenance differs")
+        first, _ = self._version_from_row(first_row)
+        self._require_creation_provenance(first)
         return value
 
     def require_retained_version_in_transaction(
@@ -999,30 +1094,8 @@ class _HypothesisStore:
                     "retained authority event identity differs"
                 )
             _require_exact_proposal_provenance(value, proposal)
-            recs = [
-                r
-                for r in proposal.recommendations
-                if r.hypothesis is not None
-                and r.hypothesis.proposal_local_id == value.proposal_local_id
-            ]
-            if not recs or any(
-                r.hypothesis.summary != value.proposed_summary
-                or r.hypothesis.relationship_kind is not value.proposed_relationship
-                or r.hypothesis.target_hypothesis_id
-                != value.proposed_target_hypothesis_id
-                for r in recs
-            ):
-                raise HypothesisContractError("retained Proposal retargeted")
-            if tuple(r.decision_lead_id for r in recs) != tuple(
-                binding.decision_lead_id for binding in value.source_bindings
-            ):
-                raise HypothesisContractError(
-                    "retained Proposal group coverage differs"
-                )
-            retained_bindings: list[HypothesisSourceBinding] = []
-            for binding, recommendation in zip(
-                value.source_bindings, recs, strict=True
-            ):
+            retained_dispositions = []
+            for binding in value.source_bindings:
                 disposition_row = self._connection.execute(
                     "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
                     (binding.disposition_id,),
@@ -1031,40 +1104,14 @@ class _HypothesisStore:
                     raise HypothesisContractError(
                         "retained source disposition is absent"
                     )
-                disposition = ProposalDisposition.from_canonical_bytes(
-                    bytes(disposition_row[0])
-                )
-                _require_exact_proposal_authorisation(
-                    disposition,
-                    recommendation,
-                    proposal,
-                    value.proposal_canonical_digest,
-                )
-                retained_bindings.extend(self._bindings((disposition,)))
-                if (
-                    disposition.proposal_id != value.proposal_id
-                    or disposition.proposal_content_identity
-                    != value.proposal_content_identity
-                    or disposition.proposal_canonical_digest
-                    != value.proposal_canonical_digest
-                    or disposition.work_item_id != value.work_item_id
-                    or disposition.work_item_version_id != value.work_item_version_id
-                    or disposition.work_item_version_digest
-                    != value.work_item_version_digest
-                    or disposition.retrieval_context_id != value.retrieval_context_id
-                    or disposition.retrieval_context_digest
-                    != value.retrieval_context_digest
-                ):
-                    raise HypothesisContractError(
-                        "retained source disposition retargeted"
+                retained_dispositions.append(
+                    ProposalDisposition.from_canonical_bytes(
+                        bytes(disposition_row[0])
                     )
-                if (
-                    disposition.validator_input.authenticated_context_identity
-                    != value.actor_identity_digest
-                ):
-                    raise HypothesisContractError("retained source actor differs")
-            if tuple(retained_bindings) != value.source_bindings:
-                raise HypothesisContractError("retained source bindings differ")
+                )
+            self._require_version_source_closure(
+                value, proposal, tuple(retained_dispositions)
+            )
             if value.proposed_target_hypothesis_id is not None:
                 target_row = self._connection.execute(
                     "SELECT hypothesis_id,canonical_digest FROM event_hypothesis_versions_v2 WHERE version_id=?",
@@ -1105,15 +1152,7 @@ class _HypothesisStore:
         if set(heads) != set(chains):
             raise HypothesisContractError("Hypothesis head coverage differs")
         for hypothesis_id, versions in chains.items():
-            identity_row = self._connection.execute(
-                "SELECT actor_identity_digest,recorded_at FROM event_hypotheses_v2 WHERE hypothesis_id=?",
-                (hypothesis_id,),
-            ).fetchone()
-            if identity_row is None or tuple(identity_row) != (
-                versions[0].actor_identity_digest,
-                versions[0].recorded_at,
-            ):
-                raise HypothesisContractError("Hypothesis creation provenance differs")
+            self._require_creation_provenance(versions[0])
             for index, version in enumerate(versions, 1):
                 predecessor = None if index == 1 else versions[index - 2]
                 if (

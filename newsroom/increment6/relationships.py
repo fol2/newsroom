@@ -900,6 +900,19 @@ class EventHypothesisRelationshipReadPort:
         value = self.__authority.require_retained_inputs_in_transaction(
             assessment_digests, version_ids
         )
+        return self.__checked_retained_inputs(
+            value, assessment_digests, version_ids
+        )
+
+    @staticmethod
+    def __checked_retained_inputs(
+        value: object,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+    ]:
         try:
             differs = (
                 type(value) is not tuple
@@ -928,6 +941,30 @@ class EventHypothesisRelationshipReadPort:
                 "retained relationship inputs transaction read differs"
             )
         return value
+
+    def _require_exact_retained_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+    ]:
+        if (
+            type(assessment_digests) is not tuple
+            or type(version_ids) is not tuple
+            or any(type(item) is not str for item in assessment_digests)
+            or any(type(item) is not str for item in version_ids)
+        ):
+            raise RelationshipContractError(
+                "retained relationship input batch differs"
+            )
+        value = self.__authority.require_exact_retained_inputs_in_transaction(
+            assessment_digests, version_ids
+        )
+        return self.__checked_retained_inputs(
+            value, assessment_digests, version_ids
+        )
 
     def _require_candidate_inputs_in_transaction(
         self,

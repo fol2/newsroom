@@ -157,6 +157,11 @@ def test_native_cycle_isolates_hold_then_admits_and_replays_after_restart(
     with _shared_system(
         tmp_path, monkeypatch, retrieval_authority, collision=enforcer
     ) as restarted:
+        def unbounded_history(*_args, **_kwargs):
+            raise AssertionError("native replay used an unbounded history read")
+
+        monkeypatch.setattr(type(restarted.candidates), "versions", unbounded_history)
+        monkeypatch.setattr(type(restarted.hypotheses), "current", unbounded_history)
         replay = advance_native_cycle(
             restarted,
             (status,),
