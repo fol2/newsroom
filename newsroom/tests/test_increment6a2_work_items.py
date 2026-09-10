@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +35,12 @@ from newsroom.increment6.outcomes import (
     ReasonReference,
 )
 from newsroom.increment5._retrieval_context_core import _retrieval_context_purge_id
+from newsroom.increment5.branch_contracts import BranchOutcome
+from newsroom.increment5.native_retrieval import (
+    NativeRetrievalContextRequest,
+    NativeVectorBranchHit,
+    NativeVectorBranchReceipt,
+)
 from newsroom.increment5.retrieval_context import (
     RetrievalContextPurgeReceipt,
     RetrievalContextRequest,
@@ -146,6 +154,101 @@ def _pending(number: int = 900) -> RetrievalInputBinding:
     )
 
 
+def _large_native_binding(tmp_path, *, document_count: int):
+    from newsroom.tests.test_native_collision import _native_binding
+
+    lead = SimpleNamespace(
+        request=SimpleNamespace(lead_id=str(uuid.uuid4())),
+        canonical_digest=digest_bytes(b"large-native-retrieval-lead"),
+    )
+    base_binding, base_receipt, base_context = _native_binding(tmp_path, lead)
+    base_request = NativeRetrievalContextRequest.from_bytes(
+        base_binding.request_bytes
+    )
+    base_document = base_request.selected_documents[0]
+    documents = tuple(
+        replace(
+            base_document,
+            event_id=f"document-event-{index}-" + "e" * 364,
+            command_id=(
+                f"document-command-{index}-"
+                + "c" * (363 if index == 0 else 364)
+            ),
+            aggregate_id=type(base_document.aggregate_id).new(),
+            admission_id=type(base_document.admission_id).new(),
+            document_digest=digest_bytes(f"native-document-{index}".encode()),
+            vector_admission_id=type(base_document.vector_admission_id).new(),
+            embedding_receipt_admission_id=type(
+                base_document.embedding_receipt_admission_id
+            ).new(),
+        )
+        for index in range(document_count)
+    )
+    base_vector = NativeVectorBranchReceipt.from_canonical_bytes(
+        base_request.vector_receipt_bytes
+    )
+    vector = replace(
+        base_vector,
+        hits=tuple(
+            NativeVectorBranchHit(
+                index + 1,
+                f"p{index}" + "p" * 500,
+                f"d{index}" + "d" * 500,
+                f"r{index}" + "r" * 500,
+                documents[index].document_digest,
+                digest_bytes(f"rights-{index}".encode()),
+                digest_bytes(f"provenance-{index}".encode()),
+                1,
+            )
+            for index in range(8)
+        ),
+        outcome=BranchOutcome.COMPLETE,
+        reason=None,
+    )
+    request = replace(
+        base_request,
+        vector_receipt_bytes=vector.canonical_bytes,
+        selected_documents=documents,
+    )
+    branch_bytes = (
+        request.exact_receipt_bytes,
+        request.fulltext_receipt_bytes,
+        request.vector_receipt_bytes,
+        request.graph_receipt_bytes,
+    )
+    context = replace(
+        base_context,
+        request_digest=request.request_digest,
+        branch_digests=tuple(digest_bytes(value) for value in branch_bytes),
+        branch_receipts=tuple(json.loads(value) for value in branch_bytes),
+        selected_documents=tuple(
+            document.projection_value() for document in documents
+        ),
+        no_match=False,
+    )
+    receipt = replace(
+        base_receipt,
+        request_digest=request.request_digest,
+        context_object_digest=context.digest,
+        vector_receipt_bytes=request.vector_receipt_bytes,
+        no_match=False,
+    )
+    binding = RetrievalInputBinding(
+        RetrievalBindingState.RECEIPT,
+        request.request_id,
+        request.idempotency_key,
+        request.request_digest,
+        request.canonical_bytes,
+        context.context_id,
+        receipt.receipt_digest,
+        receipt.outcome,
+        receipt.reason,
+        receipt.no_match,
+        receipt.canonical_bytes,
+    )
+    return binding, request, receipt, context
+
+
 
 def _version(item: TriageWorkItem, ordinal: int = 1) -> TriageWorkItemVersion:
     version_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item.work_item_id}|{ordinal}"))
@@ -238,6 +341,136 @@ def test_parser_rejects_duplicate_unknown_noncanonical_and_deep_input() -> None:
     deep = b'{"a":' * 40 + b"null" + b"}" * 40
     with pytest.raises(WorkItemContractError, match="structural"):
         TriageWorkItem.from_canonical_bytes(deep)
+
+
+@pytest.mark.parametrize(
+    ("document_count", "request_size"), ((14, 37_766), (17, 41_225))
+)
+def test_native_retrieval_request_above_legacy_bound_roundtrips_in_work_item(
+    tmp_path, document_count: int, request_size: int
+) -> None:
+    binding, request, receipt, context = _large_native_binding(
+        tmp_path, document_count=document_count
+    )
+    assert len(request.canonical_bytes) == request_size
+    assert len(request.selected_documents) == document_count
+
+    journal = retrieval_helpers.RetrievalContextJournal(
+        tmp_path / f"native-{document_count}-retrieval-authority.sqlite3"
+    )
+    authority = RetrievalContextAuthority(journal.path, {})
+    authority._native_context_read_port = SimpleNamespace(
+        require=lambda retained: context
+        if retained == receipt
+        else pytest.fail("another native context receipt was requested")
+    )
+    decision = _decision(1)
+    connection, store = _store((decision,), retrieval_authority=authority)
+    item = TriageWorkItem.create((decision,))
+    version = replace(_version(item), retrieval=binding)
+    try:
+        assert store.create_or_replay(item, version) == version
+        assert store.require_usable_current(item.work_item_id) == version
+        assert TriageWorkItemVersion.from_canonical_bytes(
+            version.canonical_bytes
+        ) == version
+    finally:
+        connection.close()
+
+
+def test_native_retrieval_bound_rejects_claimed_schema_and_document_overrun(
+    tmp_path,
+) -> None:
+    binding, request, _receipt, _context = _large_native_binding(
+        tmp_path, document_count=17
+    )
+    overrun = json.loads(request.canonical_bytes)
+    extra = dict(overrun["selected_documents"][-1])
+    extra.update(
+        event_id="document-event-18",
+        command_id="document-command-18",
+        aggregate_id=str(uuid.uuid4()),
+        admission_id=str(uuid.uuid4()),
+        vector_admission_id=str(uuid.uuid4()),
+        embedding_receipt_admission_id=str(uuid.uuid4()),
+    )
+    overrun["selected_documents"].append(extra)
+    overrun_bytes = canonical_json_bytes(overrun)
+    with pytest.raises(WorkItemContractError, match="native retrieval request"):
+        RetrievalInputBinding(
+            RetrievalBindingState.REQUEST_PENDING,
+            request.request_id,
+            request.idempotency_key,
+            digest_bytes(overrun_bytes),
+            overrun_bytes,
+        )
+
+    malformed = canonical_json_bytes(
+        {
+            "schema_identity": (
+                "newsroom.increment5.native-retrieval-context-request.v1"
+            ),
+            "request_id": request.request_id,
+            "idempotency_key": request.idempotency_key,
+        }
+    )
+    with pytest.raises(WorkItemContractError, match="native retrieval request"):
+        RetrievalInputBinding(
+            RetrievalBindingState.REQUEST_PENDING,
+            request.request_id,
+            request.idempotency_key,
+            digest_bytes(malformed),
+            malformed,
+        )
+
+    native_oversize = json.loads(request.canonical_bytes)
+    native_oversize["unrecognised_padding"] = "x" * (384 * 1_024)
+    native_oversize_bytes = canonical_json_bytes(native_oversize)
+    with pytest.raises(WorkItemContractError, match="bounded immutable bytes"):
+        RetrievalInputBinding(
+            RetrievalBindingState.REQUEST_PENDING,
+            request.request_id,
+            request.idempotency_key,
+            digest_bytes(native_oversize_bytes),
+            native_oversize_bytes,
+        )
+
+    legacy_oversize = canonical_json_bytes(
+        {
+            "request_id": request.request_id,
+            "idempotency_key": request.idempotency_key,
+            "padding": "x" * (32 * 1_024),
+        }
+    )
+    with pytest.raises(WorkItemContractError, match="bounded immutable bytes"):
+        RetrievalInputBinding(
+            RetrievalBindingState.REQUEST_PENDING,
+            request.request_id,
+            request.idempotency_key,
+            digest_bytes(legacy_oversize),
+            legacy_oversize,
+        )
+
+    pending = replace(
+        binding,
+        state=RetrievalBindingState.REQUEST_PENDING,
+        context_id=None,
+        context_digest=None,
+        outcome=None,
+        reason=None,
+        no_match=False,
+        receipt_bytes=None,
+    )
+    authority = object.__new__(RetrievalContextAuthority)
+    authority._native_context_read_port = SimpleNamespace(
+        require=lambda _retained: pytest.fail("pending native request was read")
+    )
+    connection = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(WorkItemContractError, match="native retrieval authority"):
+            authority.verify(connection, pending)
+    finally:
+        connection.close()
 
 
 def test_public_parser_rejects_bool_ordinal_and_enum_or_boolean_coercion() -> None:

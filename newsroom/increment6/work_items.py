@@ -58,6 +58,9 @@ MAX_PRIORITY_INPUT_BYTES = 64 * 1_024
 MAX_PRIORITY_INPUT_REFERENCES = 256
 MAX_CANONICAL_NODES = 131_072
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_NATIVE_RETRIEVAL_REQUEST_SCHEMA = (
+    "newsroom.increment5.native-retrieval-context-request.v1"
+)
 
 
 class WorkItemContractError(ValueError):
@@ -530,10 +533,28 @@ class RetrievalInputBinding:
         _retained_digest(
             self.request_bytes,
             self.request_digest,
-            32 * 1_024,
+            MAX_VERSION_BYTES,
             "retrieval request bytes",
         )
-        request = _decode(self.request_bytes, maximum=32 * 1_024)
+        request = _decode(self.request_bytes, maximum=MAX_VERSION_BYTES)
+        if request.get("schema_identity") == _NATIVE_RETRIEVAL_REQUEST_SCHEMA:
+            try:
+                from newsroom.increment5.native_retrieval import (
+                    NativeRetrievalContextRequest,
+                )
+
+                NativeRetrievalContextRequest.from_bytes(self.request_bytes)
+            except Exception as exc:
+                raise WorkItemContractError(
+                    "native retrieval request bytes differ"
+                ) from exc
+        else:
+            _retained_digest(
+                self.request_bytes,
+                self.request_digest,
+                MAX_WORK_ITEM_BYTES,
+                "retrieval request bytes",
+            )
         if (
             request.get("request_id") != self.request_id
             or request.get("idempotency_key") != self.idempotency_key
@@ -834,10 +855,10 @@ class RetrievalContextAuthority:
 
     def _verify_native_binding(self, binding: RetrievalInputBinding) -> bool:
         try:
-            value = _decode(binding.request_bytes, maximum=32 * 1_024)
+            value = _decode(binding.request_bytes, maximum=MAX_VERSION_BYTES)
         except WorkItemContractError:
             return False
-        if value.get("schema_identity") != "newsroom.increment5.native-retrieval-context-request.v1":
+        if value.get("schema_identity") != _NATIVE_RETRIEVAL_REQUEST_SCHEMA:
             return False
         if self._native_context_read_port is None or binding.state is not RetrievalBindingState.RECEIPT or binding.receipt_bytes is None:
             raise WorkItemContractError("native retrieval authority is unavailable")
