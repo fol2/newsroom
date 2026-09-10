@@ -33,6 +33,11 @@ from newsroom.increment10.evidence import (
     _package_from_value,
 )
 
+from .admission import (
+    _APPROVED_CATEGORIES,
+    _APPROVED_GEOGRAPHIES,
+)
+
 from .model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
@@ -73,7 +78,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v5"
+VERSION = "newsroom.native-evidence-assessor.v6"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -84,10 +89,20 @@ SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
     "candidate and exact source bytes. Return JSON matching the schema. Translate "
     "or localise only facts present in an exact source excerpt; never add facts or "
-    "authority absent from that evidence. Choose the shortest exact supporting "
-    "excerpt. Preserve every named entity in both the claim and that excerpt, "
+    "authority absent from that evidence. Every claim and supporting excerpt must "
+    "each be an exact contiguous part of the source passage; choose the shortest "
+    "supporting excerpt that preserves the evidence. Return exactly "
+    "one HEADLINE claim. When substantive_new_information is non-empty, every item "
+    "must exactly equal a HEADLINE or SUBSTANTIVE claim; include the exact HEADLINE "
+    "claim and at least one SUBSTANTIVE claim. The HEADLINE must have qualification "
+    "evidence supported "
+    "by the exact source facts. Return no substantive new information only when the "
+    "source genuinely contains no supported new information, and invent no "
+    "qualification. Preserve every named entity in both "
+    "the claim and that excerpt, "
     "including excerpt-only entities, with its source spelling unchanged in the "
-    "rendered claim; do not annotate or translate named entities. Localised factual "
+    "rendered claim; do not annotate or translate named entities. The rendered claim "
+    "must otherwise contain Hong Kong Traditional Chinese only. Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
     "or one-to-ten word durations in hours/minutes and equivalent Chinese durations "
@@ -96,7 +111,12 @@ SYSTEM = (
     "For every claim, return semantic_relation exactly as source_modality ASSERTED, "
     "rendered_modality ASSERTED, source_polarity AFFIRMED, rendered_polarity "
     "AFFIRMED and relation SEMANTICALLY_EQUIVALENT; preserve more specific legal "
-    "or factual modality in the claim text itself. "
+    "or factual modality in the claim text itself. Unsupported names, acronyms, "
+    "month-based durations or numeric localisations must not be translated, guessed, "
+    "or used to fabricate a qualification. Do not hide a material fact merely to make "
+    "the package valid; preserve its source meaning and state the unsupported "
+    "rendering or localisation in selection_rationale. Use only geography and "
+    "category values allowed by the schema. "
     "Return no qualification_evidence when no supported qualification test applies; "
     "never invent an AFFIRMED qualification merely to populate that array."
 )
@@ -233,7 +253,13 @@ _PACKAGE_FIELDS = {
     "qualification_evidence": {"type": "array", "items": {
         "oneOf": list(_QUALIFICATION_SCHEMAS),
     }},
-    "selection_rationale": _STRING, "geography": _STRINGS, "categories": _STRINGS,
+    "selection_rationale": _STRING,
+    "geography": {
+        "type": "array", "items": {"enum": sorted(_APPROVED_GEOGRAPHIES)},
+    },
+    "categories": {
+        "type": "array", "items": {"enum": sorted(_APPROVED_CATEGORIES)},
+    },
     "explicit_exclusions": _STRINGS,
 }
 SCHEMA = {
@@ -1397,6 +1423,8 @@ class AutonomousNativeEvidenceAssessor:
             if (
                 claim.passage_index >= len(acquired)
                 or claim.supporting_excerpt
+                not in acquired[claim.passage_index].body.decode("utf-8")
+                or claim.claim
                 not in acquired[claim.passage_index].body.decode("utf-8")
             ):
                 raise NativeEvidenceHold(

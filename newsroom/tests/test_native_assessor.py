@@ -127,6 +127,15 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     })
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_semantic})
+    invalid_category = _model_package_value(assessed)
+    invalid_category["categories"] = ["immigration"]
+    with pytest.raises(ValidationError):
+        validator.validate({"package": invalid_category})
+    invalid_geography = _model_package_value(assessed)
+    invalid_geography["geography"] = ["Britain"]
+    with pytest.raises(ValidationError):
+        validator.validate({"package": invalid_geography})
+    assert VERSION == "newsroom.native-evidence-assessor.v6"
     connection.close()
 
 
@@ -302,21 +311,32 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     boundary_acquired = SimpleNamespace(**{
         **vars(acquired), "body": boundary_body.encode(),
     })
+    assert bounded_named_entities(f"{boundary_claim}\n{boundary_excerpt}") != (
+        bounded_named_entities(boundary_claim)
+        | bounded_named_entities(boundary_excerpt)
+    )
     boundary_result = AutonomousNativeEvidenceAssessor._validated_execution(
         NativeAssessmentExecution(
             canonical_json_bytes({"package": boundary_package}).decode(), {}
         ),
         candidate, base, (source,), (boundary_acquired,),
     )
-    assert bounded_named_entities(f"{boundary_claim}\n{boundary_excerpt}") != (
-        bounded_named_entities(boundary_claim)
-        | bounded_named_entities(boundary_excerpt)
-    )
     boundary_decision = decide(boundary_result, boundary_body, boundary_claim)
     assert (
         "INVALID_GOVERNED_CLAIM_EVIDENCE"
         not in boundary_decision.stable_reason_codes
     )
+    paraphrased = json.loads(canonical_json_bytes({"package": package}))
+    paraphrased["package"]["governed_claims"][0]["claim"] = (
+        "The Home Office changed the immigration system"
+    )
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_CLAIM_BINDING_HOLD"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes(paraphrased).decode(), {}
+            ),
+            candidate, base, (source,), (acquired,),
+        )
     unsupported = json.loads(canonical_json_bytes({"package": package}))
     unsupported["package"]["governed_claims"][0][
         "supporting_excerpt"
