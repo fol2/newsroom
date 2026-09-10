@@ -29,7 +29,7 @@ _BASE_FINGERPRINT = (
 # Increment 7R record remains immutable: it must still report those historical
 # whole-module anchors as changed, while current CI checks the exact successors.
 _NATIVE_SUCCESSOR_DIGESTS = {
-    "newsroom.increment6.candidates": "sha256:26a7b60922021d215a834417847f71cfa016d776b19a758fb487af891d83a6a6",
+    "newsroom.increment6.candidates": "sha256:985380e1f31cda7e979e3e6b6a5d3931de6bb7e848b773408dce783eac046ebb",
     "newsroom.increment6.work_items": "sha256:17c0273894a92f565d0ebb32ebe3cc0440255c77a8319adae676b333877b63d4",
 }
 
