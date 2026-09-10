@@ -1425,6 +1425,8 @@ class ProposalDispositionStore:
         retrieval_authority: RetrievalContextAuthority,
         authenticator: StaticAuthenticator,
         current_candidate_citations: "CurrentCandidateCitationReadPort | None" = None,
+        *,
+        work_items: TriageWorkItemStore | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -1435,6 +1437,14 @@ class ProposalDispositionStore:
                 current_candidate_citations is not None
                 and type(current_candidate_citations)
                 is not CurrentCandidateCitationReadPort
+            )
+            or (
+                work_items is not None
+                and (
+                    type(work_items) is not TriageWorkItemStore
+                    or work_items._connection is not connection
+                    or work_items._retrieval_authority is not retrieval_authority
+                )
             )
         ):
             raise DispositionContractError(
@@ -1449,7 +1459,9 @@ class ProposalDispositionStore:
             if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
                 raise DispositionContractError("foreign keys must be enabled")
             _RETRIEVAL_ATTACH(retrieval_authority, connection)
-            self._work_items = TriageWorkItemStore(connection, retrieval_authority)
+            self._work_items = work_items or TriageWorkItemStore(
+                connection, retrieval_authority
+            )
             self._begin()
             self._verify_integrity()
             connection.execute("COMMIT")

@@ -66,6 +66,8 @@ from newsroom.increment6.lineage import merge_lineage_authority_registries
 from newsroom.increment6.relationships import merge_relationship_authority_registries
 from newsroom.increment6.work_items import RetrievalContextAuthority
 
+from ._event_hypothesis_system import _HypothesisStore
+
 _TOKEN = object()
 _READ_AUTHORITY_TOKEN = object()
 
@@ -1130,6 +1132,8 @@ def _create_story_candidate_read_port(
     ]
     | None = None,
     current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
+    hypotheses: _HypothesisStore | None = None,
+    dispositions: ProposalDispositionStore | None = None,
 ) -> StoryCandidateReadPort:
     """Bind complete Candidate reads to one caller-owned transaction."""
 
@@ -1140,6 +1144,17 @@ def _create_story_candidate_read_port(
             or type(command_registry) is not CommandRegistry
             or type(payload_schemas) is not PayloadSchemaRegistry
             or not callable(clock)
+            or (
+                dispositions is not None
+                and (
+                    type(dispositions) is not ProposalDispositionStore
+                    or dispositions._connection is not connection
+                    or dispositions._retrieval_authority is not retrieval_authority
+                    or dispositions._authenticator is not authenticator
+                    or dispositions._current_candidate_citations
+                    is not current_candidate_citations
+                )
+            )
         ):
             raise CandidateContractError(
                 "Candidate read-port factory collaborators differ"
@@ -1162,6 +1177,7 @@ def _create_story_candidate_read_port(
             clock=clock,
             object_admission_payload_validator=object_admission_payload_validator,
             current_candidate_citations=current_candidate_citations,
+            hypotheses=hypotheses,
         )
         verifier = object.__new__(_CandidateStore)
         verifier._conn = connection
@@ -1175,10 +1191,8 @@ def _create_story_candidate_read_port(
             verifier._validate_object_admission_payload_record = (
                 object_admission_payload_validator
             )
-        verifier._dispositions = ProposalDispositionStore(
-            connection,
-            retrieval_authority,
-            authenticator,
+        verifier._dispositions = dispositions or ProposalDispositionStore(
+            connection, retrieval_authority, authenticator,
             current_candidate_citations,
         )
         private = _StoryCandidateReadAuthority(

@@ -182,12 +182,25 @@ class _HypothesisStore:
         authenticator: StaticAuthenticator,
         clock: Callable[[], UtcTimestamp],
         current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
+        *,
+        dispositions: ProposalDispositionStore | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
             or connection.in_transaction
             or type(retrieval_authority) is not RetrievalContextAuthority
             or type(authenticator) is not StaticAuthenticator
+            or (
+                dispositions is not None
+                and (
+                    type(dispositions) is not ProposalDispositionStore
+                    or dispositions._connection is not connection
+                    or dispositions._retrieval_authority is not retrieval_authority
+                    or dispositions._authenticator is not authenticator
+                    or dispositions._current_candidate_citations
+                    is not current_candidate_citations
+                )
+            )
         ):
             raise HypothesisContractError("Hypothesis authority collaborators differ")
         self._connection = connection
@@ -199,10 +212,8 @@ class _HypothesisStore:
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             retrieval_authority.attach(connection)
-            self._dispositions = ProposalDispositionStore(
-                connection,
-                retrieval_authority,
-                authenticator,
+            self._dispositions = dispositions or ProposalDispositionStore(
+                connection, retrieval_authority, authenticator,
                 current_candidate_citations,
             )
             self._begin()

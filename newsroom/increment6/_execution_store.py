@@ -112,6 +112,7 @@ class _TriageExecutionStore:
         *,
         clock: Callable[[], UtcTimestamp],
         lease_ttl_seconds: int,
+        work_items: TriageWorkItemStore | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -121,6 +122,14 @@ class _TriageExecutionStore:
             or isinstance(lease_ttl_seconds, bool)
             or not isinstance(lease_ttl_seconds, int)
             or lease_ttl_seconds <= 0
+            or (
+                work_items is not None
+                and (
+                    type(work_items) is not TriageWorkItemStore
+                    or work_items._connection is not connection
+                    or work_items._retrieval_authority is not retrieval_authority
+                )
+            )
         ):
             raise TriageExecutionAuthorityError("execution authority collaborators differ")
         self._connection = connection
@@ -133,7 +142,9 @@ class _TriageExecutionStore:
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             retrieval_authority.attach(connection)
-            self._work_items = TriageWorkItemStore(connection, retrieval_authority)
+            self._work_items = work_items or TriageWorkItemStore(
+                connection, retrieval_authority
+            )
             self._begin()
             self._verify_integrity()
             self._commit()
@@ -957,6 +968,7 @@ def _open_on_connection(
     authenticator: StaticAuthenticator,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     lease_ttl_seconds: int = 300,
+    work_items: TriageWorkItemStore | None = None,
 ) -> TriageExecutionAuthority:
     store = _TriageExecutionStore(
         connection,
@@ -964,6 +976,7 @@ def _open_on_connection(
         authenticator,
         clock=clock,
         lease_ttl_seconds=lease_ttl_seconds,
+        work_items=work_items,
     )
     return TriageExecutionAuthority(store, lambda: None)
 

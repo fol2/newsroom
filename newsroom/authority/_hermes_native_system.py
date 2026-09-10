@@ -390,6 +390,7 @@ def open_hermes_native_authority_system(
             connection, retrieval_authority=retrieval_authority,
             authenticator=authenticator, clock=clock,
             lease_ttl_seconds=lease_ttl_seconds,
+            work_items=work_items,
         )
         executions._TriageExecutionAuthority__store._transaction_lock = operation_lock
         dispositions = ProposalDispositionStore(
@@ -397,19 +398,18 @@ def open_hermes_native_authority_system(
             retrieval_authority,
             authenticator,
             current_candidate_citations,
+            work_items=work_items,
         )
         hypothesis_store = _HypothesisStore(
             connection, retrieval_authority, authenticator, clock,
             current_candidate_citations,
+            dispositions=dispositions,
         )
         hypothesis_store._lock = operation_lock
 
         relationship_store = _share_store(_SharedRelationshipStore, root)
         with relationship_store._hypothesis_rows():
-            relationship_store._hypotheses = _HypothesisStore(
-                connection, retrieval_authority, authenticator, clock,
-                current_candidate_citations,
-            )
+            relationship_store._hypotheses = hypothesis_store
         relationship_store._hypotheses._lock = operation_lock
         relationship_store._command_service = service
         with operation_lock, relationship_store._transaction():
@@ -425,6 +425,7 @@ def open_hermes_native_authority_system(
             authenticator=authenticator, command_registry=commands,
             payload_schemas=schemas, clock=clock,
             current_candidate_citations=current_candidate_citations,
+            hypotheses=hypothesis_store,
         )
         lineage_store._service = service
         with operation_lock, lineage_store._transaction():
@@ -441,6 +442,7 @@ def open_hermes_native_authority_system(
             payload_schemas=schemas, clock=clock,
             object_admission_payload_validator=root._validate_object_admission_payload_record,
             current_candidate_citations=current_candidate_citations,
+            hypotheses=hypothesis_store,
         )
         candidate_store._dispositions = dispositions
         candidate_store._service = service
@@ -457,6 +459,8 @@ def open_hermes_native_authority_system(
             clock=clock,
             command_service_version=command_service_version,
             current_candidate_citations=current_candidate_citations,
+            hypotheses=hypothesis_store,
+            dispositions=dispositions,
             object_admission_payload_validator=root._validate_object_admission_payload_record,
         )
 

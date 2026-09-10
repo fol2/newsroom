@@ -869,7 +869,7 @@ class _ObjectStoreBase:
         ):
             for row in conn.execute(
                 f"SELECT {bytes_column},{digest_column} FROM {table}"
-            ).fetchall():
+            ):
                 data = bytes(row[bytes_column])
                 value = self._decode_canonical_object(data)
                 expected = str(row[digest_column])

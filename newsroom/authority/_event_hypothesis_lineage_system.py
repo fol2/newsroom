@@ -41,6 +41,7 @@ from newsroom.increment6.work_items import RetrievalContextAuthority
 from newsroom.increment6.dispositions import CurrentCandidateCitationReadPort
 
 from ._capability import _CapabilityIssuer
+from ._event_hypothesis_system import _HypothesisStore
 from ._event_hypothesis_relationship_system import (
     _create_event_hypothesis_relationship_read_port,
 )
@@ -774,13 +775,15 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
     retrieval_authority: RetrievalContextAuthority, authenticator: object, command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry, clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     object_admission_payload_validator: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
-    current_candidate_citations: CurrentCandidateCitationReadPort | None = None):
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
+    hypotheses: _HypothesisStore | None = None):
     """Compose exact D1/D2/D3 producer reads on the caller's transaction."""
     if connection.in_transaction: raise HypothesisLineageContractError("Candidate lineage port requires idle open")
     port = _create_event_hypothesis_relationship_read_port(connection, retrieval_authority=retrieval_authority,
         authenticator=authenticator, command_registry=command_registry,
         payload_schemas=payload_schemas, clock=clock,
-        current_candidate_citations=current_candidate_citations)
+        current_candidate_citations=current_candidate_citations,
+        hypotheses=hypotheses)
     verifier = object.__new__(_LineageStore); verifier._conn = connection; verifier._closed = False; verifier._port = port
     if object_admission_payload_validator is not None:
         verifier._validate_object_admission_payload_record = object_admission_payload_validator
