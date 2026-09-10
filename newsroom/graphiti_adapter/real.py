@@ -964,10 +964,16 @@ async def _add_episode(
             GRAPHITI_CLEANUP_TIMEOUT_MS / 1_000
         )
         try:
-            await asyncio.wait_for(
-                graphiti.close(),
+            # Graphiti closes its driver, not the HTTP client owned by its embedder.
+            close_results = await asyncio.wait_for(
+                asyncio.gather(
+                    delegate.client.close(), graphiti.close(), return_exceptions=True
+                ),
                 timeout=GRAPHITI_CLEANUP_TIMEOUT_MS / 1_000,
             )
+            for close_result in close_results:
+                if isinstance(close_result, BaseException):
+                    raise close_result
         except asyncio.TimeoutError:
             evidence = timeout_diagnostic(
                 boundary="CLEANUP_DEADLINE",

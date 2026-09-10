@@ -115,6 +115,7 @@ class _Embedder:
 class _Documents:
     def __init__(self):
         self.documents = {}
+        self.document_identities = {}
         self.contexts = {}
         self.admit_calls = []
         self.require_calls = []
@@ -137,6 +138,10 @@ class _Documents:
             generation_id=request.generation_id,
         )
         self.documents[str(receipt.aggregate_id)] = document
+        self.document_identities[str(receipt.aggregate_id)] = (
+            document.revision_id,
+            document.generation_id,
+        )
         return receipt, document
 
     def require_document(self, receipt, *, proof):
@@ -157,7 +162,19 @@ class _Documents:
 
     def read_context(self, receipt, *, proof):
         self.context_reads.append(receipt)
-        return self.contexts[receipt.context_id]
+        context = self.contexts[receipt.context_id]
+        for value in context.selected_documents:
+            selected = NativeDocumentReceipt.from_projection(value)
+            identity = str(selected.aggregate_id)
+            document = self.documents.get(identity)
+            if document is None:
+                continue
+            if (
+                document.revision_id,
+                document.generation_id,
+            ) != self.document_identities[identity]:
+                raise ValueError("native document receipt differs")
+        return context
 
 
 def _continuation(
@@ -251,7 +268,7 @@ def _continuation(
         journal=journal,
         connection=connection,
         embedder=embedder,
-        generation_id=GENERATION,
+        generation_id=context.generation_id,
         port_for=port_for,
         rights_check=rights_check,
     )
@@ -402,8 +419,10 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
             context,
             fresh_requests,
         )
+        full_inventory_reads = len(documents.require_calls)
         assert final_continuation.retrieve(lead, proof=proof()) == replayed_binding
         assert fresh_requests == []
+        assert len(documents.require_calls) == full_inventory_reads
         assert len(documents.context_reads) == 2
         replay_facts = final_journal.progress[base.revision_id]["facts"]
         assert replay_facts["candidate_version_id"] == "candidate-version-1"
@@ -414,15 +433,11 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
         retained_document = next(iter(documents.documents.values()))
         original_revision = retained_document.revision_id
         retained_document.revision_id = "different-retained-revision"
-        with pytest.raises(
-            ValueError, match="native passage continuation identity changed",
-        ):
+        with pytest.raises(ValueError, match="native document receipt differs"):
             final_continuation.retrieve(lead, proof=proof())
         retained_document.revision_id = original_revision
         retained_document.generation_id = "different-native-generation"
-        with pytest.raises(
-            ValueError, match="native passage continuation identity changed",
-        ):
+        with pytest.raises(ValueError, match="native document receipt differs"):
             final_continuation.retrieve(lead, proof=proof())
     finally:
         final_connection.close()
@@ -581,12 +596,19 @@ def test_historical_rights_hold_is_excluded_and_invalidates_context_replay(tmp_p
             "document_digest": first_receipt["document_digest"],
         }
 
+        subjects.clear()
+        full_inventory_reads = len(documents.require_calls)
+        assert continuation.retrieve(current_lead, proof=proof()).usable
+        assert subjects == []
+        assert len(documents.require_calls) == full_inventory_reads
+
         held.clear()
         subjects.clear()
         assert continuation.retrieve(current_lead, proof=proof()).usable
         assert [[item.revision_id for item in group] for group in subjects] == [[
             first.revision_id, current.revision_id,
         ]]
+        assert len(documents.require_calls) == full_inventory_reads + 2
         assert len(set(inventory_digests)) == 2
         assert journal.progress[first.revision_id]["facts"]["retrieval_exclusions"] == {}
 

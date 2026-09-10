@@ -32,6 +32,17 @@ from .policy import CommandRegistry, PayloadSchemaRegistry
 from .types import ObjectAdmissionId, PayloadMode, UtcTimestamp, require_token
 
 
+_INCOMPLETE_COMMAND_QUERY = (
+    "SELECT c.command_id FROM authority_commands c "
+    "WHERE (SELECT COUNT(*) FROM authority_aggregate_versions v "
+    "WHERE v.command_id=c.command_id) != 1 "
+    "OR (SELECT COUNT(*) FROM ledger_events e "
+    "WHERE e.command_id=c.command_id) != 1 "
+    "OR (SELECT COUNT(*) FROM authority_audit_events a "
+    "WHERE a.command_id=c.command_id) != 1 LIMIT 1"
+)
+
+
 class _EventStoreBase:
     """SQLite lifecycle, migration, validation and writer ownership."""
 
@@ -262,18 +273,10 @@ class _EventStoreBase:
                 "aggregate head does not reference an exact version"
             )
 
-        incomplete = conn.execute(
-            "SELECT c.command_id,COUNT(DISTINCT v.command_id) AS versions,"
-            "COUNT(DISTINCT e.command_id) AS events,"
-            "COUNT(DISTINCT a.command_id) AS audits "
-            "FROM authority_commands c "
-            "LEFT JOIN authority_aggregate_versions v "
-            "ON v.command_id=c.command_id "
-            "LEFT JOIN ledger_events e ON e.command_id=c.command_id "
-            "LEFT JOIN authority_audit_events a ON a.command_id=c.command_id "
-            "GROUP BY c.command_id "
-            "HAVING versions != 1 OR events != 1 OR audits != 1 LIMIT 1"
-        ).fetchone()
+        # Correlated indexed counts preserve the exact-one invariant without
+        # materialising three COUNT(DISTINCT) temporary B-trees during
+        # every authority open.
+        incomplete = conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone()
         if incomplete is not None:
             raise AuthoritySchemaError(
                 "each command must own one version, audit and event"

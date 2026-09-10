@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1597,7 +1598,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             if not hasattr(self.config, "embedding_model"):
                 self.config.embedding_model = "openai/text-embedding-3-large"
             self.client = SimpleNamespace(
-                embeddings=SimpleNamespace(create=self._create)
+                embeddings=SimpleNamespace(create=self._create), close=AsyncMock()
             )
 
         async def _create(self, input=None, model=None, **_k: object) -> object:

@@ -871,22 +871,6 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
-    governed_idempotency_key = _governed_idempotency_key(cursor_token)
-    if invocation_observer is not None:
-        if governed_idempotency_key is None:
-            raise CliDispatchMarkerError(
-                "Cursor governed request digest is unavailable before transport"
-            )
-        if (
-            idempotency_key is not None
-            and idempotency_key != governed_idempotency_key
-        ):
-            raise CliDispatchMarkerError(
-                "Cursor governed request digest conflicts with caller idempotency key"
-            )
-        cursor_idempotency_key = governed_idempotency_key
-    else:
-        cursor_idempotency_key = idempotency_key
     cursor_transport_started = False
     cursor_started = time.monotonic()
 
@@ -917,6 +901,22 @@ async def run_cli_chain(
         )
 
     try:
+        governed_idempotency_key = _governed_idempotency_key(cursor_token)
+        if invocation_observer is not None:
+            if governed_idempotency_key is None:
+                raise CliDispatchMarkerError(
+                    "Cursor governed request digest is unavailable before transport"
+                )
+            if (
+                idempotency_key is not None
+                and idempotency_key != governed_idempotency_key
+            ):
+                raise CliDispatchMarkerError(
+                    "Cursor governed request digest conflicts with caller idempotency key"
+                )
+            cursor_idempotency_key = governed_idempotency_key
+        else:
+            cursor_idempotency_key = idempotency_key
         if inspect.iscoroutinefunction(cursor_runner):
             if _runner_accepts_dispatch_marker(cursor_runner):
                 cursor_kwargs: dict[str, object] = {
@@ -1134,7 +1134,7 @@ async def run_cli_chain(
             raise CliResponseError(
                 "Cursor Graphiti response exceeded requested max_tokens"
             ) from exc
-    except (RuntimeError, OSError) as exc:
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
         cursor_usage = (
             unreported_cli_usage()
             if cursor_transport_started
@@ -1152,6 +1152,8 @@ async def run_cli_chain(
                 receipt_binding=binding,
             )
         )
+        if isinstance(exc, (TypeError, ValueError)):
+            raise
         cursor_outcome = "FAILED"
         payload = None
     else:
@@ -1370,7 +1372,7 @@ async def run_cli_chain(
                 invocation["transport_qualification"] = retained_qualification
         invocations.append(invocation)
         raise CliResponseError("Graphiti fallback CLI executable not found") from exc
-    except (RuntimeError, OSError) as exc:
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
         grok_usage = (
             unreported_cli_usage()
             if grok_transport_started
@@ -1388,6 +1390,8 @@ async def run_cli_chain(
                 receipt_binding=binding,
             )
         )
+        if isinstance(exc, (TypeError, ValueError)):
+            raise
         raise CliResponseError("Graphiti fallback CLI failed") from exc
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)

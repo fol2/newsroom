@@ -755,6 +755,42 @@ def test_governed_request_digest_reaches_sdk_idempotency_key(
     assert runtime.requests[0].idempotency_key == request_digest
 
 
+def test_missing_governed_request_digest_is_settled_before_transport() -> None:
+    completions: list[tuple[str, dict[str, object]]] = []
+    runner_called = False
+
+    class Observer:
+        def before_cli_invocation(self, **_kwargs: object) -> object:
+            return object()
+
+        def after_cli_invocation(
+            self, _token: object, *, outcome: str, usage: dict[str, object]
+        ) -> dict[str, str]:
+            completions.append((outcome, usage))
+            return {}
+
+    def cursor(_prompt: str, *, max_tokens: int) -> str:
+        nonlocal runner_called
+        runner_called = True
+        return _GRAPHITI_JSON
+
+    with pytest.raises(CliDispatchMarkerError, match="digest is unavailable"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=cursor,
+                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+                invocations=[],
+                invocation_observer=Observer(),
+                fallback_permitted=False,
+            )
+        )
+
+    assert runner_called is False
+    assert completions == [("DISPATCH_FENCE_REFUSED", no_provider_call_cli_usage())]
+
+
 def test_same_prompt_different_governed_digests_use_distinct_idempotency_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

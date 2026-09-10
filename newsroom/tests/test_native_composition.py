@@ -5,6 +5,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ from newsroom.control_plane import govuk_rights
 from newsroom.control_plane.govuk_rights import GovUkLicenceEvidence, POLICY_DIGEST
 from newsroom.control_plane.model_usage import InvocationEfficiencyPolicy, WorkloadClass
 from newsroom.control_plane.native_collision import NativeCollisionAuthority
-from newsroom.control_plane.native_pipeline import NativePipeline
+from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
 from newsroom.control_plane.native_retrieval import NativeRetrievalContinuation
 from newsroom.control_plane.writer import CONT_DISABLED_CAPABILITIES, CONT_PRIMARY_COMMAND_FLAGS
 from newsroom.increment5.native_retrieval import NativeRetrievalDocuments, NativeRetrievalHold
@@ -110,6 +111,105 @@ def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
     ))
     with pytest.raises(ValueError, match="qualification is absent"):
         service.run()
+
+
+def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
+    tmp_path, monkeypatch,
+):
+    from newsroom.control_plane import broker, cycle, native_qualification, paths, writer
+
+    native_root = tmp_path / "native"
+    native_root.mkdir()
+    authority = tmp_path / "authority.sqlite3"
+    with sqlite3.connect(authority) as connection:
+        connection.execute(
+            "CREATE TABLE source_definition_version_heads("
+            "definition_id TEXT,current_version_id TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE source_definition_versions("
+            "version_id TEXT,locator TEXT)"
+        )
+    private = tmp_path / "private.sqlite3"
+    private.touch()
+    proving = tmp_path / "proving.sqlite3"
+    proving.touch()
+    cas = tmp_path / "objects"
+    cas.mkdir()
+    workspace = tmp_path / "workspaces"
+    workspace.mkdir()
+    for name, value in {
+        "CANONICAL_INCREMENT4_AUTHORITY_STORE": authority,
+        "CANONICAL_UNPUBLISHED_STORE": private,
+        "CANONICAL_PROVING_STORE": proving,
+        "CANONICAL_OBJECT_CAS_ROOT": cas,
+        "CANONICAL_GRAPHITI_WORKSPACE_ROOT": workspace,
+        "HOST_CONTROL_PLANE_STATE_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setattr(paths, name, value)
+    monkeypatch.setattr(cycle, "assert_no_owner_emergency_stop", lambda _: None)
+    monkeypatch.setattr(
+        writer, "cont_writer_implementation_identity", lambda: ("1" * 40, True)
+    )
+    monkeypatch.setattr(
+        native_composition.subprocess, "check_output", lambda *_a, **_k: "2" * 40
+    )
+    policies = {
+        WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING: _embedding_policy(),
+        WorkloadClass.NATIVE_EVIDENCE_ASSESSOR: _assessment_policy(),
+    }
+    monkeypatch.setattr(
+        native_composition,
+        "ModelUsageService",
+        lambda _: SimpleNamespace(
+            qualified_policy=lambda **request: policies[request["workload_class"]]
+        ),
+    )
+    monkeypatch.setattr(
+        native_composition, "_native_cursor_credential", lambda: nullcontext()
+    )
+    monkeypatch.setattr(broker, "neo4j_projector_config", lambda: object())
+    monkeypatch.setattr(broker, "openrouter_api_key", lambda: "fixture-key")
+    opens = []
+
+    @contextmanager
+    def opened_pipeline(**arguments):
+        opens.append("open")
+        for name in ("intake_path", "serving_path", "retrieval_path"):
+            Path(arguments[name]).touch()
+        try:
+            yield SimpleNamespace(
+                tick=lambda **_request: NativePipelineReport((), {}, 0)
+            )
+        finally:
+            opens.append("close")
+
+    monkeypatch.setattr(native_composition, "open_native_pipeline", opened_pipeline)
+    monkeypatch.setattr(
+        native_qualification,
+        "validate_qualification",
+        lambda *_a, **_k: pytest.fail("continuous startup required prior qualification"),
+    )
+    qualified = []
+    monkeypatch.setattr(
+        native_qualification,
+        "record_qualification",
+        lambda _connection, identity: qualified.append(identity),
+    )
+
+    service = native_composition.deployed_native_service(
+        SimpleNamespace(
+            ledger=str(private), lock=str(native_root / "hermes.lock"),
+            once=False, interval=300, failure_backoff=60,
+        )
+    )
+    service._wait = lambda _: True
+    report = service.run()
+
+    assert report is not None and report.outcome == "COMPLETE"
+    assert len(qualified) == 1
+    assert qualified[0].startswith("sha256:")
+    assert opens == ["open", "close"]
 
 
 def test_native_deployment_identity_binds_store_instance_not_changing_contents(tmp_path):

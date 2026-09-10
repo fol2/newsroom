@@ -21,6 +21,7 @@ from newsroom.authority import (
     UnknownCausation,
 )
 from newsroom.authority.migrations import apply_migration
+from newsroom.authority._event_store_base import _INCOMPLETE_COMMAND_QUERY
 
 from .authority_event_helpers import open_test_system
 from .authority_helpers import command, proof
@@ -183,6 +184,58 @@ def test_every_command_has_one_version_audit_and_event(
             "(SELECT COUNT(*) FROM ledger_events)"
         ).fetchone()
         assert counts == (3, 3, 3, 3)
+    finally:
+        conn.close()
+
+
+def test_command_completeness_uses_indexed_counts_without_temp_btrees() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE authority_commands(command_id TEXT PRIMARY KEY);
+            CREATE TABLE authority_aggregate_versions(command_id TEXT);
+            CREATE TABLE ledger_events(command_id TEXT);
+            CREATE TABLE authority_audit_events(command_id TEXT);
+            CREATE INDEX versions_by_command
+              ON authority_aggregate_versions(command_id);
+            CREATE INDEX events_by_command ON ledger_events(command_id);
+            CREATE INDEX audits_by_command ON authority_audit_events(command_id);
+            """
+        )
+        for command_id in ("first", "middle", "last"):
+            conn.execute("INSERT INTO authority_commands VALUES(?)", (command_id,))
+            conn.execute(
+                "INSERT INTO authority_aggregate_versions VALUES(?)", (command_id,)
+            )
+            conn.execute("INSERT INTO ledger_events VALUES(?)", (command_id,))
+            conn.execute("INSERT INTO authority_audit_events VALUES(?)", (command_id,))
+
+        assert conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone() is None
+        plan = tuple(
+            str(row[3])
+            for row in conn.execute("EXPLAIN QUERY PLAN " + _INCOMPLETE_COMMAND_QUERY)
+        )
+        assert not any("TEMP B-TREE" in step for step in plan)
+        assert all(
+            any(index in step for step in plan)
+            for index in (
+                "versions_by_command",
+                "events_by_command",
+                "audits_by_command",
+            )
+        )
+
+        # Exact counts, rather than current uniqueness constraints, keep this
+        # check fail-closed if a future schema admits duplicate child rows.
+        conn.execute("INSERT INTO ledger_events VALUES('middle')")
+        assert conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone() == ("middle",)
+        conn.execute(
+            "DELETE FROM ledger_events WHERE rowid=(SELECT MAX(rowid) "
+            "FROM ledger_events WHERE command_id='middle')"
+        )
+        conn.execute("DELETE FROM authority_audit_events WHERE command_id='last'")
+        assert conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone() == ("last",)
     finally:
         conn.close()
 

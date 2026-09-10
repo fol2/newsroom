@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -243,13 +243,11 @@ def deployed_native_service(args):
                 embedding_policy=embedding, assessment_policy=assessment,
             )
 
-        qualified_identity = None
-        if not args.once:
-            from .native_qualification import validate_qualification
-            qualified_identity = identity()
-            with closing(sqlite3.connect(CANONICAL_UNPUBLISHED_STORE.as_uri() + "?mode=ro", uri=True)) as retained:
-                retained.execute("PRAGMA query_only=ON")
-                validate_qualification(retained, qualified_identity)
+        opening_identity = (
+            identity()
+            if all(Path(path).exists() for path in identity_paths.values())
+            else None
+        )
         # Discovery only: each selected identity is authenticated again by the
         # Source facade before an observation. No Source Definition is invented.
         connection = sqlite3.connect(CANONICAL_INCREMENT4_AUTHORITY_STORE.as_uri() + "?mode=ro", uri=True)
@@ -281,7 +279,10 @@ def deployed_native_service(args):
             service_event=service_event,
         ) as composed:
             composed.runtime_identity_digest = identity()
-            if qualified_identity is not None and composed.runtime_identity_digest != qualified_identity:
+            if (
+                opening_identity is not None
+                and composed.runtime_identity_digest != opening_identity
+            ):
                 raise ValueError("native deployment identity changed during open")
             yield composed
 
@@ -309,7 +310,7 @@ def open_native_pipeline(
     service_event: threading.Event | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ):
-    """Open one real runtime; qualification policies must already be retained.
+    """Open one real runtime after its invocation policies are qualified.
 
     Credentials remain process-local. No route fallback, legacy intake writer,
     fixture rights renewal, historical campaign or public target is composed.
