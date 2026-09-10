@@ -1123,6 +1123,14 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
             *_, relationships, _, _ = verified(digests)
             return tuple(relationships[digest] for digest in digests)
 
+        def require_exact_retained_relationships_in_transaction(
+            self, digests: tuple[str, ...]
+        ):
+            receipts, _ = verifier._port._require_exact_retained_inputs_in_transaction(
+                digests, ()
+            )
+            return receipts
+
         def require_candidate_inputs_in_transaction(
             self, version_id: str, assessment_digest: str, *, proof: object
         ):

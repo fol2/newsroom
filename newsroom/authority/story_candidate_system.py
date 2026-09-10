@@ -502,7 +502,7 @@ class _CandidateStore(_EventAuthorityStore):
         self._verify_upstream(verified)
         return verified
 
-    def _verify_upstream(self, verified):
+    def _verify_upstream(self, verified, *, exact: bool = False):
         digests = {
             admission.governing_manifest.relationship_assessment_digest
             for admission, *_ in verified.values()
@@ -514,9 +514,11 @@ class _CandidateStore(_EventAuthorityStore):
             digest: receipt.assessment
             for digest, receipt in zip(
                 ordered_digests,
-                self._lineage.require_retained_relationships_in_transaction(
-                    ordered_digests
-                ),
+                (
+                    self._lineage._require_exact_retained_relationships_in_transaction
+                    if exact
+                    else self._lineage.require_retained_relationships_in_transaction
+                )(ordered_digests),
                 strict=True,
             )
         }
@@ -1077,55 +1079,51 @@ class _StoryCandidateReadAuthority:
         _require_candidate_read_connection(self.__connection, active=True)
         return self.__verifier._verify()
 
+    def __verified_receipts(self, *, version_id=None, candidate_id=None):
+        _require_candidate_read_connection(self.__connection, active=True)
+        verified = self.__verifier._verify_local()
+        matches = tuple(
+            item
+            for item in verified.values()
+            if (version_id is None or item[2].version_id == version_id)
+            and (candidate_id is None or item[2].candidate_id == candidate_id)
+        )
+        if not matches:
+            raise CandidateContractError(
+                "unknown Candidate" if candidate_id is not None
+                else "unknown Candidate Version"
+            )
+        if version_id is not None and len(matches) != 1:
+            raise CandidateContractError("unknown Candidate Version")
+        self.__verifier._verify_upstream(
+            {item[0].canonical_digest: item for item in matches}, exact=True
+        )
+        return matches
+
     def verify_retained_integrity_in_transaction(self) -> None:
         self.__verified()
 
     def require_retained_candidate_in_transaction(
         self, candidate_id: str
     ) -> StoryCandidate:
-        verified = self.__verified()
-        candidates = {
-            candidate.candidate_id: candidate for _, candidate, *_ in verified.values()
-        }
-        try:
-            return candidates[candidate_id]
-        except KeyError as exc:
-            raise CandidateContractError("unknown Candidate") from exc
+        matches = self.__verified_receipts(candidate_id=candidate_id)
+        candidate = matches[0][1]
+        if any(item[1] != candidate for item in matches):
+            raise CandidateContractError("Candidate identity differs")
+        return candidate
 
     def require_retained_version_in_transaction(
         self, version_id: str
     ) -> StoryCandidateVersion:
-        verified = self.__verified()
-        versions = {
-            version.version_id: version for *_, version, _, _, _, _ in verified.values()
-        }
-        try:
-            return versions[version_id]
-        except KeyError as exc:
-            raise CandidateContractError("unknown Candidate Version") from exc
+        return self.__verified_receipts(version_id=version_id)[0][2]
 
     def require_current_head_in_transaction(
         self, candidate_id: str, *, proof: AuthenticationProof
     ) -> StoryCandidateVersion:
-        verified = self.__verified()
-        row = self.__connection.execute(
-            "SELECT current_admission_digest,current_version_id,"
-            "current_version_digest FROM "
-            "story_candidate_heads WHERE candidate_id=?",
-            (candidate_id,),
-        ).fetchone()
-        if row is None:
-            raise CandidateContractError("unknown Candidate")
-        try:
-            admission, _, version, collision, *_ = verified[str(row[0])]
-        except KeyError as exc:
-            raise CandidateContractError("Candidate head differs") from exc
-        if tuple(row[1:]) != (version.version_id, version.canonical_digest):
-            raise CandidateContractError("Candidate head differs")
-        producers = self.__verifier._producers(admission.governing_manifest, proof)
-        rebuilt = self.__verifier._manifest(producers, collision)
-        if rebuilt != version.governing_manifest:
-            raise CandidateContractError("Candidate current governing material differs")
+        _require_candidate_read_connection(self.__connection, active=True)
+        version, _ = self.__verifier.exact_current_producers(
+            candidate_id, proof=proof
+        )
         return version
 
 
