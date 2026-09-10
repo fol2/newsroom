@@ -237,17 +237,17 @@ def deployed_native_service(args):
             "retrieval": private_root / "retrieval.sqlite3",
         }
 
-        def identity():
+        def identity(paths=identity_paths):
             return _deployment_identity(
-                revision=revision, tree=tree, paths=identity_paths,
+                revision=revision, tree=tree, paths=paths,
                 embedding_policy=embedding, assessment_policy=assessment,
             )
 
-        opening_identity = (
-            identity()
-            if all(Path(path).exists() for path in identity_paths.values())
-            else None
-        )
+        opening_paths = {
+            name: path for name, path in identity_paths.items()
+            if Path(path).exists()
+        }
+        opening_identity = identity(opening_paths)
         # Discovery only: each selected identity is authenticated again by the
         # Source facade before an observation. No Source Definition is invented.
         connection = sqlite3.connect(CANONICAL_INCREMENT4_AUTHORITY_STORE.as_uri() + "?mode=ro", uri=True)
@@ -278,12 +278,9 @@ def deployed_native_service(args):
             licence=None, stop_check=check, stop_fence=fence, implementation_worktree_clean=clean,
             service_event=service_event,
         ) as composed:
-            composed.runtime_identity_digest = identity()
-            if (
-                opening_identity is not None
-                and composed.runtime_identity_digest != opening_identity
-            ):
+            if identity(opening_paths) != opening_identity:
                 raise ValueError("native deployment identity changed during open")
+            composed.runtime_identity_digest = identity()
             yield composed
 
     return NativeService(

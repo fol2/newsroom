@@ -113,8 +113,9 @@ def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
         service.run()
 
 
+@pytest.mark.parametrize("replace_existing", (False, True))
 def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, replace_existing,
 ):
     from newsroom.control_plane import broker, cycle, native_qualification, paths, writer
 
@@ -177,6 +178,10 @@ def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
         opens.append("open")
         for name in ("intake_path", "serving_path", "retrieval_path"):
             Path(arguments[name]).touch()
+        if replace_existing:
+            replacement = authority.with_name("replacement.sqlite3")
+            replacement.write_bytes(authority.read_bytes())
+            replacement.replace(authority)
         try:
             yield SimpleNamespace(
                 tick=lambda **_request: NativePipelineReport((), {}, 0)
@@ -204,11 +209,15 @@ def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
         )
     )
     service._wait = lambda _: True
-    report = service.run()
-
-    assert report is not None and report.outcome == "COMPLETE"
-    assert len(qualified) == 1
-    assert qualified[0].startswith("sha256:")
+    if replace_existing:
+        with pytest.raises(ValueError, match="identity changed during open"):
+            service.run()
+        assert qualified == []
+    else:
+        report = service.run()
+        assert report is not None and report.outcome == "COMPLETE"
+        assert len(qualified) == 1
+        assert qualified[0].startswith("sha256:")
     assert opens == ["open", "close"]
 
 
