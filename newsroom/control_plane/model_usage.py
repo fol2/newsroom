@@ -521,7 +521,8 @@ def _policy_for_allocation(
     ).fetchone()
     if row is None:
         raise ModelUsageIntegrityError("retained Graphiti policy is absent")
-    retained_record = _object(row[8])
+    raw_record = str(row[8])
+    retained_record = _object(raw_record)
     try:
         decoded = _policy_from_record(retained_record)
         values = asdict(decoded)
@@ -531,6 +532,7 @@ def _policy_for_allocation(
         raise ModelUsageIntegrityError(
             "retained Graphiti policy binding differs"
         ) from exc
+    expected_record = policy.as_record()
     if tuple(row[index] for index in range(8)) != (
         policy.canonical_digest,
         policy.policy_id,
@@ -540,7 +542,10 @@ def _policy_for_allocation(
         policy.route,
         policy.model,
         int(policy.qualified),
-    ) or retained_record != policy.as_record() or (
+    ) or (
+        retained_record != expected_record
+        or raw_record != _json(expected_record)
+    ) or (
         policy.canonical_digest != allocation.invocation_policy_digest
         or policy.workload_class is not allocation.workload_class
         or policy.provider != allocation.provider

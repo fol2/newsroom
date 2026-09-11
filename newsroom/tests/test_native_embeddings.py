@@ -615,31 +615,40 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
         "WHERE canonical_digest=?",
         (allocation["invocation_policy_digest"],),
     ).fetchone()[0])
-    changed_policy = {**policy_record, "max_total_tokens": 9_000}
-    connection.execute(
-        "UPDATE model_invocation_policies SET record_json=? "
-        "WHERE canonical_digest=?",
-        (
-            json.dumps(changed_policy, sort_keys=True, separators=(",", ":")),
-            allocation["invocation_policy_digest"],
-        ),
+    canonical_policy = json.dumps(
+        policy_record, sort_keys=True, separators=(",", ":")
     )
-    connection.commit()
-    with pytest.raises(ModelUsageIntegrityError, match="policy binding"):
-        ModelUsageService(usage_path).disposition_native_embedding_timeout(**base)
-    with pytest.raises(NativeQualificationError):
-        _invocations(
-            connection,
-            NativeRevisionJournal(connection),
-            (allocation["invocation_id"],),
+    for changed_policy in (
+        json.dumps(
+            {**policy_record, "max_total_tokens": 9_000},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {**policy_record, "qualified": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(policy_record, sort_keys=True, indent=1),
+    ):
+        connection.execute(
+            "UPDATE model_invocation_policies SET record_json=? "
+            "WHERE canonical_digest=?",
+            (changed_policy, allocation["invocation_policy_digest"]),
         )
+        connection.commit()
+        with pytest.raises(ModelUsageIntegrityError, match="policy binding"):
+            ModelUsageService(usage_path).disposition_native_embedding_timeout(**base)
+        with pytest.raises(NativeQualificationError):
+            _invocations(
+                connection,
+                NativeRevisionJournal(connection),
+                (allocation["invocation_id"],),
+            )
     connection.execute(
         "UPDATE model_invocation_policies SET record_json=? "
         "WHERE canonical_digest=?",
-        (
-            json.dumps(policy_record, sort_keys=True, separators=(",", ":")),
-            allocation["invocation_policy_digest"],
-        ),
+        (canonical_policy, allocation["invocation_policy_digest"]),
     )
     connection.commit()
     for changed in (
