@@ -14,12 +14,16 @@ import re
 import sqlite3
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TypeGuard
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.graphiti_requests import (
     GraphitiInternalRequestIdentity,
@@ -47,6 +51,12 @@ NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
     "newsroom.model-usage.native-conservative-disposition-authority.v1"
 )
 NATIVE_AUTONOMOUS_USAGE_SCOPE = "NATIVE_AUTONOMOUS_INTERNAL_PIPELINE"
+NATIVE_EMBEDDING_TIMEOUT_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
+    "newsroom.model-usage.native-embedding-timeout-disposition-authority.v1"
+)
+NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE = (
+    "NATIVE_AUTONOMOUS_OPENROUTER_EMBEDDING_TIMEOUT"
+)
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
     ("model-usage-v2", "newsroom.model-usage.v2"),
@@ -630,16 +640,67 @@ def _valid_native_disposition(
     record = _object(row[11])
     unsigned = dict(record)
     retained_digest = unsigned.pop("disposition_digest", None)
-    if record.get("authority_scope") != NATIVE_AUTONOMOUS_USAGE_SCOPE:
+    authority_scope = record.get("authority_scope")
+    if authority_scope not in {
+        NATIVE_AUTONOMOUS_USAGE_SCOPE,
+        NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+    }:
         return None
     policy = _policy_for_allocation(connection, allocation)
-    expected_scope = _native_disposition_authority(
-        allocation=allocation,
-        terminal=terminal,
-        policy=policy,
-        envelope=_native_envelope(connection, allocation),
-    )
+    if authority_scope == NATIVE_AUTONOMOUS_USAGE_SCOPE:
+        expected_scope = _native_disposition_authority(
+            allocation=allocation,
+            terminal=terminal,
+            policy=policy,
+            envelope=_native_envelope(connection, allocation),
+        )
+        conservative_total = policy.max_total_tokens
+    else:
+        if (
+            allocation.workload_class
+            is not WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+            or allocation.provider != "openrouter"
+            or allocation.route != "NATIVE_RETRIEVAL_EMBEDDING"
+            or allocation.model != "openai/text-embedding-3-large"
+            or not policy.qualified
+            or terminal.outcome != "NATIVE_EMBEDDING_FAILED"
+            or terminal.failure_class != "TimeoutError"
+            or terminal.usage_status is not UsageStatus.UNREPORTED
+            or terminal.dispatch_at is None
+            or terminal.policy_breach is not None
+            or terminal.provider_telemetry_digest is not None
+            or terminal.raw_telemetry_pointer is not None
+            or terminal.pre_dispatch_zero_proved
+            or terminal.subscription_cli_chat_not_cash_debited
+            or terminal.od_011_reference
+            != "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
+            or not _has_exact_dispatch(connection, terminal)
+            or connection.execute(
+                "SELECT 1 FROM model_provider_telemetry WHERE invocation_id=? "
+                "UNION ALL SELECT 1 FROM model_usage_reconciliations "
+                "WHERE invocation_id=? LIMIT 1",
+                (allocation.invocation_id, allocation.invocation_id),
+            ).fetchone()
+            is not None
+        ):
+            raise ModelUsageIntegrityError(
+                "native embedding conservative disposition is ineligible"
+            )
+        expected_scope = _native_embedding_timeout_disposition_authority(
+            connection,
+            allocation=allocation,
+            terminal=terminal,
+            policy=policy,
+            retained_progress=record,
+        )
+        conservative_total = max(
+            policy.max_total_tokens, allocation.prompt_bytes
+        )
     scope_digest = digest_canonical(expected_scope)
+    if authority_scope == NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE and any(
+        record.get(key) != value for key, value in expected_scope.items()
+    ):
+        raise ModelUsageIntegrityError("native conservative disposition differs")
     if (
         retained_digest != row[0]
         or digest_canonical(unsigned) != retained_digest
@@ -650,8 +711,8 @@ def _valid_native_disposition(
             policy.canonical_digest,
             scope_digest,
             scope_digest,
-            NATIVE_AUTONOMOUS_USAGE_SCOPE,
-            NATIVE_AUTONOMOUS_USAGE_SCOPE,
+            authority_scope,
+            authority_scope,
             record.get("observed_at"),
             record.get("observed_at"),
             UsageStatus.ESTIMATED.value,
@@ -668,10 +729,16 @@ def _valid_native_disposition(
         or record.get("usage_status") != UsageStatus.ESTIMATED.value
         or record.get("components")
         != UsageComponents(
-            total_tokens=policy.max_total_tokens,
+            total_tokens=conservative_total,
             provenance="BOUNDED_ESTIMATE",
         ).as_record()
         or record.get("estimate_policy_digest") != policy.canonical_digest
+        or record.get("estimate_calculation")
+        != (
+            "QUALIFIED_POLICY_MAX_TOTAL_TOKENS_CONSERVATIVE_UPPER_BOUND"
+            if authority_scope == NATIVE_AUTONOMOUS_USAGE_SCOPE
+            else "MAX_QUALIFIED_POLICY_TOTAL_OR_EXACT_REQUEST_UTF8_BYTES"
+        )
         or record.get("exact_usage_remains_unknown") is not True
         or record.get("provider_dispatch_preserved") is not True
         or record.get("unknown_spend_released") is not False
@@ -680,11 +747,39 @@ def _valid_native_disposition(
     return record
 
 
+def _valid_native_embedding_timeout_disposition_record(
+    connection: sqlite3.Connection,
+    *,
+    allocation_record: Mapping[str, object],
+    terminal_record: Mapping[str, object],
+    disposition_record: Mapping[str, object],
+) -> bool:
+    """Re-prove the exact native embedding disposition for qualification."""
+
+    if (
+        disposition_record.get("authority_scope")
+        != NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE
+    ):
+        return False
+    try:
+        allocation = _allocation_from_record(allocation_record)
+        terminal = _terminal_from_record(terminal_record)
+        retained = _valid_native_disposition(
+            connection, allocation=allocation, terminal=terminal
+        )
+    except ModelUsageIntegrityError:
+        return False
+    return retained == dict(disposition_record)
+
+
 def _native_disposed_invocation_ids(connection: sqlite3.Connection) -> set[str]:
     rows = connection.execute(
         "SELECT invocation_id FROM model_usage_conservative_dispositions "
-        "WHERE json_extract(record_json,'$.authority_scope')=?",
-        (NATIVE_AUTONOMOUS_USAGE_SCOPE,),
+        "WHERE json_extract(record_json,'$.authority_scope') IN (?,?)",
+        (
+            NATIVE_AUTONOMOUS_USAGE_SCOPE,
+            NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+        ),
     ).fetchall()
     result: set[str] = set()
     for row in rows:
@@ -787,6 +882,203 @@ def _native_disposition_authority(
         "allocation_digest": allocation.canonical_digest,
         "policy_digest": policy.canonical_digest,
         "maximum_total_tokens": policy.max_total_tokens,
+    }
+
+
+def _native_embedding_progress_binding(
+    connection: sqlite3.Connection,
+    *,
+    envelope: WorkEnvelope,
+    retained_progress: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
+    ).fetchone() is None:
+        raise ModelUsageIntegrityError(
+            "native embedding disposition lacks retained progress"
+        )
+    matches: list[dict[str, object]] = []
+    if retained_progress is None:
+        rows = connection.execute(
+            "SELECT seq,payload_digest,payload_json FROM ledger "
+            "WHERE kind='NATIVE_REVISION_PROGRESS' "
+            "AND json_extract(payload_json,'$.stage')='EMBEDDING_STARTED' "
+            "AND payload_json LIKE ? AND payload_json LIKE ? ORDER BY seq",
+            (f'%"{envelope.ingest_id}"%', f'%"{envelope.cycle_id}"%'),
+        )
+    else:
+        rows = connection.execute(
+            "SELECT seq,payload_digest,payload_json FROM ledger WHERE seq=? "
+            "AND kind='NATIVE_REVISION_PROGRESS'",
+            (retained_progress.get("progress_seq"),),
+        )
+    for seq, payload_digest, raw in rows:
+        payload = _object(raw)
+        facts = payload.get("facts")
+        embeddings = (
+            facts.get("retrieval_embeddings", {})
+            if isinstance(facts, dict)
+            else {}
+        )
+        if not isinstance(embeddings, dict):
+            continue
+        for unit_ingest_id, retained in embeddings.items():
+            if not isinstance(retained, dict) or (
+                retained.get("state"),
+                retained.get("passage_id"),
+                retained.get("cycle_id"),
+            ) != ("STARTED", envelope.ingest_id, envelope.cycle_id):
+                continue
+            attempt = retained.get("attempt_number")
+            base_cycle = f"native-passage:{unit_ingest_id}"
+            expected_cycle = (
+                base_cycle
+                if attempt == 1
+                else f"{base_cycle}:retry:{attempt}"
+            )
+            if (
+                payload.get("stage") != "EMBEDDING_STARTED"
+                or type(attempt) is not int
+                or attempt < 1
+                or envelope.cycle_id != expected_cycle
+                or raw != canonical_json_bytes(payload).decode("utf-8")
+                or payload_digest != digest_bytes(raw.encode("utf-8"))
+            ):
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition progress differs"
+                )
+            matches.append(
+                {
+                    "revision_id": _token(
+                        str(payload.get("revision_id")), field="revision id"
+                    ),
+                    "unit_ingest_id": _token(
+                        str(unit_ingest_id), field="unit ingest id"
+                    ),
+                    "passage_id": envelope.ingest_id,
+                    "embedding_cycle_id": envelope.cycle_id,
+                    "embedding_attempt_number": attempt,
+                    "progress_seq": int(seq),
+                    "progress_payload_digest": str(payload_digest),
+                }
+            )
+    if len(matches) != 1:
+        raise ModelUsageIntegrityError(
+            "native embedding disposition progress is absent or ambiguous"
+        )
+    result = matches[0]
+    from newsroom.control_plane.native_progress import (
+        LAND,
+        NativeRevisionJournal,
+        _unit,
+    )
+
+    landed = []
+    for payload_digest, raw in connection.execute(
+        "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
+        "AND json_extract(payload_json,'$.revision_id')=?",
+        (LAND, result["revision_id"]),
+    ):
+        payload = _object(raw)
+        units = tuple(_unit(value) for value in payload.get("units", ()))
+        NativeRevisionJournal._validate_units(units)
+        if (
+            raw != canonical_json_bytes(payload).decode("utf-8")
+            or payload_digest != digest_bytes(raw.encode("utf-8"))
+            or payload.get("revision_id") != result["revision_id"]
+        ):
+            raise ModelUsageIntegrityError(
+                "native embedding disposition source landing differs"
+            )
+        landed.extend(
+            unit
+            for unit in units
+            if unit.ingest_id == result["unit_ingest_id"]
+            and unit.proving_run_id.startswith("native-source:")
+            and unit.authority is not None
+        )
+    if len(landed) != 1:
+        raise ModelUsageIntegrityError(
+            "native embedding disposition lacks its landed source unit"
+        )
+    unit = landed[0]
+    result.update(
+        {
+            "landed_unit_digest": digest_canonical(asdict(unit)),
+            "source_observation_digest": unit.observation_digest,
+            "source_admission_id": unit.authority.admission_id,
+            "source_access_decision_id": unit.authority.access_decision_id,
+            "source_revision_id": unit.authority.revision_id,
+            "source_representation_id": unit.authority.representation_id,
+        }
+    )
+    if retained_progress is not None and any(
+        retained_progress.get(key) != value for key, value in result.items()
+    ):
+        raise ModelUsageIntegrityError(
+            "native embedding disposition progress differs"
+        )
+    return result
+
+
+def _native_embedding_timeout_disposition_authority(
+    connection: sqlite3.Connection,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    policy: InvocationEfficiencyPolicy,
+    retained_progress: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    row = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,admitted_at,canonical_digest,"
+        "record_json FROM model_work_envelopes WHERE envelope_id=?",
+        (allocation.envelope_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError(
+            "native embedding disposition envelope is absent"
+        )
+    envelope = _envelope_from_record(_object(row[5]))
+    if tuple(row[index] for index in range(5)) != (
+        envelope.envelope_id,
+        envelope.cycle_id,
+        envelope.workload_class.value,
+        _utc_text(envelope.admitted_at),
+        envelope.canonical_digest,
+    ) or (
+        envelope.envelope_id != allocation.envelope_id
+        or envelope.cycle_id != allocation.cycle_id
+        or envelope.workload_class
+        is not WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+        or envelope.ingest_id is None
+        or envelope.graphiti_attempt_id is not None
+    ):
+        raise ModelUsageIntegrityError(
+            "native embedding disposition envelope binding differs"
+        )
+    progress = _native_embedding_progress_binding(
+        connection, envelope=envelope, retained_progress=retained_progress
+    )
+    conservative_total = max(policy.max_total_tokens, allocation.prompt_bytes)
+    return {
+        "authority_schema_version": (
+            NATIVE_EMBEDDING_TIMEOUT_DISPOSITION_AUTHORITY_SCHEMA_VERSION
+        ),
+        "authority_scope": NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+        **progress,
+        "invocation_id": allocation.invocation_id,
+        "terminal_digest": terminal.terminal_digest,
+        "allocation_digest": allocation.canonical_digest,
+        "policy_digest": policy.canonical_digest,
+        "request_digest": allocation.request_digest,
+        "request_bytes": allocation.prompt_bytes,
+        "qualified_policy_maximum_total_tokens": policy.max_total_tokens,
+        "conservative_total_tokens": conservative_total,
+        "estimated_policy_ceiling_exceeded": (
+            conservative_total > policy.max_total_tokens
+        ),
+        "exact_policy_compliance_unknown": True,
+        "cash_spend_known": False,
     }
 
 
@@ -3393,6 +3685,278 @@ class ModelUsageService:
                     _json(record),
                 ),
             )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def disposition_native_embedding_timeout(
+        self,
+        *,
+        invocation_id: str,
+        expected_terminal_digest: str,
+        expected_allocation_digest: str,
+        expected_request_digest: str,
+        expected_passage_id: str,
+        expected_cycle_id: str,
+        observed_at: datetime,
+    ) -> dict[str, object]:
+        """Retain one exact post-dispatch embedding timeout upper bound."""
+
+        invocation_id = _token(invocation_id, field="invocation id")
+        expected_terminal_digest = _token(
+            expected_terminal_digest, field="expected terminal digest"
+        )
+        expected_allocation_digest = _token(
+            expected_allocation_digest, field="expected allocation digest"
+        )
+        expected_request_digest = _token(
+            expected_request_digest, field="expected request digest"
+        )
+        expected_passage_id = _token(
+            expected_passage_id, field="expected passage id"
+        )
+        expected_cycle_id = _token(
+            expected_cycle_id, field="expected cycle id"
+        )
+        observed_at_text = _utc_text(observed_at)
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            retained = connection.execute(
+                "SELECT t.terminal_digest,t.invocation_id,t.usage_status,t.outcome,"
+                "t.failure_class,t.completed_at,t.record_json,a.canonical_digest,"
+                "a.invocation_id,a.envelope_id,a.cycle_id,a.workload_class,"
+                "a.policy_digest,a.provider,a.route,a.model,a.request_digest,"
+                "a.parent_invocation_id,a.allocated_at,a.record_json "
+                "FROM model_invocation_terminals t "
+                "JOIN model_invocation_allocations a "
+                "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if retained is None:
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition terminal is absent"
+                )
+            terminal = _terminal_from_record(_object(retained[6]))
+            allocation = _allocation_from_record(_object(retained[19]))
+            if (
+                retained[0] != terminal.terminal_digest
+                or tuple(retained[1:6])
+                != (
+                    terminal.invocation_id,
+                    terminal.usage_status.value,
+                    terminal.outcome,
+                    terminal.failure_class,
+                    _utc_text(terminal.completed_at),
+                )
+                or retained[7] != allocation.canonical_digest
+                or tuple(retained[8:19])
+                != (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    _utc_text(allocation.allocated_at),
+                )
+                or terminal.invocation_id != invocation_id
+                or allocation.invocation_id != invocation_id
+                or terminal.terminal_digest != expected_terminal_digest
+                or allocation.canonical_digest != expected_allocation_digest
+                or allocation.request_digest != expected_request_digest
+                or allocation.cycle_id != expected_cycle_id
+            ):
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition binding differs"
+                )
+
+            policy = _policy_for_allocation(connection, allocation)
+            if self._validate_terminal(
+                terminal,
+                allocation.workload_class,
+                policy,
+                requested_max_output_tokens=allocation.max_output_tokens,
+            ) is not None:
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition has a policy breach"
+                )
+            authority = _native_embedding_timeout_disposition_authority(
+                connection,
+                allocation=allocation,
+                terminal=terminal,
+                policy=policy,
+            )
+            if (
+                allocation.workload_class
+                is not WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+                or allocation.provider != "openrouter"
+                or allocation.route != "NATIVE_RETRIEVAL_EMBEDDING"
+                or allocation.model != "openai/text-embedding-3-large"
+                or authority["passage_id"] != expected_passage_id
+                or not policy.qualified
+                or terminal.outcome != "NATIVE_EMBEDDING_FAILED"
+                or terminal.failure_class != "TimeoutError"
+                or terminal.usage_status is not UsageStatus.UNREPORTED
+                or terminal.dispatch_at is None
+                or terminal.policy_breach is not None
+                or terminal.provider_telemetry_digest is not None
+                or terminal.raw_telemetry_pointer is not None
+                or terminal.pre_dispatch_zero_proved
+                or terminal.subscription_cli_chat_not_cash_debited
+                or terminal.od_011_reference
+                != "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
+            ):
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition target is ineligible"
+                )
+            if observed_at < terminal.observed_at:
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition precedes terminal"
+                )
+            if not _has_exact_dispatch(connection, terminal):
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition lacks committed dispatch"
+                )
+            if connection.execute(
+                "SELECT 1 FROM model_provider_telemetry WHERE invocation_id=? "
+                "UNION ALL SELECT 1 FROM model_usage_reconciliations "
+                "WHERE invocation_id=? LIMIT 1",
+                (invocation_id, invocation_id),
+            ).fetchone() is not None:
+                raise ModelUsageIntegrityError(
+                    "native embedding disposition exact telemetry already exists"
+                )
+
+            prior = _valid_native_disposition(
+                connection, allocation=allocation, terminal=terminal
+            )
+            if prior is not None:
+                connection.rollback()
+                return prior
+
+            scope_digest = digest_canonical(authority)
+            conservative_total = max(
+                policy.max_total_tokens, allocation.prompt_bytes
+            )
+            record_without_digest: dict[str, object] = {
+                "schema_version": CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+                "authority_scope": NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+                "native_scope_digest": scope_digest,
+                "invocation_id": invocation_id,
+                "terminal_digest": terminal.terminal_digest,
+                "allocation_digest": allocation.canonical_digest,
+                "policy_digest": policy.canonical_digest,
+                "usage_status": UsageStatus.ESTIMATED.value,
+                "components": UsageComponents(
+                    total_tokens=conservative_total,
+                    provenance="BOUNDED_ESTIMATE",
+                ).as_record(),
+                "estimate_policy_digest": policy.canonical_digest,
+                "estimate_calculation": (
+                    "MAX_QUALIFIED_POLICY_TOTAL_OR_EXACT_REQUEST_UTF8_BYTES"
+                ),
+                "exact_usage_remains_unknown": True,
+                "provider_dispatch_preserved": True,
+                "unknown_spend_released": False,
+                "authority_digest": scope_digest,
+                "observed_at": observed_at_text,
+                **{
+                    key: authority[key]
+                    for key in (
+                        "revision_id",
+                        "authority_schema_version",
+                        "unit_ingest_id",
+                        "passage_id",
+                        "embedding_cycle_id",
+                        "embedding_attempt_number",
+                        "progress_seq",
+                        "progress_payload_digest",
+                        "landed_unit_digest",
+                        "source_observation_digest",
+                        "source_admission_id",
+                        "source_access_decision_id",
+                        "source_revision_id",
+                        "source_representation_id",
+                        "request_digest",
+                        "request_bytes",
+                        "qualified_policy_maximum_total_tokens",
+                        "conservative_total_tokens",
+                        "estimated_policy_ceiling_exceeded",
+                        "exact_policy_compliance_unknown",
+                        "cash_spend_known",
+                    )
+                },
+            }
+            disposition_digest = digest_canonical(record_without_digest)
+            record = {
+                **record_without_digest,
+                "disposition_digest": disposition_digest,
+            }
+            connection.execute(
+                "INSERT INTO model_usage_conservative_dispositions("
+                "disposition_digest,invocation_id,terminal_digest,"
+                "allocation_digest,policy_digest,approved_plan_digest,"
+                "authority_digest,approved_by,approval_reference,approved_at,"
+                "observed_at,usage_status,record_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    disposition_digest,
+                    invocation_id,
+                    terminal.terminal_digest,
+                    allocation.canonical_digest,
+                    policy.canonical_digest,
+                    scope_digest,
+                    scope_digest,
+                    NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+                    NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+                    observed_at_text,
+                    observed_at_text,
+                    UsageStatus.ESTIMATED.value,
+                    _json(record),
+                ),
+            )
+            latest_route = connection.execute(
+                "SELECT state,reason,invocation_id FROM "
+                "model_usage_route_circuit_events WHERE route=? "
+                "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
+                (allocation.route,),
+            ).fetchone()
+            if (
+                latest_route is not None
+                and tuple(latest_route)
+                == ("OPEN", "TimeoutError", allocation.invocation_id)
+                and connection.execute(
+                    "SELECT 1 FROM model_invocation_allocations a LEFT JOIN "
+                    "model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+                    "WHERE a.route=? AND a.invocation_id<>? "
+                    "AND t.invocation_id IS NULL LIMIT 1",
+                    (allocation.route, allocation.invocation_id),
+                ).fetchone()
+                is None
+                and _canonical_circuit_route(allocation.route)
+                not in _usage_blocking_routes(connection)
+            ):
+                self._append_route_state(
+                    connection,
+                    route=allocation.route,
+                    state="CLOSED",
+                    reason=(
+                        "NATIVE_EMBEDDING_TIMEOUT_CONSERVATIVE_DISPOSITION:"
+                        f"{disposition_digest}"
+                    ),
+                    invocation_id=allocation.invocation_id,
+                    recorded_at=observed_at,
+                )
             connection.commit()
             return record
         except Exception:
