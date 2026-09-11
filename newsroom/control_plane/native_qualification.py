@@ -17,7 +17,11 @@ from newsroom.authority.canonical import (
 from newsroom.increment9.proving import SOURCE_IDS
 
 from .govuk_evidence import _api_url
-from .model_usage import CONSERVATIVE_DISPOSITION_SCHEMA_VERSION, WorkloadClass
+from .model_usage import (
+    CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    WorkloadClass,
+    _valid_native_embedding_timeout_disposition_record,
+)
 from .native_progress import LAND, PORTFOLIO, STATE, NativeRevisionJournal
 from .store import LEDGER_GENESIS, append_ledger
 
@@ -408,6 +412,12 @@ def _invocations(
             disposition = _canonical_record(disposition_row[3])
             unsigned = dict(disposition)
             retained_digest = unsigned.pop("disposition_digest", None)
+            embedding_timeout = _valid_native_embedding_timeout_disposition_record(
+                connection,
+                allocation_record=allocations[invocation_id],
+                terminal_record=terminal,
+                disposition_record=disposition,
+            )
             if (
                 retained_digest != disposition_row[0]
                 or digest_canonical(unsigned) != retained_digest
@@ -427,7 +437,11 @@ def _invocations(
                 or disposition.get("provider_dispatch_preserved") is not True
                 or disposition.get("unknown_spend_released") is not False
                 or terminal.get("usage_status") != "UNREPORTED"
-                or terminal.get("failure_class") != "MISSING_PROVIDER_TELEMETRY"
+                or (
+                    terminal.get("failure_class")
+                    != "MISSING_PROVIDER_TELEMETRY"
+                    and not embedding_timeout
+                )
             ):
                 raise NativeQualificationError("native usage disposition differs")
             effective = disposition

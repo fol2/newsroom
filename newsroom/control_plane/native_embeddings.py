@@ -118,6 +118,22 @@ class NativePassageEmbedder:
             and terminal.provider_telemetry_digest is not None
             and not terminal.pre_dispatch_zero_proved
         )
+        settled_timeout = (
+            terminal.outcome == "NATIVE_EMBEDDING_FAILED"
+            and terminal.failure_class == "TimeoutError"
+            and terminal.usage_status is UsageStatus.UNREPORTED
+            and terminal.dispatch_at is not None
+            and terminal.provider_telemetry_digest is None
+            and not terminal.pre_dispatch_zero_proved
+        )
+        if settled_timeout:
+            self._settle_timeout(
+                allocation=allocation,
+                terminal=terminal,
+                passage_id=passage_id,
+                cycle_id=cycle_id,
+            )
+            return self._usage.route_state(ROUTE)["state"] == "CLOSED"
         return pre_dispatch_zero or (
             settled_validation_failure
             and _retained_provider_telemetry(
@@ -210,6 +226,17 @@ class NativePassageEmbedder:
             od_011_reference="OD-011:NATIVE_RETRIEVAL_EMBEDDING",
             subscription_cli_chat_not_cash_debited=False,
         ), provider_telemetry=telemetry)
+        if (
+            terminal.outcome == "NATIVE_EMBEDDING_FAILED"
+            and terminal.failure_class == "TimeoutError"
+            and terminal.usage_status is UsageStatus.UNREPORTED
+        ):
+            self._settle_timeout(
+                allocation=allocation,
+                terminal=terminal,
+                passage_id=passage_id,
+                cycle_id=cycle_id,
+            )
         if isinstance(error, VetoError):
             raise error
         if (error is not None or vector is None or telemetry is None
@@ -228,6 +255,24 @@ class NativePassageEmbedder:
             "retrieval.native-embedding-receipt", f"native-embedding:{digest_bytes(receipt.canonical_bytes)}",
         ), receipt.canonical_bytes, proof=proof).admission
         return NativeEmbeddingReference(vector_admission.admission_id, receipt_admission.admission_id)
+
+    def _settle_timeout(
+        self,
+        *,
+        allocation: InvocationAllocation,
+        terminal: InvocationTerminal,
+        passage_id: str,
+        cycle_id: str,
+    ) -> dict[str, object]:
+        return self._usage.disposition_native_embedding_timeout(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=terminal.terminal_digest,
+            expected_allocation_digest=allocation.canonical_digest,
+            expected_request_digest=allocation.request_digest,
+            expected_passage_id=passage_id,
+            expected_cycle_id=cycle_id,
+            observed_at=self._clock(),
+        )
 
     def _manifest(self, request: bytes, text: str) -> dict:
         policy = self._policy

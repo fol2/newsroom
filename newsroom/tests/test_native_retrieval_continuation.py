@@ -512,11 +512,21 @@ def test_exact_zero_dispatch_embedding_terminal_allows_one_new_attempt(tmp_path)
         fixture = tmp_path / "binding"
         fixture.mkdir()
         binding, _receipt_value, context = _native_binding(fixture, lead)
-        documents, embedder = _Documents(), _Embedder(retryable=True)
+        documents, embedder = _Documents(), _Embedder(retryable=False)
         continuation = _continuation(
             connection, journal, documents, embedder, binding, context, [],
         )
 
+        with pytest.raises(
+            NativeRetrievalHold, match="NATIVE_EMBEDDING_INTERRUPTED"
+        ):
+            continuation.retrieve(lead, proof=proof())
+        assert embedder.calls == []
+        assert journal.progress[unit.revision_id]["facts"][
+            "retrieval_embeddings"
+        ][unit.ingest_id]["attempt_number"] == 1
+
+        embedder.retryable = True
         assert continuation.retrieve(lead, proof=proof()).usable
         assert [call["cycle_id"] for call in embedder.calls] == [
             f"native-passage:{unit.ingest_id}:retry:2"
