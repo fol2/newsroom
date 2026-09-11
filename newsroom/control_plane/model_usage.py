@@ -521,7 +521,16 @@ def _policy_for_allocation(
     ).fetchone()
     if row is None:
         raise ModelUsageIntegrityError("retained Graphiti policy is absent")
-    policy = _policy_from_record(_object(row[8]))
+    retained_record = _object(row[8])
+    try:
+        decoded = _policy_from_record(retained_record)
+        values = asdict(decoded)
+        values.pop("canonical_digest")
+        policy = InvocationEfficiencyPolicy.create(**values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ModelUsageIntegrityError(
+            "retained Graphiti policy binding differs"
+        ) from exc
     if tuple(row[index] for index in range(8)) != (
         policy.canonical_digest,
         policy.policy_id,
@@ -531,7 +540,7 @@ def _policy_for_allocation(
         policy.route,
         policy.model,
         int(policy.qualified),
-    ) or (
+    ) or retained_record != policy.as_record() or (
         policy.canonical_digest != allocation.invocation_policy_digest
         or policy.workload_class is not allocation.workload_class
         or policy.provider != allocation.provider
@@ -540,6 +549,49 @@ def _policy_for_allocation(
     ):
         raise ModelUsageIntegrityError("retained Graphiti policy binding differs")
     return policy
+
+
+def _retained_terminal_allocation(
+    connection: sqlite3.Connection, invocation_id: str
+) -> tuple[InvocationAllocation, InvocationTerminal]:
+    row = connection.execute(
+        "SELECT t.terminal_digest,t.invocation_id,t.usage_status,t.outcome,"
+        "t.failure_class,t.completed_at,t.record_json,a.invocation_id,"
+        "a.envelope_id,a.cycle_id,a.leaf_ordinal,a.workload_class,a.policy_digest,"
+        "a.provider,a.route,a.model,a.request_digest,a.parent_invocation_id,"
+        "a.allocated_at,a.canonical_digest,a.record_json "
+        "FROM model_invocation_terminals t JOIN model_invocation_allocations a "
+        "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
+        (invocation_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("retained invocation terminal is absent")
+    terminal = _terminal_from_record(_object(row[6]))
+    allocation = _allocation_from_record(_object(row[20]))
+    if tuple(row[:6]) != (
+        terminal.terminal_digest,
+        terminal.invocation_id,
+        terminal.usage_status.value,
+        terminal.outcome,
+        terminal.failure_class,
+        _utc_text(terminal.completed_at),
+    ) or tuple(row[7:20]) != (
+        allocation.invocation_id,
+        allocation.envelope_id,
+        allocation.cycle_id,
+        allocation.leaf_ordinal,
+        allocation.workload_class.value,
+        allocation.invocation_policy_digest,
+        allocation.provider,
+        allocation.route,
+        allocation.model,
+        allocation.request_digest,
+        allocation.parent_invocation_id,
+        _utc_text(allocation.allocated_at),
+        allocation.canonical_digest,
+    ):
+        raise ModelUsageIntegrityError("retained invocation binding differs")
+    return allocation, terminal
 
 
 def _is_exact_pre_dispatch_zero(terminal: InvocationTerminal) -> bool:
@@ -595,6 +647,24 @@ def _has_exact_dispatch(
     return matched
 
 
+def _has_exact_native_embedding_dispatch(
+    connection: sqlite3.Connection,
+    terminal: InvocationTerminal,
+    allocation: InvocationAllocation,
+) -> bool:
+    if not _has_exact_dispatch(connection, terminal):
+        return False
+    rows = connection.execute(
+        "SELECT observed_at,evidence_digest FROM model_transport_observations "
+        "WHERE invocation_id=? AND state='DISPATCH_STARTED'",
+        (terminal.invocation_id,),
+    ).fetchall()
+    return len(rows) == 1 and tuple(rows[0]) == (
+        _utc_text(terminal.dispatch_at),
+        allocation.request_digest,
+    )
+
+
 def _require_reported_telemetry(
     connection: sqlite3.Connection, terminal: InvocationTerminal
 ) -> None:
@@ -628,6 +698,11 @@ def _valid_native_disposition(
     allocation: InvocationAllocation,
     terminal: InvocationTerminal,
 ) -> dict[str, object] | None:
+    retained_allocation, retained_terminal = _retained_terminal_allocation(
+        connection, allocation.invocation_id
+    )
+    if (retained_allocation, retained_terminal) != (allocation, terminal):
+        raise ModelUsageIntegrityError("retained invocation binding differs")
     row = connection.execute(
         "SELECT disposition_digest,terminal_digest,allocation_digest,policy_digest,"
         "approved_plan_digest,authority_digest,approved_by,approval_reference,"
@@ -674,7 +749,9 @@ def _valid_native_disposition(
             or terminal.subscription_cli_chat_not_cash_debited
             or terminal.od_011_reference
             != "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
-            or not _has_exact_dispatch(connection, terminal)
+            or not _has_exact_native_embedding_dispatch(
+                connection, terminal, allocation
+            )
             or connection.execute(
                 "SELECT 1 FROM model_provider_telemetry WHERE invocation_id=? "
                 "UNION ALL SELECT 1 FROM model_usage_reconciliations "
@@ -3727,49 +3804,11 @@ class ModelUsageService:
         connection = self._connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            retained = connection.execute(
-                "SELECT t.terminal_digest,t.invocation_id,t.usage_status,t.outcome,"
-                "t.failure_class,t.completed_at,t.record_json,a.canonical_digest,"
-                "a.invocation_id,a.envelope_id,a.cycle_id,a.workload_class,"
-                "a.policy_digest,a.provider,a.route,a.model,a.request_digest,"
-                "a.parent_invocation_id,a.allocated_at,a.record_json "
-                "FROM model_invocation_terminals t "
-                "JOIN model_invocation_allocations a "
-                "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
-                (invocation_id,),
-            ).fetchone()
-            if retained is None:
-                raise ModelUsageIntegrityError(
-                    "native embedding disposition terminal is absent"
-                )
-            terminal = _terminal_from_record(_object(retained[6]))
-            allocation = _allocation_from_record(_object(retained[19]))
+            allocation, terminal = _retained_terminal_allocation(
+                connection, invocation_id
+            )
             if (
-                retained[0] != terminal.terminal_digest
-                or tuple(retained[1:6])
-                != (
-                    terminal.invocation_id,
-                    terminal.usage_status.value,
-                    terminal.outcome,
-                    terminal.failure_class,
-                    _utc_text(terminal.completed_at),
-                )
-                or retained[7] != allocation.canonical_digest
-                or tuple(retained[8:19])
-                != (
-                    allocation.invocation_id,
-                    allocation.envelope_id,
-                    allocation.cycle_id,
-                    allocation.workload_class.value,
-                    allocation.invocation_policy_digest,
-                    allocation.provider,
-                    allocation.route,
-                    allocation.model,
-                    allocation.request_digest,
-                    allocation.parent_invocation_id,
-                    _utc_text(allocation.allocated_at),
-                )
-                or terminal.invocation_id != invocation_id
+                terminal.invocation_id != invocation_id
                 or allocation.invocation_id != invocation_id
                 or terminal.terminal_digest != expected_terminal_digest
                 or allocation.canonical_digest != expected_allocation_digest
@@ -3823,7 +3862,9 @@ class ModelUsageService:
                 raise ModelUsageIntegrityError(
                     "native embedding disposition precedes terminal"
                 )
-            if not _has_exact_dispatch(connection, terminal):
+            if not _has_exact_native_embedding_dispatch(
+                connection, terminal, allocation
+            ):
                 raise ModelUsageIntegrityError(
                     "native embedding disposition lacks committed dispatch"
                 )
@@ -3837,11 +3878,47 @@ class ModelUsageService:
                     "native embedding disposition exact telemetry already exists"
                 )
 
+            def close_exact_timeout_route(disposition_digest: str) -> None:
+                latest_route = connection.execute(
+                    "SELECT state,reason,invocation_id FROM "
+                    "model_usage_route_circuit_events WHERE route=? "
+                    "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
+                    (allocation.route,),
+                ).fetchone()
+                if (
+                    latest_route is not None
+                    and tuple(latest_route)
+                    == ("OPEN", "TimeoutError", allocation.invocation_id)
+                    and connection.execute(
+                        "SELECT 1 FROM model_invocation_allocations a LEFT JOIN "
+                        "model_invocation_terminals t "
+                        "ON t.invocation_id=a.invocation_id "
+                        "WHERE a.route=? AND a.invocation_id<>? "
+                        "AND t.invocation_id IS NULL LIMIT 1",
+                        (allocation.route, allocation.invocation_id),
+                    ).fetchone()
+                    is None
+                    and _canonical_circuit_route(allocation.route)
+                    not in _usage_blocking_routes(connection)
+                ):
+                    self._append_route_state(
+                        connection,
+                        route=allocation.route,
+                        state="CLOSED",
+                        reason=(
+                            "NATIVE_EMBEDDING_TIMEOUT_CONSERVATIVE_DISPOSITION:"
+                            f"{disposition_digest}"
+                        ),
+                        invocation_id=allocation.invocation_id,
+                        recorded_at=observed_at,
+                    )
+
             prior = _valid_native_disposition(
                 connection, allocation=allocation, terminal=terminal
             )
             if prior is not None:
-                connection.rollback()
+                close_exact_timeout_route(str(prior["disposition_digest"]))
+                connection.commit()
                 return prior
 
             scope_digest = digest_canonical(authority)
@@ -3925,38 +4002,7 @@ class ModelUsageService:
                     _json(record),
                 ),
             )
-            latest_route = connection.execute(
-                "SELECT state,reason,invocation_id FROM "
-                "model_usage_route_circuit_events WHERE route=? "
-                "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
-                (allocation.route,),
-            ).fetchone()
-            if (
-                latest_route is not None
-                and tuple(latest_route)
-                == ("OPEN", "TimeoutError", allocation.invocation_id)
-                and connection.execute(
-                    "SELECT 1 FROM model_invocation_allocations a LEFT JOIN "
-                    "model_invocation_terminals t ON t.invocation_id=a.invocation_id "
-                    "WHERE a.route=? AND a.invocation_id<>? "
-                    "AND t.invocation_id IS NULL LIMIT 1",
-                    (allocation.route, allocation.invocation_id),
-                ).fetchone()
-                is None
-                and _canonical_circuit_route(allocation.route)
-                not in _usage_blocking_routes(connection)
-            ):
-                self._append_route_state(
-                    connection,
-                    route=allocation.route,
-                    state="CLOSED",
-                    reason=(
-                        "NATIVE_EMBEDDING_TIMEOUT_CONSERVATIVE_DISPOSITION:"
-                        f"{disposition_digest}"
-                    ),
-                    invocation_id=allocation.invocation_id,
-                    recorded_at=observed_at,
-                )
+            close_exact_timeout_route(disposition_digest)
             connection.commit()
             return record
         except Exception:

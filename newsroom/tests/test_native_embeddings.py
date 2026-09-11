@@ -10,8 +10,9 @@ import pytest
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.control_plane import native_embeddings as embedding
 from newsroom.control_plane.model_usage import (
-    InvocationAllocation, InvocationEfficiencyPolicy, ModelUsageIntegrityError,
-    ModelUsageService, UsageStatus, WorkEnvelope, WorkloadClass,
+    InvocationAllocation, InvocationEfficiencyPolicy, InvocationTerminal,
+    ModelUsageIntegrityError, ModelUsageService, UsageComponents, UsageStatus,
+    WorkEnvelope, WorkloadClass,
 )
 from newsroom.control_plane.native_runtime import open_native_runtime
 from newsroom.control_plane.native_progress import NativeRevisionJournal
@@ -115,6 +116,7 @@ def _allocate_unresolved_embedding(engine, service):
         parent_invocation_id=None,
     )
     service.allocate(allocation, owner_emergency_stop=False)
+    return allocation
 
 
 @pytest.mark.parametrize("case", [
@@ -327,8 +329,11 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
             implementation_worktree_clean=True,
             clock=lambda: NOW,
         )
-        if case == "other-unresolved":
+        unresolved = (
             _allocate_unresolved_embedding(engine, service)
+            if case == "other-unresolved"
+            else None
+        )
         if case == "deferred":
             monkeypatch.setattr(
                 service,
@@ -370,9 +375,61 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
                 ModelUsageService(usage_path).disposition_native_embedding_timeout(
                     **settle
                 )
+            original_transport = json.loads(transport[5])
+            original_transport.pop("observation_digest")
+
+            def insert_transport(*, observed_at, evidence_digest):
+                record = {
+                    **original_transport,
+                    "observed_at": observed_at,
+                    "evidence_digest": evidence_digest,
+                }
+                record_digest = digest_canonical(record)
+                connection.execute(
+                    "INSERT INTO model_transport_observations VALUES(?,?,?,?,?,?)",
+                    (
+                        record_digest,
+                        allocation["invocation_id"],
+                        observed_at,
+                        "DISPATCH_STARTED",
+                        evidence_digest,
+                        json.dumps(
+                            {**record, "observation_digest": record_digest},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+                connection.commit()
+
+            for observed_at, evidence_digest in (
+                (transport[2], digest_canonical({"wrong": "request"})),
+                ("2026-09-08T14:00:01.000000Z", allocation["request_digest"]),
+            ):
+                insert_transport(
+                    observed_at=observed_at, evidence_digest=evidence_digest
+                )
+                with pytest.raises(ModelUsageIntegrityError, match="dispatch"):
+                    ModelUsageService(usage_path).disposition_native_embedding_timeout(
+                        **settle
+                    )
+                connection.execute("DELETE FROM model_transport_observations")
+                connection.commit()
             connection.execute(
                 "INSERT INTO model_transport_observations VALUES(?,?,?,?,?,?)",
                 tuple(transport),
+            )
+            insert_transport(
+                observed_at="2026-09-08T14:00:01.000000Z",
+                evidence_digest=allocation["request_digest"],
+            )
+            with pytest.raises(ModelUsageIntegrityError, match="dispatch"):
+                ModelUsageService(usage_path).disposition_native_embedding_timeout(
+                    **settle
+                )
+            connection.execute(
+                "DELETE FROM model_transport_observations WHERE observed_at!=?",
+                (transport[2],),
             )
             telemetry = {"provider": "openrouter", "usage": "unknown"}
             telemetry_digest = digest_canonical(telemetry)
@@ -415,9 +472,34 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
             implementation_worktree_clean=True,
             clock=lambda: NOW,
         )
-        assert restarted.retryable_settled_attempt(
+        retryable = restarted.retryable_settled_attempt(
             text=text, passage_id=passage_id, cycle_id=cycle_id
         )
+        assert retryable is (case != "other-unresolved")
+        if unresolved is not None:
+            assert service.route_state(embedding.ROUTE)["state"] == "OPEN"
+            with pytest.raises(
+                NativeQualificationError, match="invocation is in flight"
+            ):
+                _invocations(connection, NativeRevisionJournal(connection))
+            service.complete(InvocationTerminal.create(
+                invocation_id=unresolved.invocation_id,
+                outcome="NATIVE_EMBEDDING_FAILED",
+                failure_class="LOCAL_PRE_DISPATCH_STOP",
+                usage_status=UsageStatus.REPORTED,
+                components=UsageComponents(
+                    total_tokens=0, provenance="CLI_DERIVED"
+                ),
+                dispatch_at=None,
+                completed_at=NOW,
+                observed_at=NOW,
+                pre_dispatch_zero_proved=True,
+                od_011_reference="OD-011:NATIVE_RETRIEVAL_EMBEDDING",
+                subscription_cli_chat_not_cash_debited=False,
+            ))
+            assert restarted.retryable_settled_attempt(
+                text=text, passage_id=passage_id, cycle_id=cycle_id
+            )
         assert not restarted.retryable_settled_attempt(
             text=text + "changed", passage_id=passage_id, cycle_id=cycle_id
         )
@@ -439,9 +521,7 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
     assert disposition["source_observation_digest"] == unit.observation_digest
     assert disposition["source_admission_id"] == unit.authority.admission_id
     assert disposition["source_access_decision_id"] == unit.authority.access_decision_id
-    assert service.route_state(embedding.ROUTE)["state"] == (
-        "OPEN" if case == "other-unresolved" else "CLOSED"
-    )
+    assert service.route_state(embedding.ROUTE)["state"] == "CLOSED"
     assert connection.execute(
         "SELECT COUNT(*) FROM model_usage_conservative_dispositions"
     ).fetchone() == (1,)
@@ -458,11 +538,6 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
         NativeRevisionJournal(connection),
         (allocation["invocation_id"],),
     ) == (allocation["invocation_id"],)
-    if case == "other-unresolved":
-        with pytest.raises(
-            NativeQualificationError, match="invocation is in flight"
-        ):
-            _invocations(connection, NativeRevisionJournal(connection))
     for field, changed in (
         ("authority_scope", "wrong-scope"),
         ("passage_id", "wrong-passage"),
@@ -508,6 +583,65 @@ def test_post_dispatch_timeout_is_bounded_settled_and_retryable_after_restart(
         "expected_cycle_id": cycle_id,
         "observed_at": NOW,
     }
+    for table, column, changed, original in (
+        ("model_invocation_allocations", "leaf_ordinal", 7, 1),
+        (
+            "model_invocation_terminals",
+            "outcome",
+            "NATIVE_EMBEDDING_COMPLETE",
+            "NATIVE_EMBEDDING_FAILED",
+        ),
+    ):
+        connection.execute(
+            f"UPDATE {table} SET {column}=? WHERE invocation_id=?",
+            (changed, allocation["invocation_id"]),
+        )
+        connection.commit()
+        with pytest.raises(ModelUsageIntegrityError, match="invocation binding"):
+            ModelUsageService(usage_path).disposition_native_embedding_timeout(**base)
+        with pytest.raises(NativeQualificationError):
+            _invocations(
+                connection,
+                NativeRevisionJournal(connection),
+                (allocation["invocation_id"],),
+            )
+        connection.execute(
+            f"UPDATE {table} SET {column}=? WHERE invocation_id=?",
+            (original, allocation["invocation_id"]),
+        )
+        connection.commit()
+    policy_record = json.loads(connection.execute(
+        "SELECT record_json FROM model_invocation_policies "
+        "WHERE canonical_digest=?",
+        (allocation["invocation_policy_digest"],),
+    ).fetchone()[0])
+    changed_policy = {**policy_record, "max_total_tokens": 9_000}
+    connection.execute(
+        "UPDATE model_invocation_policies SET record_json=? "
+        "WHERE canonical_digest=?",
+        (
+            json.dumps(changed_policy, sort_keys=True, separators=(",", ":")),
+            allocation["invocation_policy_digest"],
+        ),
+    )
+    connection.commit()
+    with pytest.raises(ModelUsageIntegrityError, match="policy binding"):
+        ModelUsageService(usage_path).disposition_native_embedding_timeout(**base)
+    with pytest.raises(NativeQualificationError):
+        _invocations(
+            connection,
+            NativeRevisionJournal(connection),
+            (allocation["invocation_id"],),
+        )
+    connection.execute(
+        "UPDATE model_invocation_policies SET record_json=? "
+        "WHERE canonical_digest=?",
+        (
+            json.dumps(policy_record, sort_keys=True, separators=(",", ":")),
+            allocation["invocation_policy_digest"],
+        ),
+    )
+    connection.commit()
     for changed in (
         {"expected_request_digest": digest_canonical({"wrong": "request"})},
         {"expected_passage_id": "wrong-passage"},

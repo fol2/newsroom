@@ -133,7 +133,7 @@ class NativePassageEmbedder:
                 passage_id=passage_id,
                 cycle_id=cycle_id,
             )
-            return True
+            return self._usage.route_state(ROUTE)["state"] == "CLOSED"
         return pre_dispatch_zero or (
             settled_validation_failure
             and _retained_provider_telemetry(
