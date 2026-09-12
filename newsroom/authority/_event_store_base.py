@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 import os
 from pathlib import Path
 import sqlite3
 import stat
 import threading
+from time import perf_counter_ns
 from typing import Any, Iterator
 
 try:
@@ -30,6 +32,24 @@ from .persistence import (
 )
 from .policy import CommandRegistry, PayloadSchemaRegistry
 from .types import ObjectAdmissionId, PayloadMode, UtcTimestamp, require_token
+
+
+_OPEN_LOG = logging.getLogger("newsroom.authority.open")
+
+
+@contextmanager
+def _validation_stage(stage: str) -> Iterator[None]:
+    started = perf_counter_ns()
+    _OPEN_LOG.info("authority_open stage=%s status=STARTED", stage)
+    status = "FAILED"
+    try:
+        yield
+        status = "COMPLETE"
+    finally:
+        _OPEN_LOG.info(
+            "authority_open stage=%s status=%s elapsed_ms=%d",
+            stage, status, (perf_counter_ns() - started) // 1_000_000,
+        )
 
 
 _INCOMPLETE_COMMAND_QUERY = (
@@ -93,7 +113,8 @@ class _EventStoreBase:
             if not existed:
                 os.chmod(self.path, 0o600)
             self._validate_owned_file(self.path)
-            self._migrate_or_validate()
+            with _validation_stage("validation"):
+                self._migrate_or_validate()
         except Exception:
             self.close()
             raise
@@ -203,111 +224,120 @@ class _EventStoreBase:
 
     def _validate_schema_and_integrity(self) -> None:
         conn = self._connection
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version != SCHEMA_VERSION:
-            raise AuthoritySchemaError(
-                f"database schema {version} does not match {SCHEMA_VERSION}"
+        with _validation_stage("schema"):
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version != SCHEMA_VERSION:
+                raise AuthoritySchemaError(
+                    f"database schema {version} does not match {SCHEMA_VERSION}"
+                )
+            rows = conn.execute(
+                "SELECT version,name,checksum FROM authority_migrations "
+                "ORDER BY version"
+            ).fetchall()
+            history = tuple(
+                (int(row["version"]), str(row["name"]), str(row["checksum"]))
+                for row in rows
             )
-        rows = conn.execute(
-            "SELECT version,name,checksum FROM authority_migrations "
-            "ORDER BY version"
-        ).fetchall()
-        history = tuple(
-            (int(row["version"]), str(row["name"]), str(row["checksum"]))
-            for row in rows
-        )
-        if history != EXPECTED_MIGRATION_HISTORY:
-            raise AuthoritySchemaError(
-                f"authority migration history mismatch: {history!r}"
-            )
-        if schema_fingerprint(conn) != EXPECTED_SCHEMA_FINGERPRINT:
-            raise AuthoritySchemaError(
-                "authority schema fingerprint mismatch"
-            )
-        quick = [
-            str(row[0])
-            for row in conn.execute("PRAGMA quick_check").fetchall()
-        ]
-        if quick != ["ok"]:
-            raise AuthoritySchemaError(
-                f"authority quick_check failed: {quick!r}"
-            )
-        if conn.execute("PRAGMA foreign_key_check").fetchall():
-            raise AuthoritySchemaError(
-                "authority foreign-key check failed"
-            )
-        if not bool(conn.execute("PRAGMA foreign_keys").fetchone()[0]):
-            raise AuthoritySchemaError(
-                "SQLite foreign keys are not enabled"
-            )
-        if (
-            str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
-            != "wal"
-        ):
-            raise AuthoritySchemaError("SQLite WAL mode is not active")
-        if int(conn.execute("PRAGMA synchronous").fetchone()[0]) != 2:
-            raise AuthoritySchemaError(
-                "SQLite synchronous=FULL is not active"
-            )
+            if history != EXPECTED_MIGRATION_HISTORY:
+                raise AuthoritySchemaError(
+                    f"authority migration history mismatch: {history!r}"
+                )
+            if schema_fingerprint(conn) != EXPECTED_SCHEMA_FINGERPRINT:
+                raise AuthoritySchemaError(
+                    "authority schema fingerprint mismatch"
+                )
+        with _validation_stage("quick_check"):
+            quick = [
+                str(row[0])
+                for row in conn.execute("PRAGMA quick_check").fetchall()
+            ]
+            if quick != ["ok"]:
+                raise AuthoritySchemaError(
+                    f"authority quick_check failed: {quick!r}"
+                )
+        with _validation_stage("foreign_key_check"):
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise AuthoritySchemaError(
+                    "authority foreign-key check failed"
+                )
+        with _validation_stage("connection_settings"):
+            if not bool(conn.execute("PRAGMA foreign_keys").fetchone()[0]):
+                raise AuthoritySchemaError(
+                    "SQLite foreign keys are not enabled"
+                )
+            if (
+                str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+                != "wal"
+            ):
+                raise AuthoritySchemaError("SQLite WAL mode is not active")
+            if int(conn.execute("PRAGMA synchronous").fetchone()[0]) != 2:
+                raise AuthoritySchemaError(
+                    "SQLite synchronous=FULL is not active"
+                )
         self._validate_relational_invariants(conn)
         if self._should_validate_row_integrity():
-            self._validate_immutable_records(conn)
-        self._validate_registry_coverage(conn)
+            with _validation_stage("immutable_records"):
+                self._validate_immutable_records(conn)
+        with _validation_stage("registry_coverage"):
+            self._validate_registry_coverage(conn)
 
     def _should_validate_row_integrity(self) -> bool:
         return True
 
     @staticmethod
     def _validate_relational_invariants(conn: sqlite3.Connection) -> None:
-        missing_head = conn.execute(
-            "SELECT a.aggregate_type,a.aggregate_id,a.current_version "
-            "FROM authority_aggregates a "
-            "LEFT JOIN authority_aggregate_versions v "
-            "ON v.aggregate_type=a.aggregate_type "
-            "AND v.aggregate_id=a.aggregate_id "
-            "AND v.aggregate_version=a.current_version "
-            "WHERE v.aggregate_version IS NULL LIMIT 1"
-        ).fetchone()
-        if missing_head is not None:
-            raise AuthoritySchemaError(
-                "aggregate head does not reference an exact version"
-            )
+        with _validation_stage("aggregate_heads"):
+            missing_head = conn.execute(
+                "SELECT a.aggregate_type,a.aggregate_id,a.current_version "
+                "FROM authority_aggregates a "
+                "LEFT JOIN authority_aggregate_versions v "
+                "ON v.aggregate_type=a.aggregate_type "
+                "AND v.aggregate_id=a.aggregate_id "
+                "AND v.aggregate_version=a.current_version "
+                "WHERE v.aggregate_version IS NULL LIMIT 1"
+            ).fetchone()
+            if missing_head is not None:
+                raise AuthoritySchemaError(
+                    "aggregate head does not reference an exact version"
+                )
 
         # Correlated indexed counts preserve the exact-one invariant without
         # materialising three COUNT(DISTINCT) temporary B-trees during
         # every authority open.
-        incomplete = conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone()
-        if incomplete is not None:
-            raise AuthoritySchemaError(
-                "each command must own one version, audit and event"
-            )
+        with _validation_stage("command_completeness"):
+            incomplete = conn.execute(_INCOMPLETE_COMMAND_QUERY).fetchone()
+            if incomplete is not None:
+                raise AuthoritySchemaError(
+                    "each command must own one version, audit and event"
+                )
 
-        mismatch = conn.execute(
-            "SELECT e.event_id FROM ledger_events e "
-            "JOIN authority_commands c ON c.command_id=e.command_id "
-            "JOIN authority_payloads p ON p.payload_id=e.payload_id "
-            "WHERE e.producer_version != c.producer_version "
-            "OR e.command_definition_version != "
-            "c.command_definition_version "
-            "OR e.command_definition_digest != "
-            "c.command_definition_digest "
-            "OR e.payload_id != c.payload_id "
-            "OR e.payload_mode != p.mode "
-            "OR e.payload_schema_version != p.schema_version "
-            "OR e.payload_schema_contract_version != "
-            "p.schema_contract_version "
-            "OR e.payload_schema_contract_digest != "
-            "p.schema_contract_digest "
-            "OR e.payload_canonicalizer_version != "
-            "p.canonicalizer_implementation_version "
-            "OR e.payload_digest != p.payload_digest "
-            "OR NOT (e.object_admission_id IS p.object_admission_id) "
-            "LIMIT 1"
-        ).fetchone()
-        if mismatch is not None:
-            raise AuthoritySchemaError(
-                "event routing envelope does not match immutable authority"
-            )
+        with _validation_stage("event_routing"):
+            mismatch = conn.execute(
+                "SELECT e.event_id FROM ledger_events e "
+                "JOIN authority_commands c ON c.command_id=e.command_id "
+                "JOIN authority_payloads p ON p.payload_id=e.payload_id "
+                "WHERE e.producer_version != c.producer_version "
+                "OR e.command_definition_version != "
+                "c.command_definition_version "
+                "OR e.command_definition_digest != "
+                "c.command_definition_digest "
+                "OR e.payload_id != c.payload_id "
+                "OR e.payload_mode != p.mode "
+                "OR e.payload_schema_version != p.schema_version "
+                "OR e.payload_schema_contract_version != "
+                "p.schema_contract_version "
+                "OR e.payload_schema_contract_digest != "
+                "p.schema_contract_digest "
+                "OR e.payload_canonicalizer_version != "
+                "p.canonicalizer_implementation_version "
+                "OR e.payload_digest != p.payload_digest "
+                "OR NOT (e.object_admission_id IS p.object_admission_id) "
+                "LIMIT 1"
+            ).fetchone()
+            if mismatch is not None:
+                raise AuthoritySchemaError(
+                    "event routing envelope does not match immutable authority"
+                )
 
     def _validate_immutable_records(
         self, conn: sqlite3.Connection

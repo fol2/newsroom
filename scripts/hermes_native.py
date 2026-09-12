@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import signal
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
@@ -28,6 +29,8 @@ def main(
     argv: Sequence[str] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("newsroom.authority.open").setLevel(logging.INFO)
     if factory is None:
         from newsroom.control_plane.native_composition import deployed_native_service
         factory = deployed_native_service
