@@ -1391,60 +1391,72 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
     def _validate_projection_delivery_rows(
         self, conn: sqlite3.Connection
     ) -> None:
-        attempts_by_delivery: dict[tuple[str, int], list[sqlite3.Row]] = {}
-        for attempt in conn.execute(
+        # Both indexes order one delivery together. Retain only its latest
+        # attempt and a one-row lookahead, rather than the complete history.
+        attempts = iter(conn.execute(
             "SELECT * FROM projection_delivery_attempts "
             "ORDER BY generation_id,ledger_seq,attempt_number"
-        ).fetchall():
-            source = self._require_delivery_source_integrity(conn, attempt)
-            generation = self._generation_row(
-                conn, str(attempt["generation_id"])
-            )
-            family = self._registered_family_definition(
-                conn, str(generation["family_id"])
-            )
-            mapping = self._projection_contracts.mappings.resolve_digest(
-                family.mapping_contract_digest
-            ).resolve(source.event_type)
-            outcome = ProjectionDeliveryOutcome(str(attempt["outcome"]))
-            complete_required = (
-                family.complete_projection_contract_digest is not None
-            )
-            try:
-                self._validate_delivery_outcome(
-                    mapping,
-                    outcome,
-                    complete_required=complete_required,
-                )
-            except ProjectionStateError as exc:
-                raise AuthorityPersistenceError(
-                    "projection delivery attempt violates retained mapping"
-                ) from exc
-            required = (
-                True
-                if complete_required
-                else False if mapping is None else mapping.required
-            )
-            if bool(attempt["required"]) is not required:
-                raise AuthorityPersistenceError(
-                    "projection delivery required flag differs from retained mapping"
-                )
-            key = (str(attempt["generation_id"]), int(attempt["ledger_seq"]))
-            attempts_by_delivery.setdefault(key, []).append(attempt)
-
-        states = conn.execute("SELECT * FROM projection_delivery_states").fetchall()
-        for state in states:
+        ))
+        attempt = next(attempts, None)
+        for state in conn.execute(
+            "SELECT * FROM projection_delivery_states ORDER BY generation_id,ledger_seq"
+        ):
             self._require_delivery_source_integrity(conn, state)
             key = (str(state["generation_id"]), int(state["ledger_seq"]))
-            attempts = attempts_by_delivery.get(key, [])
-            count = int(state["attempt_count"])
-            if len(attempts) != count or [
-                int(item["attempt_number"]) for item in attempts
-            ] != list(range(1, count + 1)):
+            latest = None
+            count = 0
+            while attempt is not None:
+                attempt_key = (str(attempt["generation_id"]), int(attempt["ledger_seq"]))
+                if attempt_key < key:
+                    raise AuthorityPersistenceError(
+                        "projection delivery attempt lacks a delivery head"
+                    )
+                if attempt_key != key:
+                    break
+                source = self._require_delivery_source_integrity(conn, attempt)
+                generation = self._generation_row(
+                    conn, str(attempt["generation_id"])
+                )
+                family = self._registered_family_definition(
+                    conn, str(generation["family_id"])
+                )
+                mapping = self._projection_contracts.mappings.resolve_digest(
+                    family.mapping_contract_digest
+                ).resolve(source.event_type)
+                outcome = ProjectionDeliveryOutcome(str(attempt["outcome"]))
+                complete_required = (
+                    family.complete_projection_contract_digest is not None
+                )
+                try:
+                    self._validate_delivery_outcome(
+                        mapping,
+                        outcome,
+                        complete_required=complete_required,
+                    )
+                except ProjectionStateError as exc:
+                    raise AuthorityPersistenceError(
+                        "projection delivery attempt violates retained mapping"
+                    ) from exc
+                required = (
+                    True
+                    if complete_required
+                    else False if mapping is None else mapping.required
+                )
+                if bool(attempt["required"]) is not required:
+                    raise AuthorityPersistenceError(
+                        "projection delivery required flag differs from retained mapping"
+                    )
+                count += 1
+                if int(attempt["attempt_number"]) != count:
+                    raise AuthorityPersistenceError(
+                        "projection delivery attempt history is not contiguous"
+                    )
+                latest = attempt
+                attempt = next(attempts, None)
+            if latest is None or count != int(state["attempt_count"]):
                 raise AuthorityPersistenceError(
                     "projection delivery attempt history is not contiguous"
                 )
-            latest = attempts[-1]
             comparable = (
                 ("source_event_id", "source_event_id"),
                 ("source_event_digest", "source_event_digest"),
@@ -1477,15 +1489,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     "projection delivery finalized state is inconsistent"
                 )
 
-        state_keys = {
-            (str(state["generation_id"]), int(state["ledger_seq"]))
-            for state in states
-        }
-        orphan_attempt = next(
-            (key for key in attempts_by_delivery if key not in state_keys),
-            None,
-        )
-        if orphan_attempt is not None:
+        if attempt is not None:
             raise AuthorityPersistenceError(
                 "projection delivery attempt lacks a delivery head"
             )

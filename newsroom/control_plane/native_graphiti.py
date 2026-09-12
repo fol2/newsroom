@@ -142,8 +142,9 @@ class NativeGraphitiProcessor:
         self._stop_check()
         terminal_holds = {}
         for unit in units:
-            failures, _dead = graphiti_failure_state(self._connection, unit.ingest_id)
-            if not failures or self._connection.execute(
+            # The authority commits before the private receipt/failure journal.
+            # Inspect it even if a crash left no local failure row.
+            if self._connection.execute(
                 "SELECT 1 FROM unpublished_graphiti_ingest WHERE ingest_id=? AND outcome='COMPLETE'",
                 (unit.ingest_id,),
             ).fetchone() is not None:

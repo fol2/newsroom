@@ -515,8 +515,11 @@ def test_native_advance_settles_only_its_missing_subscription_usage_after_dispat
     connection.close()
 
 
-@pytest.mark.parametrize('outcome', ('MALFORMED_OUTPUT', 'AMBIGUOUS_EFFECT'))
-def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize('outcome', ('MALFORMED_OUTPUT', 'AMBIGUOUS_EFFECT', 'COMPLETE'))
+@pytest.mark.parametrize('local_failure_recorded', (False, True))
+def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(
+    tmp_path, monkeypatch, outcome, local_failure_recorded,
+):
     from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
     from newsroom.control_plane.store import record_graphiti_failure
 
@@ -529,16 +532,20 @@ def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(tmp_path
     processor._system.graphiti = SimpleNamespace(attempt_history=lambda *args, **kwargs: (
         SimpleNamespace(outcome=GraphitiAdapterOutcome(outcome), failure_code='ORIGINAL_FAILURE'),
     ))
-    record_graphiti_failure(connection, ingest_id=unit.ingest_id,
-                            source_id=unit.source_id, item_key=unit.item_key,
-                            outcome=outcome, failure_code='ORIGINAL_FAILURE')
-    connection.commit()
+    if local_failure_recorded:
+        record_graphiti_failure(connection, ingest_id=unit.ingest_id,
+                                source_id=unit.source_id, item_key=unit.item_key,
+                                outcome=outcome, failure_code='ORIGINAL_FAILURE')
+        connection.commit()
     try:
         before = connection.execute('SELECT count(*) FROM ledger').fetchone()[0]
         result, = processor.advance((unit,), cycle_id='native-terminal')
         assert not queued
         assert result.state == 'GRAPHITI_HOLD'
-        assert result.reason == outcome + ':ORIGINAL_FAILURE'
+        assert result.reason == (
+            'RETAINED_COMPLETE_RECONCILIATION_REQUIRED' if outcome == 'COMPLETE'
+            else outcome + ':ORIGINAL_FAILURE'
+        )
         assert connection.execute('SELECT count(*) FROM ledger').fetchone()[0] == before
     finally:
         connection.close()
