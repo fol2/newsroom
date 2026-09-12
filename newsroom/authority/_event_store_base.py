@@ -192,6 +192,9 @@ class _EventStoreBase:
             )
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
+        # Fixed 16 MiB page-cache budget for retained FK lookup locality,
+        # independent of database/page size; not a bound on total process RSS.
+        conn.execute("PRAGMA cache_size=-16384")
 
     def _table_names(self) -> set[str]:
         return {

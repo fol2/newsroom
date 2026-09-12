@@ -871,12 +871,13 @@ class _ObjectStoreBase:
                 f"SELECT {bytes_column},{digest_column} FROM {table}"
             ):
                 data = bytes(row[bytes_column])
-                value = self._decode_canonical_object(data)
+                self._decode_canonical_object(data)
                 expected = str(row[digest_column])
                 # Contract/definition primary identities are digests over the
                 # canonical contract bytes. Other records retain an independent
-                # canonical_digest column.
-                if digest_bytes(canonical_json_bytes(value)) != expected:
+                # canonical_digest column. Decoding already proved these exact
+                # bytes equal the canonical serialisation.
+                if digest_bytes(data) != expected:
                     raise AuthorityPersistenceError(
                         f"immutable {table} canonical digest mismatch"
                     )

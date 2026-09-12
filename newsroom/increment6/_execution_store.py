@@ -896,8 +896,14 @@ class _TriageExecutionStore:
                 raise TriageExecutionAuthorityError(
                     "Worker Attempt predecessor Lease differs"
                 )
-        if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-            raise TriageExecutionAuthorityError("execution authority foreign keys differ")
+        # The owning standalone/native opener checks the whole database once.
+        # Recheck every execution child reference, including cross-domain Work
+        # Item Versions, without rescanning unrelated retained authority rows.
+        for table in sorted(required):
+            if self._connection.execute(
+                f'PRAGMA foreign_key_check("{table}")'
+            ).fetchone() is not None:
+                raise TriageExecutionAuthorityError("execution authority foreign keys differ")
 
 
 class TriageExecutionAuthority:
