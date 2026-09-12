@@ -71,6 +71,10 @@ class NativeQualificationError(ValueError):
     """Raised when retained private-runtime evidence does not qualify."""
 
 
+class NativeQualificationPending(NativeQualificationError):
+    """Valid retained usage remains unknown; no qualification is issued."""
+
+
 @dataclass(frozen=True, slots=True)
 class RetainedNativeQualification:
     runtime_identity_digest: str
@@ -393,6 +397,7 @@ def _invocations(
         selected = [value for value in selected if value in retained_ids]
         if tuple(sorted(selected)) != retained_ids:
             raise NativeQualificationError("native invocation inventory differs")
+    usage_pending = False
     for invocation_id in selected:
         terminal_row = connection.execute(
             "SELECT terminal_digest,usage_status,record_json "
@@ -470,11 +475,16 @@ def _invocations(
             ):
                 raise NativeQualificationError("native usage disposition differs")
             effective = disposition
-        if (
-            effective.get("usage_status") not in {"REPORTED", "ESTIMATED"}
-            or effective.get("policy_breach") is not None
-        ):
+        if effective.get("policy_breach") is not None:
             raise NativeQualificationError("native model usage is unresolved")
+        if effective.get("usage_status") == "UNREPORTED":
+            usage_pending = True
+        elif effective.get("usage_status") not in {"REPORTED", "ESTIMATED"}:
+            raise NativeQualificationError("native model usage is unresolved")
+    # Validate every selected record before deferring: an earlier unknown usage
+    # must not conceal a later corrupt binding or policy breach.
+    if usage_pending:
+        raise NativeQualificationPending("native model usage is unresolved")
     return tuple(sorted(selected))
 
 
@@ -600,6 +610,7 @@ def validate_qualification(
 
 __all__ = [
     "NativeQualificationError",
+    "NativeQualificationPending",
     "RetainedNativeQualification",
     "record_qualification",
     "validate_qualification",

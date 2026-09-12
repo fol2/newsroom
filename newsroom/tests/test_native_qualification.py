@@ -284,6 +284,42 @@ def _conservative_disposition(connection, invocation):
     connection.commit()
 
 
+def test_pending_usage_does_not_hide_a_later_policy_breach(tmp_path):
+    from newsroom.control_plane.native_qualification import NativeQualificationPending
+
+    connection = _open(tmp_path / "pending-and-breach.sqlite3")
+    try:
+        _cycle(connection)
+        _allocation(connection, usage_status="UNREPORTED")
+        _allocation(connection, usage_status="UNREPORTED",
+                    workload=WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING)
+        last = connection.execute(
+            "SELECT invocation_id FROM model_invocation_allocations "
+            "ORDER BY allocated_at DESC,invocation_id DESC LIMIT 1"
+        ).fetchone()[0]
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (last,),
+        ).fetchone()[0])
+        record["policy_breach"] = "INVOCATION_TOTAL_CEILING_EXCEEDED"
+        record["terminal_digest"] = ""
+        record["terminal_digest"] = digest_canonical(record)
+        connection.execute(
+            "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? "
+            "WHERE invocation_id=?",
+            (record["terminal_digest"], canonical_json_bytes(record).decode(), last),
+        )
+        connection.commit()
+        with pytest.raises(NativeQualificationError, match="unresolved") as failure:
+            record_qualification(connection, IDENTITY)
+        assert not isinstance(failure.value, NativeQualificationPending)
+        assert connection.execute(
+            "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_exact_identity_cycle_with_evidenced_hold_qualifies(tmp_path):
     path = tmp_path / "private.sqlite3"
     connection = _open(path)

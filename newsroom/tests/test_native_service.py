@@ -240,6 +240,70 @@ def test_continuous_qualification_failure_closes_without_second_cycle(
         assert terminal == ("COMPLETE",)
 
 
+@pytest.mark.parametrize("settle_after_first_tick,once", [
+    (False, False), (True, False), (False, True),
+])
+def test_unreported_usage_defers_qualification_without_reopening_pipeline(
+    tmp_path, monkeypatch, settle_after_first_tick, once,
+):
+    from newsroom.control_plane.native_qualification import (
+        NativeQualificationPending, record_qualification,
+    )
+    from newsroom.tests.test_native_qualification import (
+        IDENTITY, _allocation, _conservative_disposition, _cycle, _open,
+    )
+
+    connection = _open(tmp_path / "unpublished.sqlite3")
+    journal = _cycle(connection)
+    invocation = _allocation(connection, usage_status="UNREPORTED")
+    original_terminal = connection.execute(
+        "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+        (invocation,),
+    ).fetchone()
+    report = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
+    factory, opened = _pipeline(monkeypatch, lambda _: report)
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = IDENTITY
+            yield pipeline
+
+    waits = []
+
+    def wait(_seconds):
+        waits.append(True)
+        if len(waits) == 1:
+            assert connection.execute(
+                "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+            ).fetchone() == (0,)
+            if settle_after_first_tick:
+                _conservative_disposition(connection, invocation)
+        return len(waits) == 2
+
+    try:
+        service = _service(
+            tmp_path, bound, qualify_once=record_qualification, wait=wait,
+        )
+        if once:
+            with pytest.raises(NativeQualificationPending, match="unresolved"):
+                service.run(once=True)
+            assert waits == []
+        else:
+            result = service.run()
+            assert result.outcome == "COMPLETE" and len(waits) == 2
+        assert opened == ["open", "close"]
+        assert connection.execute(
+            "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+        ).fetchone() == (int(settle_after_first_tick),)
+        assert connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (invocation,),
+        ).fetchone() == original_terminal
+    finally:
+        connection.close()
+
+
 def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, monkeypatch):
     factory, opened = _pipeline(
         monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(RuntimeError("secret")),
