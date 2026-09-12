@@ -1422,6 +1422,36 @@ def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
     }
 
     class Driver:
+        def session(self):
+            driver = self
+
+            class Result:
+                def __init__(self, records: list[dict[str, object]]) -> None:
+                    self.records = records
+
+                async def __aiter__(self):
+                    for record in self.records:
+                        yield record
+
+            class Transaction:
+                async def run(self, query: str, **params: object) -> Result:
+                    records, _, _ = await driver.execute_query(
+                        query, params=params, routing_="w",
+                    )
+                    return Result(records)
+
+            class Session:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    return None
+
+                async def execute_write(self, callback):
+                    await callback(Transaction())
+
+            return Session()
+
         async def execute_query(
             self,
             query: str,
@@ -1648,6 +1678,122 @@ def test_concurrent_guard_begin_has_one_atomic_marker_claim() -> None:
         getattr(result, "state", None) is GuardState.CREATED for result in results
     ) == 1
     assert sum(isinstance(result, GuardError) for result in results) == 1
+
+
+def test_guard_streams_preexisting_validation_in_managed_write_transactions() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    events: list[str] = []
+    node = {
+        "snapshot": {
+            "uuid": "node-1", "embedding": [1.0, 2.0],
+            "_newsroom_source_labels": ["Entity"],
+        },
+        "current": {"uuid": "node-1", "embedding": [1.0, 2.0]},
+        "current_labels": ["Entity"],
+    }
+    relationship = {
+        "snapshot": {
+            "uuid": "relationship-1", "weight": 1.0,
+            "_newsroom_source_uuid": "node-1",
+            "_newsroom_target_uuid": "node-2",
+            "_newsroom_relationship_type": "RELATES_TO",
+        },
+        "current": {"uuid": "relationship-1", "weight": 1.0},
+        "source_uuid": "node-1", "target_uuid": "node-2",
+        "relationship_type": "RELATES_TO",
+    }
+
+    class Result:
+        def __init__(self, records: list[dict[str, object]]) -> None:
+            self.records = records
+
+        def __iter__(self):
+            raise AssertionError("guard validation must not eagerly consume results")
+
+        async def __aiter__(self):
+            for record in self.records:
+                events.append("record")
+                yield record
+
+    class Transaction:
+        async def run(self, query: str, **params: object) -> Result:
+            assert params == {"snapshot_id": "episode-id:1"}
+            return Result([node] if "labels(n) AS current_labels" in query else [relationship])
+
+    class Session:
+        async def __aenter__(self):
+            events.append("session-enter")
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("session-exit")
+
+        async def execute_write(self, callback):
+            events.append("managed-write")
+            await callback(Transaction())
+
+    class Driver:
+        def session(self) -> Session:
+            return Session()
+
+        async def execute_query(self, *_args: object, **_kwargs: object):
+            raise AssertionError("guard validation must use streaming sessions")
+
+    guard = Neo4jMutationGuard(
+        Driver(), group_id="group-id", episode_uuid="episode-id",
+        attempt_number=1, input_digest="sha256:" + "0" * 64,
+    )
+    asyncio.run(guard.assert_preexisting_unchanged())
+    assert events == [
+        "session-enter", "managed-write", "record", "session-exit",
+        "session-enter", "managed-write", "record", "session-exit",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["late-corruption", "cancellation"])
+def test_guard_streaming_validation_closes_session_after_failure(failure: str) -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    exit_error: type[BaseException] | None = None
+
+    class Result:
+        async def __aiter__(self):
+            yield {
+                "snapshot": {"uuid": "node-1", "_newsroom_source_labels": []},
+                "current": {"uuid": "node-1"}, "current_labels": [],
+            }
+            if failure == "cancellation":
+                raise asyncio.CancelledError
+            yield {
+                "snapshot": {"uuid": "node-2", "_newsroom_source_labels": []},
+                "current": {"uuid": "changed"}, "current_labels": [],
+            }
+
+    class Transaction:
+        async def run(self, *_args: object, **_kwargs: object) -> Result:
+            return Result()
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, error, *_args: object) -> None:
+            nonlocal exit_error
+            exit_error = error
+
+        async def execute_write(self, callback):
+            await callback(Transaction())
+
+    guard = Neo4jMutationGuard(
+        SimpleNamespace(session=lambda: Session()), group_id="group-id",
+        episode_uuid="episode-id", attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    error = asyncio.CancelledError if failure == "cancellation" else GuardError
+    with pytest.raises(error, match=None if failure == "cancellation" else "node changed"):
+        asyncio.run(guard.assert_preexisting_unchanged())
+    assert exit_error is error
 
 
 def test_guard_schema_bootstrap_is_explicit_and_separate_from_begin() -> None:

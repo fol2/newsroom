@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -125,6 +125,18 @@ class Neo4jMutationGuard:
             query, params=parameters, routing_="w"
         )
         return list(records)
+
+    async def _stream_query(
+        self, query: str, validate: Callable[[object], None],
+        **parameters: object,
+    ) -> None:
+        async def consume(transaction: Any) -> None:
+            records = await transaction.run(query, **parameters)
+            async for record in records:
+                validate(record)
+
+        async with self._driver.session() as session:
+            await session.execute_write(consume)
 
     def _require_pending_claim(self, records: list[object], *, operation: str) -> None:
         if (
@@ -711,20 +723,7 @@ class Neo4jMutationGuard:
                 )
 
     async def assert_preexisting_unchanged(self) -> None:
-        nodes = await self._query(
-            f"""
-            MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
-            OPTIONAL MATCH (n {{uuid: s._newsroom_source_uuid}})
-            WHERE NOT n:{_SNAPSHOT_NODE}
-              AND NOT n:{_SNAPSHOT_RELATIONSHIP}
-              AND NOT n:{_MARKER}
-            RETURN properties(s) AS snapshot,
-                   properties(n) AS current,
-                   labels(n) AS current_labels
-            """,
-            snapshot_id=self._snapshot_id,
-        )
-        for record in nodes:
+        def validate_node(record: object) -> None:
             snapshot = _record_value(record, "snapshot")
             current = _record_value(record, "current")
             if not isinstance(snapshot, dict) or not isinstance(current, dict):
@@ -743,26 +742,22 @@ class Neo4jMutationGuard:
             if _normalise(expected) != _normalise(current) or expected_labels != current_labels:
                 raise GuardError("a pre-existing Graphiti node changed across the attempt")
 
-        relationships = await self._query(
+        await self._stream_query(
             f"""
-            MATCH (s:{_SNAPSHOT_RELATIONSHIP} {{_newsroom_snapshot_id: $snapshot_id}})
-            OPTIONAL MATCH (a {{uuid: s._newsroom_source_uuid}})
-                  -[r {{uuid: s._newsroom_relationship_uuid}}]->
-                  (b {{uuid: s._newsroom_target_uuid}})
-            WHERE type(r) = s._newsroom_relationship_type
-              AND NOT a:{_SNAPSHOT_NODE} AND NOT b:{_SNAPSHOT_NODE}
-              AND NOT a:{_SNAPSHOT_RELATIONSHIP}
-              AND NOT b:{_SNAPSHOT_RELATIONSHIP}
-              AND NOT a:{_MARKER} AND NOT b:{_MARKER}
+            MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
+            OPTIONAL MATCH (n {{uuid: s._newsroom_source_uuid}})
+            WHERE NOT n:{_SNAPSHOT_NODE}
+              AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT n:{_MARKER}
             RETURN properties(s) AS snapshot,
-                   properties(r) AS current,
-                   a.uuid AS source_uuid,
-                   b.uuid AS target_uuid,
-                   type(r) AS relationship_type
+                   properties(n) AS current,
+                   labels(n) AS current_labels
             """,
+            validate_node,
             snapshot_id=self._snapshot_id,
         )
-        for record in relationships:
+
+        def validate_relationship(record: object) -> None:
             snapshot = _record_value(record, "snapshot")
             current = _record_value(record, "current")
             if not isinstance(snapshot, dict) or not isinstance(current, dict):
@@ -784,6 +779,27 @@ class Neo4jMutationGuard:
                 raise GuardError(
                     "a pre-existing Graphiti relationship changed across the attempt"
                 )
+
+        await self._stream_query(
+            f"""
+            MATCH (s:{_SNAPSHOT_RELATIONSHIP} {{_newsroom_snapshot_id: $snapshot_id}})
+            OPTIONAL MATCH (a {{uuid: s._newsroom_source_uuid}})
+                  -[r {{uuid: s._newsroom_relationship_uuid}}]->
+                  (b {{uuid: s._newsroom_target_uuid}})
+            WHERE type(r) = s._newsroom_relationship_type
+              AND NOT a:{_SNAPSHOT_NODE} AND NOT b:{_SNAPSHOT_NODE}
+              AND NOT a:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT b:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT a:{_MARKER} AND NOT b:{_MARKER}
+            RETURN properties(s) AS snapshot,
+                   properties(r) AS current,
+                   a.uuid AS source_uuid,
+                   b.uuid AS target_uuid,
+                   type(r) AS relationship_type
+            """,
+            validate_relationship,
+            snapshot_id=self._snapshot_id,
+        )
 
     async def complete(self, raw: dict[str, object]) -> None:
         raw_bytes = canonical_json_bytes(raw)
