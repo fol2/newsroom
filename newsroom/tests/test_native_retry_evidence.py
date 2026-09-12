@@ -339,18 +339,18 @@ def test_native_retained_disposition_does_not_replay_growing_revision_history(tm
     )
     _failures(connection, unit)
     replayed, decoded = [], []
-    original_journal = native_progress.NativeRevisionJournal
+    original_init = native_progress.NativeRevisionJournal.__init__
     original_decode = usage_module._envelope_from_record
 
-    def replay(*args, **kwargs):
+    def replay(self, *args, **kwargs):
         replayed.append(True)
-        return original_journal(*args, **kwargs)
+        return original_init(self, *args, **kwargs)
 
     def decode(record):
         decoded.append(record["envelope_id"])
         return original_decode(record)
 
-    monkeypatch.setattr(native_progress, "NativeRevisionJournal", replay)
+    monkeypatch.setattr(native_progress.NativeRevisionJournal, "__init__", replay)
     monkeypatch.setattr(usage_module, "_envelope_from_record", decode)
     for tick in range(2):
         for index in range(10):
@@ -368,9 +368,10 @@ def test_native_retained_disposition_does_not_replay_growing_revision_history(tm
         assert replayed == []
     connection.close()
 
-    # Legacy reads still prove landed-source membership through journal replay.
+    # Legacy reads still prove landed-source membership, now through exact LAND
+    # validation rather than replaying unrelated progress and portfolio history.
     assert service.graphiti_ingest_retry_evidence(ingest_id=unit.ingest_id) == evidence
-    assert replayed == [True]
+    assert replayed == []
     with sqlite3.connect(service.path) as connection:
         record = json.loads(connection.execute(
             "SELECT record_json FROM model_usage_conservative_dispositions WHERE invocation_id=?",

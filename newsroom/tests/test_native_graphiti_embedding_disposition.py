@@ -12,6 +12,7 @@ from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
 from newsroom.control_plane.model_usage import (
     ModelUsageIntegrityError,
     ModelUsageService,
+    UsageComponents,
     UsageStatus,
     WorkEnvelope,
     WorkloadClass,
@@ -35,7 +36,7 @@ MODEL = "openai/text-embedding-3-large"
 
 def _cancelled(tmp_path, monkeypatch, *, connection=None, unit=None,
                land=True, reported=False, dispatched=True, chat=False,
-               input_size=100, other_unresolved=False):
+               input_size=100, other_unresolved=False, other_inflight=False):
     monkeypatch.setattr(
         "newsroom.control_plane.graphiti._graphiti_implementation_identity",
         lambda: ("a" * 40, True),
@@ -80,7 +81,7 @@ def _cancelled(tmp_path, monkeypatch, *, connection=None, unit=None,
     other = (
         observer.before_embedding_invocation(
             provider="openrouter", model=MODEL, input_data=["other exact input"],
-        ) if other_unresolved else None
+        ) if other_unresolved or other_inflight else None
     )
     if dispatched:
         observer.transport_dispatch_started(allocation)
@@ -94,15 +95,16 @@ def _cancelled(tmp_path, monkeypatch, *, connection=None, unit=None,
         if dispatched else {"usage_basis": "NO_PROVIDER_CALL"}
     )
     complete = observer.after_cli_invocation if chat else observer.after_embedding_invocation
-    if other is not None:
+    if other is not None and not other_inflight:
         complete(other, outcome="CANCELLED", usage=value)
     complete(allocation, outcome="CANCELLED", usage=value)
     terminal = usage.terminal(allocation.invocation_id)
-    usage.record_work_outcome(
-        envelope_id=envelope.envelope_id, outcome="GRAPHITI_FAILED",
-        outcome_record_id="fixture-cancelled", payload_digest=None,
-        terminal_at=NOW, stable_reason_codes=("CANCELLED",),
-    )
+    if not other_inflight:
+        usage.record_work_outcome(
+            envelope_id=envelope.envelope_id, outcome="GRAPHITI_FAILED",
+            outcome_record_id="fixture-cancelled", payload_digest=None,
+            terminal_at=NOW, stable_reason_codes=("CANCELLED",),
+        )
     reserve_graphiti_spend(
         connection, spend_id="held-cancellation", ingest_id=unit.ingest_id,
         attempt_number=1, proving_run_id=unit.proving_run_id,
@@ -182,6 +184,12 @@ def test_native_embedding_cancellation_estimates_once_without_releasing_cash(
         assert _invocations(case.connection, case.journal) == (
             case.allocation.invocation_id,
         )
+        retry = case.usage.native_graphiti_ingest_retry_evidence_many(
+            failed_attempts={case.unit.ingest_id: 1}, max_attempts=6,
+        )[case.unit.ingest_id]
+        assert retry.zero_dispatch_attempts == ()
+        assert retry.settled_provider_attempts == (1,)
+        assert retry.unresolved_attempts == ()
     finally:
         case.connection.close()
 
@@ -201,13 +209,14 @@ def test_native_embedding_cancellation_uses_exact_input_bound_when_larger(
         case.connection.close()
 
 
+@pytest.mark.parametrize("field", ["native_scope_digest", "authority_scope"])
 def test_native_qualification_reproves_embedding_disposition_authority(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, field,
 ):
     case = _cancelled(tmp_path, monkeypatch)
     try:
         record = _dispose(case)
-        changed = {**record, "native_scope_digest": digest_canonical({"wrong": "scope"})}
+        changed = {**record, field: digest_canonical({"wrong": "scope"})}
         changed.pop("disposition_digest")
         changed["disposition_digest"] = digest_canonical(changed)
         case.connection.execute(
@@ -219,8 +228,60 @@ def test_native_qualification_reproves_embedding_disposition_authority(
         case.connection.commit()
         with pytest.raises(NativeQualificationError):
             _invocations(case.connection, case.journal)
-        with pytest.raises(ModelUsageIntegrityError):
-            case.usage.route_state(ROUTE)
+        if field == "native_scope_digest":
+            with pytest.raises(ModelUsageIntegrityError):
+                case.usage.route_state(ROUTE)
+        else:
+            assert case.usage.route_state(ROUTE)["state"] == "OPEN"
+    finally:
+        case.connection.close()
+
+
+def test_native_embedding_cancellation_does_not_replay_native_progress(
+    tmp_path, monkeypatch,
+):
+    case = _cancelled(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(
+            NativeRevisionJournal, "__init__",
+            lambda *_args, **_kwargs: pytest.fail("whole native journal replay"),
+        )
+        record = _dispose(case)
+        assert _dispose(case) == record
+        assert case.usage.route_state(ROUTE)["state"] == "CLOSED"
+    finally:
+        case.connection.close()
+
+
+@pytest.mark.parametrize("dispose_first", [False, True])
+def test_exact_later_telemetry_is_not_replaced_or_blocked_by_an_estimate(
+    tmp_path, monkeypatch, dispose_first,
+):
+    case = _cancelled(tmp_path, monkeypatch)
+    try:
+        if dispose_first:
+            _dispose(case)
+        case.usage.reconcile(
+            invocation_id=case.allocation.invocation_id,
+            components=UsageComponents(
+                input_tokens=1, total_tokens=1, provenance="PROVIDER_REPORTED",
+            ),
+            provider_telemetry={"request_id": "later-fixture", "total_tokens": 1},
+            observed_at=NOW + timedelta(seconds=2),
+            raw_telemetry_pointer="fixture://later-provider-receipt",
+        )
+        if not dispose_first:
+            with pytest.raises(ModelUsageIntegrityError):
+                _dispose(case)
+        assert case.usage.terminal(case.allocation.invocation_id) == case.terminal
+        assert case.connection.execute(
+            "SELECT count(*) FROM model_usage_conservative_dispositions"
+        ).fetchone() == (int(dispose_first),)
+        assert _invocations(case.connection, case.journal) == (case.allocation.invocation_id,)
+        assert case.connection.execute(
+            "SELECT status,reserved_gbp_microunits,actual_gbp_microunits "
+            "FROM unpublished_graphiti_spend"
+        ).fetchone() == ("UNRECONCILED", 500_000, None)
     finally:
         case.connection.close()
 
@@ -314,12 +375,13 @@ def test_native_embedding_cancellation_rejects_ineligible_or_changed_evidence(
         connection.close()
 
 
-@pytest.mark.parametrize("blocker", ["explicit-other-cause", "other-unresolved"])
+@pytest.mark.parametrize("blocker", ["explicit-other-cause", "other-unresolved", "other-inflight"])
 def test_native_embedding_cancellation_does_not_release_other_route_causes(
     tmp_path, monkeypatch, blocker,
 ):
     case = _cancelled(
         tmp_path, monkeypatch, other_unresolved=blocker == "other-unresolved",
+        other_inflight=blocker == "other-inflight",
     )
     try:
         if blocker == "explicit-other-cause":

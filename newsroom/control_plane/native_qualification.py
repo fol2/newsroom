@@ -19,8 +19,10 @@ from newsroom.increment9.proving import SOURCE_IDS
 from .govuk_evidence import _api_url
 from .model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
     WorkloadClass,
     _valid_native_embedding_timeout_disposition_record,
+    _valid_native_graphiti_embedding_cancellation_disposition_record,
 )
 from .native_progress import LAND, PORTFOLIO, STATE, NativeRevisionJournal
 from .store import LEDGER_GENESIS, append_ledger
@@ -434,7 +436,7 @@ def _invocations(
             ):
                 raise NativeQualificationError("native usage reconciliation differs")
         disposition_row = connection.execute(
-            "SELECT disposition_digest,terminal_digest,usage_status,record_json "
+            "SELECT disposition_digest,terminal_digest,usage_status,record_json,approved_by "
             "FROM model_usage_conservative_dispositions WHERE invocation_id=?",
             (invocation_id,),
         ).fetchone()
@@ -448,6 +450,15 @@ def _invocations(
                 terminal_record=terminal,
                 disposition_record=disposition,
             )
+            if (
+                disposition_row[4] == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE
+                or disposition.get("authority_scope")
+                == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE
+            ) and not _valid_native_graphiti_embedding_cancellation_disposition_record(
+                connection, allocation_record=allocations[invocation_id],
+                terminal_record=terminal, disposition_record=disposition,
+            ):
+                raise NativeQualificationError("native embedding cancellation disposition differs")
             if (
                 retained_digest != disposition_row[0]
                 or digest_canonical(unsigned) != retained_digest
