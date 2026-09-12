@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -256,9 +257,79 @@ def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version=31")
 
 
+def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:
+    """Losslessly restore the v35 decision representation for downgrade fixtures."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 36:
+        return
+    from newsroom.authority import canonical_json_bytes
+    from newsroom.authority.authorisation_scope_content_migrations import (
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_CHECKSUM,
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_NAME,
+    )
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=36"
+    ).fetchone() != (
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_NAME,
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_CHECKSUM,
+    ):
+        raise sqlite3.DatabaseError("downgrade requires exact v36 scope authority")
+    cursor = connection.execute(
+        "SELECT d.*,s.canonical_bytes AS scopes_bytes FROM authorization_decisions d "
+        "JOIN authorization_scope_contents s USING(scope_content_digest)"
+    )
+    names = tuple(item[0] for item in cursor.description)
+    rows = tuple(dict(zip(names, row, strict=True)) for row in cursor)
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("DROP TRIGGER immutable_authorization_decisions_update")
+    connection.execute("DROP TRIGGER immutable_authorization_decisions_delete")
+    connection.execute("DROP TABLE authorization_decisions")
+    from newsroom.authority.migrations import MIGRATION_STATEMENTS
+    connection.execute(next(statement for statement in MIGRATION_STATEMENTS
+                            if statement.startswith("CREATE TABLE authorization_decisions(")))
+    for row in rows:
+        scopes = json.loads(bytes(row["scopes_bytes"]))
+        value = {
+            "authorization_decision_id": row["authorization_decision_id"],
+            "authentication_context_id": row["authentication_context_id"],
+            "authorization_request_digest": row["authorization_request_digest"],
+            "authorization_policy_version": row["authorization_policy_version"],
+            "effective_scopes": scopes,
+            "effective_scope_digest": row["effective_scope_digest"],
+            "allowed": bool(row["allowed"]), "reason_code": row["reason_code"],
+            "decided_at": row["decided_at"],
+        }
+        connection.execute(
+            "INSERT INTO authorization_decisions VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (row["authorization_decision_id"], row["authentication_context_id"],
+             row["authorization_request_digest"], row["authorization_policy_version"],
+             row["scopes_bytes"], row["effective_scope_digest"], row["allowed"],
+             row["reason_code"], row["decided_at"], canonical_json_bytes(value),
+             row["canonical_digest"]),
+        )
+    connection.execute("DROP TRIGGER immutable_authorization_scope_contents_update")
+    connection.execute("DROP TRIGGER immutable_authorization_scope_contents_delete")
+    connection.execute("DROP TABLE authorization_scope_contents")
+    for prefix in (
+        "CREATE INDEX idx_authorization_decisions_context",
+        "CREATE TRIGGER immutable_authorization_decisions_update",
+        "CREATE TRIGGER immutable_authorization_decisions_delete",
+    ):
+        connection.execute(next(statement for statement in MIGRATION_STATEMENTS
+                                if statement.startswith(prefix)))
+    guard = connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    connection.execute("DELETE FROM authority_migrations WHERE version=36")
+    connection.execute(guard)
+    connection.execute("PRAGMA user_version=35")
+
+
 def _drop_empty_v35_accounted_zero_schema(connection: sqlite3.Connection) -> None:
     """Restore the exact v34 Graphiti attempt CHECK."""
 
+    _drop_v36_shared_scope_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 35:
         return
     from newsroom.authority.graphiti_accounted_zero_migrations import (

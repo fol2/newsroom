@@ -19,6 +19,7 @@ _STREAMED_QUERIES = frozenset(
         "SELECT * FROM command_definitions",
         "SELECT * FROM authentication_contexts",
         "SELECT * FROM authorization_requests",
+        "SELECT * FROM authorization_scope_contents",
         "SELECT * FROM authorization_decisions",
         "SELECT command_id,result_digest,result_bytes FROM authority_commands",
         "SELECT * FROM authority_payloads",

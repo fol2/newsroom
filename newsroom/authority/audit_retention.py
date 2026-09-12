@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import fcntl
-from functools import lru_cache
 import hashlib
 import logging
 import os
@@ -248,13 +247,6 @@ def _unreferenced(parent: str, children: list[tuple[str, str]]) -> str:
 
 
 def _candidates(conn: sqlite3.Connection) -> dict[str, int]:
-    # Scope digest includes the random authentication-context identity. Hash
-    # canonical scope bytes instead; a 32-entry memo avoids hashing the same
-    # observed ~2 KB scope list millions of times while bounding RAM.
-    @lru_cache(maxsize=32)
-    def scope_key(raw: bytes) -> str:
-        return hashlib.sha256(raw).hexdigest()
-    conn.create_function("audit_scope_key", 1, scope_key, deterministic=True)
     conn.execute("""CREATE TEMP TABLE _audit_candidates AS
         SELECT a.rowid AS access_rowid,a.access_decision_id,a.canonical_digest,
                a.authentication_context_id,a.authorization_request_digest,
@@ -263,7 +255,7 @@ def _candidates(conn: sqlite3.Connection) -> dict[str, int]:
                  PARTITION BY a.admission_id,a.hydration_policy_contract_digest,
                     a.principal_id,a.authority_domain,a.purpose,a.byte_offset,
                     a.allowed_bytes,a.state_cutoff_digest,
-                    d.authorization_policy_version,audit_scope_key(d.effective_scopes),
+                    d.authorization_policy_version,d.scope_content_digest,
                     h.authentication_method,h.assurance_class,h.credential_binding_digest
                  ORDER BY a.decided_at DESC,a.rowid DESC
                ) AS reuse_rank

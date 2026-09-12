@@ -521,10 +521,10 @@ def _tamper_relationship_decision(store, decision_id: str) -> None:
     command_id = _relationship_command_id(store, decision_id)
     store._execute_test_sql("DROP TRIGGER immutable_authorization_decisions_update")
     store._execute_test_sql(
-        "UPDATE authorization_decisions SET canonical_bytes=? WHERE "
+        "UPDATE authorization_decisions SET reason_code=? WHERE "
         "authorization_decision_id=(SELECT authorization_decision_id FROM "
         "authority_commands WHERE command_id=?)",
-        (b"{}", command_id),
+        ("TAMPERED", command_id),
     )
 
 

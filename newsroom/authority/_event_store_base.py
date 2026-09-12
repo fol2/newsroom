@@ -361,10 +361,12 @@ class _EventStoreBase:
             "SELECT * FROM authorization_requests"
         ):
             self._request_record_from_row(row)
+        for row in conn.execute("SELECT * FROM authorization_scope_contents"):
+            self._scope_content_from_row(row)
         for row in conn.execute(
             "SELECT * FROM authorization_decisions"
         ):
-            self._decision_record_from_row(row)
+            self._decision_record_from_row(row, connection=conn)
         for row in conn.execute(
             "SELECT command_id,result_digest,result_bytes "
             "FROM authority_commands"
