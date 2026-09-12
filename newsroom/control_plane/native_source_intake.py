@@ -672,7 +672,6 @@ def native_evidence_sources(
                 or observation[1] != unit.observation_digest
             ):
                 raise ValueError("raw observation reference differs")
-            ObjectAccessDecisionId.parse(observation[3])
             root_digest, separator, _child_path = unit.item_key.partition("|")
             if separator == "|" and root_digest.startswith("sha256:"):
                 _require_parent_inventory_binding(
@@ -693,7 +692,7 @@ def native_evidence_sources(
             current = sources.current_summary(
                 SourceDefinitionId.parse(authority.definition_id), proof=proof,
             )
-        except (TypeError, ValueError, LookupError, KeyError):
+        except (TypeError, ValueError, LookupError, KeyError, PermissionError):
             raise hold("NATIVE_SOURCE_AUTHORITY_HOLD") from None
         request = version.request
         roles = tuple(
@@ -727,13 +726,9 @@ def native_evidence_sources(
             if hydrated.data != expected:
                 raise hold("NATIVE_SOURCE_CANONICAL_PAGE_HOLD")
         try:
-            raw_admission_id = ObjectAdmissionId.parse(observation[2])
-            raw_access = objects.latest_access_decision(
-                raw_admission_id,
-                purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+            raw_admission_id, raw_access = _require_observation_access(
+                observation=observation, objects=objects, proof=proof,
             )
-            if raw_access.admission_id != raw_admission_id:
-                raise ValueError("raw observation access differs")
             raw = objects.hydrate(HydrationRequest(
                 raw_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
                 0, raw_access.allowed_bytes,
@@ -761,7 +756,7 @@ def native_evidence_sources(
                     and _utc(document.publication) == unit.published_at
                     and _utc(document.updated) == unit.updated_at
                 )
-        except (TypeError, ValueError, KeyError, UnicodeError):
+        except (TypeError, ValueError, KeyError, UnicodeError, PermissionError):
             raise hold("NATIVE_SOURCE_RAW_OBSERVATION_HOLD") from None
         if (
             digest_bytes(raw) != unit.observation_digest
@@ -801,13 +796,9 @@ def _require_parent_inventory_binding(
     root = observations[root_digest]
     if separator != "|" or root[1] != root_digest:
         raise ValueError("parent inventory reference differs")
-    admission_id = ObjectAdmissionId.parse(root[2])
-    ObjectAccessDecisionId.parse(root[3])
-    access = objects.latest_access_decision(
-        admission_id, purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+    admission_id, access = _require_observation_access(
+        observation=root, objects=objects, proof=proof,
     )
-    if access.admission_id != admission_id:
-        raise ValueError("parent inventory access differs")
     raw = objects.hydrate(HydrationRequest(
         admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE, 0, access.allowed_bytes,
     ), proof=proof).data
@@ -821,30 +812,34 @@ def _require_parent_inventory_binding(
             value for value in observations.values()
             if value[0] == unit.source_definition_url
         )
-        if len(feed_observations) != 1:
+        if not feed_observations:
             raise ValueError("parent feed observation differs")
-        feed = feed_observations[0]
-        feed_admission_id = ObjectAdmissionId.parse(feed[2])
-        ObjectAccessDecisionId.parse(feed[3])
-        feed_access = objects.latest_access_decision(
-            feed_admission_id, purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
-        )
-        feed_raw = objects.hydrate(HydrationRequest(
-            feed_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
-            0, feed_access.allowed_bytes,
-        ), proof=proof).data
         parent_url = _canonical_url_from_api(root[0])
-        if (
-            feed_access.admission_id != feed_admission_id
-            or digest_bytes(feed_raw) != feed[1]
-            or len(tuple(
-                item for item in parse_observation(
-                    source_id=unit.source_id,
-                    url=unit.source_definition_url,
-                    body=feed_raw,
-                ) if item.canonical_url == parent_url
-            )) != 1
-        ):
+        parent_found = False
+        for feed in feed_observations:
+            try:
+                feed_admission_id, feed_access = _require_observation_access(
+                    observation=feed, objects=objects, proof=proof,
+                )
+                feed_raw = objects.hydrate(HydrationRequest(
+                    feed_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
+                    0, feed_access.allowed_bytes,
+                ), proof=proof).data
+                if digest_bytes(feed_raw) != feed[1]:
+                    continue
+                parent_found = any(
+                    item.canonical_url == parent_url
+                    for item in parse_observation(
+                        source_id=unit.source_id,
+                        url=unit.source_definition_url,
+                        body=feed_raw,
+                    )
+                )
+                if parent_found:
+                    break
+            except (TypeError, ValueError, LookupError, KeyError, PermissionError):
+                continue
+        if not parent_found:
             raise ValueError("parent is outside its retained feed inventory")
     try:
         parse_govuk_content_document(
@@ -857,6 +852,28 @@ def _require_parent_inventory_binding(
         raise ValueError("parent inventory is absent")
     if section_path not in child_paths:
         raise ValueError("child is outside its retained parent inventory")
+
+
+def _require_observation_access(*, observation, objects, proof):
+    admission_id = ObjectAdmissionId.parse(observation[2])
+    retained = objects.access_decision(
+        ObjectAccessDecisionId.parse(observation[3]),
+        admission_id=admission_id,
+        purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE,
+        proof=proof,
+    )
+    current = objects.latest_access_decision(
+        admission_id, purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+    )
+    if (
+        retained.admission_id != admission_id
+        or retained.purpose != NATIVE_SOURCE_OBSERVATION_PURPOSE
+        or retained.offset != 0
+        or retained.allowed_bytes != current.allowed_bytes
+        or current.admission_id != admission_id
+    ):
+        raise ValueError("observation access differs")
+    return admission_id, current
 
 
 __all__ = [

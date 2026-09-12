@@ -41,6 +41,21 @@ def test_rehydrate_reuses_exact_receipt_without_recording_diagnostic_reads(tmp_p
         assert _counts(path) == before
 
 
+def test_historical_access_receipt_remains_bound_after_a_fresh_read(tmp_path):
+    with open_object_system(tmp_path / "authority.sqlite3") as system:
+        admission = admit(system, data=b"retained source bytes").admission
+        request = HydrationRequest(admission.admission_id, "project.discovery")
+        first = system.objects.hydrate(request, proof=proof()).decision
+        latest = system.objects.hydrate(request, proof=proof()).decision
+        assert latest.access_decision_id != first.access_decision_id
+        assert system.objects.access_decision(
+            first.access_decision_id,
+            admission_id=admission.admission_id,
+            purpose="project.discovery",
+            proof=proof(),
+        ) == first
+
+
 def test_rehydrate_still_authenticates_and_checks_revocation(tmp_path):
     path = tmp_path / 'authority.sqlite3'
     with open_object_system(path) as system:

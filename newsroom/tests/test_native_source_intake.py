@@ -679,6 +679,40 @@ def test_feed_child_replay_and_parent_lineage_fail_closed(tmp_path, monkeypatch)
         unit = first.units[0]
         observations = {item[1]: item for item in first.observations}
         root_digest = unit.item_key.split("|", 1)[0]
+        feed_digest = next(
+            digest for digest, value in observations.items()
+            if value[0] == SOURCE_URLS["UK-01"]
+        )
+
+        for target_digest, replacement_digest, reason in (
+            (unit.observation_digest, root_digest, "NATIVE_SOURCE_RAW_OBSERVATION_HOLD"),
+            (root_digest, feed_digest, "NATIVE_SOURCE_AUTHORITY_HOLD"),
+            (feed_digest, unit.observation_digest, "NATIVE_SOURCE_AUTHORITY_HOLD"),
+        ):
+            wrong_access = dict(observations)
+            wrong_access[target_digest] = (
+                *wrong_access[target_digest][:3], observations[replacement_digest][3],
+            )
+            with pytest.raises(NativeEvidenceHold, match=reason):
+                native_evidence_sources(
+                    units=first.units, sources=runtime.authority.sources,
+                    objects=runtime.authority.objects, observations=wrong_access,
+                    licence=_licence(), proof=runtime.proof,
+                )
+
+        changed_feed = _atom_for(parent_path).replace(
+            b"The official deadline changed.", b"A later feed summary.",
+        )
+        bodies[SOURCE_URLS["UK-01"]] = changed_feed
+        changed = intake.poll()[0]
+        assert changed.status == "READY"
+        feed_history = dict(observations)
+        feed_history.update({item[1]: item for item in changed.observations})
+        assert native_evidence_sources(
+            units=first.units, sources=runtime.authority.sources,
+            objects=runtime.authority.objects, observations=feed_history,
+            licence=_licence(), proof=runtime.proof,
+        )
 
         with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_AUTHORITY_HOLD"):
             native_evidence_sources(
