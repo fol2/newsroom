@@ -16,12 +16,17 @@ from scripts.hermes_native import main
 from newsroom.authority.canonical import digest_canonical
 
 
+@pytest.mark.parametrize("pending", [
+    "QUEUED", "GRAPHITI_COMPLETE", "ASSESSMENT_INTERRUPTED",
+    "ASSESSMENT_STARTED", "PUBLICATION_STARTED",
+])
 def test_pending_service_reports_continue_same_open_and_qualify_only_when_terminal(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, pending,
 ):
     reports = iter((
-        NativePipelineReport((), {"QUEUED": 1}, 1),
-        NativePipelineReport((), {"GRAPHITI_COMPLETE": 1}, 0),
+        NativePipelineReport((), {pending: 1}, int(pending == "QUEUED")),
+        NativePipelineReport((), {pending: 1}, int(pending == "QUEUED")),
+        NativePipelineReport((), {"ACKNOWLEDGED": 1}, 0),
         NativePipelineReport((), {"ACKNOWLEDGED": 1}, 0),
     ))
     order = []
@@ -39,12 +44,12 @@ def test_pending_service_reports_continue_same_open_and_qualify_only_when_termin
     waits = []
     result = _service(
         tmp_path, bound,
-        cycle_id_factory=iter(("queued", "graphiti", "ack")).__next__,
+        cycle_id_factory=iter(("pending", "continuing", "ack", "unchanged")).__next__,
         qualify_once=lambda *_: order.append("qualified"),
-        wait=lambda _: waits.append(True) or len(waits) == 3,
+        wait=lambda _: waits.append(True) or len(waits) == 4,
     ).run()
     assert result.pipeline.revision_states == {"ACKNOWLEDGED": 1}
-    assert order == ["queued", "graphiti", "ack", "qualified"]
+    assert order == ["pending", "continuing", "ack", "qualified", "unchanged"]
     assert opened == ["open", "close"]
 
 
@@ -463,3 +468,73 @@ def test_malformed_pending_report_does_not_silently_defer_qualification(tmp_path
         _service(tmp_path, factory, qualify_once=lambda *_: pytest.fail("invalid qualification"),
                  wait=lambda _: pytest.fail("invalid report was silently deferred")).run()
     assert opened == ["open", "close"]
+
+
+def test_unknown_assessment_continues_same_open_without_redispatch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from newsroom.control_plane.native_evidence import NativeEvidenceController
+    from newsroom.control_plane.native_progress import NativeRevisionJournal
+    from newsroom.control_plane.native_publication import NativePublicationContinuation
+    from newsroom.control_plane.store import connect
+    from newsroom.tests.authority_helpers import proof
+    from newsroom.tests.test_native_graphiti import _native
+    from newsroom.tests.test_native_publication_continuation import _Authority, _Publication, _source
+
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    unit = _native()
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="ASSESSMENT_STARTED", facts={
+        "candidate_version_id": "candidate-version", "intake_receipt_id": "intake-receipt",
+        "assessment_started_at": "2026-09-08T12:01:00Z", "acquisition_attempt_count": 1,
+    })
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain",
+                        lambda *_args, **_kwargs: pytest.fail("unknown effect was retried"))
+    runtime = SimpleNamespace(
+        authority=_Authority(), ingress=object(), publication=_Publication(),
+        proof=proof(), policies=SimpleNamespace(publication=object()),
+    )
+    continuation = NativePublicationContinuation(
+        journal=journal, runtime=runtime,
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+    )
+    order = []
+
+    def tick(cycle):
+        order.append(cycle)
+        if cycle in {"pending", "continuing"}:
+            result = continuation.advance(revision_id=unit.revision_id, candidate_version_id="candidate-version")
+            assert result.state == "ASSESSMENT_INTERRUPTED"
+        elif cycle == "settled":
+            # Fixture receipt of a later terminal disposition, not a retry or
+            # permission to manufacture one in the service readiness predicate.
+            journal.advance(unit.revision_id, stage="EVIDENCE_HOLD", facts={
+                **journal.progress[unit.revision_id]["facts"], "reason": "SOURCE_LOCAL_EVIDENCE_HOLD",
+            })
+        return NativePipelineReport((), {journal.progress[unit.revision_id]["stage"]: 1}, 0)
+
+    factory, opened = _pipeline(monkeypatch, tick)
+    identity = digest_canonical({"runtime": "unknown-assessment-continuation"})
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = identity
+            yield pipeline
+
+    waits = []
+    try:
+        result = _service(
+            tmp_path, bound,
+            cycle_id_factory=iter(("pending", "continuing", "settled", "unchanged")).__next__,
+            qualify_once=lambda *_: order.append("qualified"),
+            wait=lambda _: waits.append(True) or len(waits) == 4,
+        ).run()
+        assert result.pipeline.revision_states == {"EVIDENCE_HOLD": 1}
+        assert order == ["pending", "continuing", "settled", "qualified", "unchanged"]
+        assert opened == ["open", "close"]
+        assert journal.progress[unit.revision_id]["facts"]["acquisition_attempt_count"] == 1
+        assert runtime.authority.receives == 0 and runtime.publication.calls == 0
+    finally:
+        connection.close()

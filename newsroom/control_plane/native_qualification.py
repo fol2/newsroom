@@ -88,9 +88,17 @@ def _is_terminal_revision_state(value: object) -> bool:
 
 
 def qualification_report_ready(states: object, unclassified: object) -> bool:
-    """Defer only ordinary queued work; malformed inventories still fail."""
+    """Defer durable continuations; malformed inventories still fail."""
 
-    pending = {"QUEUED", "GRAPHITI_COMPLETE"}
+    # Existing journal checkpoints emitted by native_pipeline, native_retrieval
+    # and native_publication. Unknown effects remain pending, not qualified.
+    pending = {
+        "QUEUED", "GRAPHITI_COMPLETE", "EMBEDDING_STARTED", "EMBEDDING_RETAINED",
+        "DOCUMENT_RETAINED", "RETRIEVAL_COMPLETE", "CANDIDATE_ADMITTED",
+        "ASSESSMENT_CONTRACT_REVALIDATION", "INTAKE_REQUESTED", "INTAKE_ACKNOWLEDGED",
+        "ACQUISITION_STARTED", "ASSESSMENT_STARTED", "ASSESSMENT_INTERRUPTED",
+        "EVIDENCE_RETAINED", "PUBLICATION_PREPARED", "PUBLICATION_STARTED",
+    }
     if (
         type(states) is not dict
         or any(

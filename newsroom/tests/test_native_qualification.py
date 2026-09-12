@@ -596,7 +596,7 @@ def test_qualification_readiness_defers_only_valid_pending_reports(states, uncla
 
 
 @pytest.mark.parametrize("states,unclassified", [
-    ({"UNKNOWN": 1}, 0), ({"ASSESSMENT_STARTED": 1}, 0),
+    ({"UNKNOWN": 1}, 0), ({"ASSESSMENT_START": 1}, 0),
     ({"QUEUED": 0}, 0), ({"QUEUED": -1}, -1), ({"QUEUED": True}, 1),
     ({"GRAPHITI_COMPLETE": "1"}, 0), ({"QUEUED": 1}, 0),
     ({"ACKNOWLEDGED": 1}, 1), ({"ACKNOWLEDGED": 1}, False),
@@ -607,3 +607,28 @@ def test_qualification_readiness_rejects_malformed_or_unknown_reports(states, un
 
     with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
         qualification_report_ready(states, unclassified)
+
+
+# Exact checkpoints emitted by native_pipeline, native_retrieval and
+# native_publication; these are continuation states, never qualification PASS.
+_PENDING_CHECKPOINTS = (
+    "QUEUED", "GRAPHITI_COMPLETE", "EMBEDDING_STARTED", "EMBEDDING_RETAINED",
+    "DOCUMENT_RETAINED", "RETRIEVAL_COMPLETE", "CANDIDATE_ADMITTED",
+    "ASSESSMENT_CONTRACT_REVALIDATION", "INTAKE_REQUESTED", "INTAKE_ACKNOWLEDGED",
+    "ACQUISITION_STARTED", "ASSESSMENT_STARTED", "ASSESSMENT_INTERRUPTED",
+    "EVIDENCE_RETAINED", "PUBLICATION_PREPARED", "PUBLICATION_STARTED",
+)
+
+
+@pytest.mark.parametrize("stage", _PENDING_CHECKPOINTS)
+def test_durable_continuation_defers_readiness_but_never_qualifies(tmp_path, stage):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    assert qualification_report_ready({stage: 1}, int(stage == "QUEUED")) is False
+    connection = _open(tmp_path / "pending.sqlite3")
+    try:
+        _cycle(connection, revision_state=stage)
+        with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
+            record_qualification(connection, IDENTITY)
+    finally:
+        connection.close()
