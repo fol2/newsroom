@@ -80,6 +80,7 @@ from newsroom.control_plane.model_usage import (
     InvocationTerminal,
     ModelUsageAdmissionError,
     ModelUsageService,
+    native_graphiti_usage_cycle_id,
     UsageComponents,
     UsageStatus,
     WorkEnvelope,
@@ -802,20 +803,28 @@ def _queue(
     model_usage: ModelUsageService | None = None,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
+    pending = []
     for unit in units:
-        if has_graphiti_ingest(unpublished, unit.ingest_id):
+        ingest_id = unit.ingest_id
+        if has_graphiti_ingest(unpublished, ingest_id):
             continue
-        retries, dead = graphiti_failure_state(unpublished, unit.ingest_id)
+        retries, dead = graphiti_failure_state(unpublished, ingest_id)
+        if dead and (
+            model_usage is None or unit.authority is None
+            or unit.proving_run_id != f"native-source:{unit.observation_digest}"
+        ):
+            continue
+        pending.append((unit, ingest_id, retries, dead))
+    failed_attempts = {ingest_id: retries for _, ingest_id, retries, dead in pending if dead}
+    retry_evidence = (
+        model_usage.native_graphiti_ingest_retry_evidence_many(
+            failed_attempts=failed_attempts, max_attempts=2 * GRAPHITI_MAX_FAILURES,
+        )
+        if model_usage is not None and failed_attempts else {}
+    )
+    for unit, ingest_id, retries, dead in pending:
         if dead:
-            if (
-                model_usage is None
-                or unit.authority is None
-                or unit.proving_run_id != f"native-source:{unit.observation_digest}"
-            ):
-                continue
-            evidence = model_usage.graphiti_ingest_retry_evidence(
-                ingest_id=unit.ingest_id,
-            )
+            evidence = retry_evidence[ingest_id]
             # Credit only proved local refusals in the original allowance.
             # Later failures cannot mint further credits: at most three useful
             # provider attempts and six total attempts, with history intact.
@@ -828,7 +837,7 @@ def _queue(
                 evidence.unresolved_attempts
                 or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
                 or retries >= limit
-                or next_graphiti_attempt_number(unpublished, unit.ingest_id) > limit
+                or next_graphiti_attempt_number(unpublished, ingest_id) > limit
             ):
                 continue
         if (
@@ -843,7 +852,7 @@ def _queue(
                 unit.revision_id,
                 unit.chunk_ordinal,
                 retries,
-                unit.ingest_id,
+                ingest_id,
                 unit,
             )
         )
@@ -1148,12 +1157,8 @@ def _graphiti_usage_cycle_id(
     unit: CorpusIngestUnit, *, attempt_number: int, requested_cycle_id: str | None
 ) -> str:
     if unit.proving_run_id == f"native-source:{unit.observation_digest}":
-        return digest_canonical(
-            {
-                "namespace": "native-graphiti-model-usage-attempt-v1",
-                "ingest_id": unit.ingest_id,
-                "attempt_number": attempt_number,
-            }
+        return native_graphiti_usage_cycle_id(
+            ingest_id=unit.ingest_id, attempt_number=attempt_number,
         )
     return requested_cycle_id or unit.proving_run_id
 

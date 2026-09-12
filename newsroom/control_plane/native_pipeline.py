@@ -10,6 +10,7 @@ from typing import ContextManager
 from newsroom.authority import UtcTimestamp
 
 from .native_cycle import advance_native_cycle
+from .native_assessor import assessment_revalidation_due
 from .native_progress import NativeRevisionJournal
 from .veto import OperatorDrainRequested, VetoError
 
@@ -35,14 +36,20 @@ class NativePipeline:
         stop_fence: Callable[[], ContextManager[None]],
         refresh_rights: Callable[[], None] = lambda: None,
         operator_drain_requested: Callable[[], bool] = lambda: False,
+        assessment_contract_version: str | None = None,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
+        if assessment_contract_version is not None and (
+            type(assessment_contract_version) is not str or not assessment_contract_version
+        ):
+            raise ValueError("native assessment contract version differs")
         self._runtime, self._journal = runtime, journal
         self._intake, self._graphiti, self._discovery = source_intake, graphiti, discovery
         self._retrieval_for, self._collision, self._publish = retrieval_for, collision, publish
         self._actor, self._check, self._fence, self._clock = actor_identity_digest, stop_check, stop_fence, clock
         self._refresh_rights = refresh_rights
         self._operator_drain_requested = operator_drain_requested
+        self._assessment_contract_version = assessment_contract_version
         self.runtime_identity_digest: str | None = None
 
     def _drain_between_work(self) -> None:
@@ -167,6 +174,9 @@ class NativePipeline:
                     "GOVUK_LICENCE_REVIEW_HOLD", "NATIVE_SOURCE_RIGHTS_HOLD",
                     "PUBLICATION_RIGHTS_HOLD",
                 }
+                and not assessment_revalidation_due(
+                    previous.get("facts", {}), self._assessment_contract_version,
+                )
             ):
                 continue
             facts = dict(previous.get("facts", {}))

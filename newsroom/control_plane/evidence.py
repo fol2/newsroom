@@ -233,6 +233,8 @@ _OWNER_APPROVED_ENTITY_REGISTRY = {
     "廣州": "PLACE",
     "巴黎": "PLACE",
     "英國": "PLACE",
+    "UK": "PLACE",
+    "Hong Kong": "PLACE",
     "香港政府": "ORGANISATION",
     "運輸署": "ORGANISATION",
     "教育局": "ORGANISATION",
@@ -243,6 +245,9 @@ _OWNER_APPROVED_ENTITY_REGISTRY = {
     "Housing Authority": "ORGANISATION",
     "EUSS": "OFFICIAL_TERM",
     "Universal Credit": "OFFICIAL_TERM",
+    "British National (Overseas)": "OFFICIAL_TERM",
+    "ATAS": "OFFICIAL_TERM",
+    "eVisa": "OFFICIAL_TERM",
 }
 _ENGLISH_ORGANISATION_ACTION_WORDS = frozenset(
     {
@@ -352,12 +357,38 @@ def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
     return text.endswith(suffixes.get(entity_type, ()))
 
 
+def _entity_pattern(entity: str) -> str:
+    # Latin identifiers may touch Chinese copy, but not a different Latin word.
+    return (
+        (r"(?<![A-Za-z0-9_])" if entity[0].isascii() else "")
+        + re.escape(entity)
+        + (r"(?![A-Za-z0-9_])" if entity[-1].isascii() else "")
+    )
+
+
+def rendered_named_entities(
+    text: str, source_entities: frozenset[tuple[str, str]],
+) -> frozenset[tuple[str, str]]:
+    """Preserve exact source names without requiring their English verb context.
+
+    The caller derives this inventory independently from the claim and excerpt.
+    Other recognised entities remain visible; unrecognised Latin prose still
+    fails the separate Hong Kong rendering check.
+    """
+    retained = set()
+    for entity, kind in sorted(source_entities, key=lambda item: (-len(item[0]), item)):
+        text, count = re.subn(_entity_pattern(entity), " ", text)
+        if count:
+            retained.add((entity, kind))
+    return frozenset(retained) | bounded_named_entities(text)
+
+
 def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
     """Extract only closed, structurally recognisable entity spans."""
 
     candidates: list[tuple[int, int, str, str]] = []
     for entity, entity_type in _OWNER_APPROVED_ENTITY_REGISTRY.items():
-        for match in re.finditer(re.escape(entity), text):
+        for match in re.finditer(_entity_pattern(entity), text):
             candidates.append((match.start(), match.end(), entity, entity_type))
     english_person = re.compile(
         r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})"

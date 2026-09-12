@@ -22,8 +22,9 @@ STATE = "NATIVE_REVISION_PROGRESS"
 PORTFOLIO = "NATIVE_SOURCE_PORTFOLIO"
 
 
-def _unit(value: dict) -> CorpusIngestUnit:
+def _unit(value: dict, bodies: dict[str, str]) -> CorpusIngestUnit:
     value = dict(value)
+    value["body"] = bodies.setdefault(value["body"], value["body"])
     value["effective_revision"] = EffectiveRevisionIdentity(**value["effective_revision"])
     authority = dict(value["authority"])
     authority["records"] = tuple(authority["records"])
@@ -53,7 +54,10 @@ class NativeRevisionJournal:
 
     def _apply(self, kind: str, value: dict) -> None:
         if kind == LAND:
-            units = tuple(_unit(item) for item in value["units"])
+            # Chunk receipts repeat the full source body. Share exact-equal text
+            # in this revision only; retain and validate the original ledger bytes.
+            bodies: dict[str, str] = {}
+            units = tuple(_unit(item, bodies) for item in value["units"])
             self._validate_units(units)
             revision_id = units[0].revision_id
             if value["revision_id"] != revision_id:

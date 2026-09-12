@@ -25,6 +25,7 @@ from newsroom.control_plane.evidence import (
     QualificationEvidence,
     _canonical_localised_fact,
     bounded_named_entities,
+    rendered_named_entities,
 )
 from newsroom.control_plane.zh_hant import (
     ZH_HANT_HK_SHAPE_POLICY_VERSION,
@@ -843,7 +844,11 @@ class DeterministicWriteAdmission:
                 (text, entity_type)
                 for text, entity_type, _record_id in item.named_entity_evidence
             )
-            or bounded_named_entities(item.rendered_assertion_zh_hant_hk)
+            or rendered_named_entities(
+                item.rendered_assertion_zh_hant_hk,
+                bounded_named_entities(item.claim)
+                | bounded_named_entities(item.supporting_excerpt),
+            )
             != frozenset(
                 (text, entity_type)
                 for text, (_source, entity_type, _record_id) in zip(

@@ -46,6 +46,19 @@ def test_native_journal_retains_old_binding_on_unchanged_reobservation(tmp_path)
     connection.close()
 
 
+def test_native_journal_reopen_retains_one_body_per_multichunk_revision(tmp_path):
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    unit = replace(_native(), body="A complete retained paragraph. " * 1000, chunk_count=3)
+    units = tuple(replace(unit, chunk_ordinal=ordinal) for ordinal in range(1, 4))
+    NativeRevisionJournal(connection).land(units)
+    reopened = NativeRevisionJournal(connection)
+    retained = reopened.units[unit.revision_id]
+    assert retained == units
+    # Every chunk owns its identity, not a second copy of the full source body.
+    assert len({id(item.body) for item in retained}) == 1
+    connection.close()
+
+
 def test_native_journal_rejects_tampered_payload_on_reopen(tmp_path):
     connection = connect(str(tmp_path / "private.sqlite3"))
     NativeRevisionJournal(connection).land((_native(),))

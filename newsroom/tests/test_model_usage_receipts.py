@@ -2067,6 +2067,106 @@ def test_graphiti_retry_evidence_classifies_zero_settled_and_active_attempts(
     ).unresolved_attempts == (3,)
 
 
+def test_graphiti_retry_evidence_batch_authenticates_history_once(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY, provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE, model="composer-2.5",
+        hard_estimate_ceiling_tokens=None,
+    )
+    service.register_policy(policy)
+    for ingest_id in ("selected-ingest", "second-ingest", "unrelated-ingest"):
+        envelope = _envelope(
+            cycle_id=ingest_id, workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            candidate_id=None, ingest_id=ingest_id,
+        )
+        service.open_envelope(envelope)
+        allocation = _allocation(envelope, policy, request=ingest_id)
+        service.allocate(allocation, owner_emergency_stop=False)
+        if ingest_id == "second-ingest":
+            terminal = service.complete(InvocationTerminal.create(
+                invocation_id=allocation.invocation_id,
+                outcome="DISPATCH_FENCE_REFUSED", failure_class="DISPATCH_FENCE_REFUSED",
+                usage_status=UsageStatus.REPORTED,
+                components=UsageComponents(total_tokens=0, provenance="CLI_DERIVED"),
+                dispatch_at=None, completed_at=T0 + timedelta(seconds=2),
+                observed_at=T0 + timedelta(seconds=2), pre_dispatch_zero_proved=True,
+                subscription_cli_chat_not_cash_debited=True,
+            ))
+            service.record_work_outcome(
+                envelope_id=envelope.envelope_id, outcome="GRAPHITI_FAILED",
+                outcome_record_id="second-outcome", payload_digest=None,
+                terminal_at=terminal.completed_at,
+            )
+    decoded_envelopes, decoded_allocations = [], []
+    envelope_decode = model_usage_module._envelope_from_record
+    allocation_decode = model_usage_module._allocation_from_record
+
+    def decode_envelope(record):
+        decoded_envelopes.append(record["ingest_id"])
+        return envelope_decode(record)
+
+    def decode_allocation(record):
+        decoded_allocations.append(record["cycle_id"])
+        return allocation_decode(record)
+
+    monkeypatch.setattr(model_usage_module, "_envelope_from_record", decode_envelope)
+    monkeypatch.setattr(model_usage_module, "_allocation_from_record", decode_allocation)
+    evidence = service.graphiti_ingest_retry_evidence_many(
+        ingest_ids=("selected-ingest", "second-ingest", "absent-ingest"),
+    )
+    assert evidence["selected-ingest"].attempt_numbers == evidence["selected-ingest"].unresolved_attempts == (1,)
+    assert evidence["second-ingest"].attempt_numbers == evidence["second-ingest"].zero_dispatch_attempts == (1,)
+    assert evidence["second-ingest"].unresolved_attempts == ()
+    assert evidence["absent-ingest"].attempt_numbers == ()
+    assert sorted(decoded_envelopes) == sorted(decoded_allocations) == [
+        "second-ingest", "selected-ingest", "unrelated-ingest",
+    ]
+
+
+@pytest.mark.parametrize("table,field", (
+    ("model_work_envelopes", "ingest_id"),
+    ("model_work_envelopes", "graphiti_attempt_id"),
+    ("model_work_envelopes", "both-identities"),
+    ("model_invocation_allocations", "envelope_id"),
+    ("model_work_outcomes", "envelope_id"),
+))
+def test_graphiti_retry_evidence_rejects_selected_identity_rebinding(tmp_path, table, field):
+    service = _service(tmp_path)
+    selected, unrelated = (
+        _envelope(cycle_id=name, workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                  candidate_id=None, ingest_id=name)
+        for name in ("selected-ingest", "unrelated-ingest")
+    )
+    service.open_envelope(selected)
+    service.open_envelope(unrelated)
+    if table == "model_invocation_allocations":
+        policy = _policy(
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY, provider="cursor-agent-cli",
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE, model="composer-2.5",
+            hard_estimate_ceiling_tokens=None,
+        )
+        service.register_policy(policy)
+        service.allocate(_allocation(selected, policy), owner_emergency_stop=False)
+    if table == "model_work_outcomes":
+        service.record_work_outcome(
+            envelope_id=selected.envelope_id, outcome="GRAPHITI_FAILED",
+            outcome_record_id="controller-refusal", payload_digest=None, terminal_at=T0,
+        )
+    with sqlite3.connect(service.path) as connection:
+        if table == "model_work_envelopes":
+            record = selected.as_record()
+            for key in ("ingest_id", "graphiti_attempt_id") if field == "both-identities" else (field,):
+                record[key] = unrelated.as_record()[key]
+            connection.execute("UPDATE model_work_envelopes SET record_json=? WHERE envelope_id=?",
+                               (json.dumps(record), selected.envelope_id))
+        else:
+            connection.execute(f"UPDATE {table} SET envelope_id=? WHERE envelope_id=?",
+                               (unrelated.envelope_id, selected.envelope_id))
+    with pytest.raises(ModelUsageIntegrityError):
+        service.graphiti_ingest_retry_evidence(ingest_id="selected-ingest")
+
+
 def test_native_conservative_disposition_uses_qualified_policy_bound(
     tmp_path: Path,
 ) -> None:

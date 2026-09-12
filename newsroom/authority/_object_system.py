@@ -80,6 +80,7 @@ class GovernedObjects:
     __slots__ = (
         "__admit",
         "__hydrate",
+        "__rehydrate",
         "__latest_access_decision",
         "__revoke",
         "__request_deletion",
@@ -95,6 +96,7 @@ class GovernedObjects:
         *,
         admit: Callable[[ObjectAdmissionRequest, _Source, AuthenticationProof], ObjectAdmissionResult],
         hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
+        rehydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
         latest_access_decision: Callable[
             [ObjectAdmissionId, str, AuthenticationProof],
             ObjectAccessDecisionView,
@@ -109,6 +111,7 @@ class GovernedObjects:
     ) -> None:
         self.__admit = admit
         self.__hydrate = hydrate
+        self.__rehydrate = rehydrate
         self.__latest_access_decision = latest_access_decision
         self.__revoke = revoke
         self.__request_deletion = request_deletion
@@ -132,16 +135,29 @@ class GovernedObjects:
     ) -> HydratedObject:
         return self.__hydrate(request, proof)
 
+    def rehydrate(
+        self, request: HydrationRequest, *, proof: AuthenticationProof
+    ) -> HydratedObject:
+        """Revalidate a read, retaining its prior exact access receipt if unchanged.
+
+        Authentication, authorisation, current rights and bytes are checked on
+        every call. This is receipt reuse, not an audit of a new delivery.
+        """
+        return self.__rehydrate(request, proof)
+
     def _bind_composed_hydrate(
         self,
         hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
         *,
         _token: object,
+        rehydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
     ) -> None:
         """Bind hydration to the private cumulative-store transaction seam."""
-        if _token is not _OBJECT_COMPOSITION_TOKEN or not callable(hydrate):
+        if (_token is not _OBJECT_COMPOSITION_TOKEN
+                or not callable(hydrate) or not callable(rehydrate)):
             raise TypeError("governed object composition is private")
         self.__hydrate = hydrate
+        self.__rehydrate = rehydrate
 
     def latest_access_decision(
         self,
@@ -640,6 +656,14 @@ class _ObjectBoundary:
     ) -> HydratedObject:
         return self._hydrate(request, proof, in_transaction=False)
 
+    def rehydrate(
+        self, request: HydrationRequest, proof: AuthenticationProof,
+        *, in_transaction: bool = False,
+    ) -> HydratedObject:
+        return self._hydrate(
+            request, proof, in_transaction=in_transaction, reuse_retained=True
+        )
+
     def hydrate_in_transaction(
         self, request: HydrationRequest, proof: AuthenticationProof
     ) -> HydratedObject:
@@ -652,6 +676,7 @@ class _ObjectBoundary:
         proof: AuthenticationProof,
         *,
         in_transaction: bool,
+        reuse_retained: bool = False,
     ) -> HydratedObject:
         if not isinstance(request, HydrationRequest):
             raise TypeError("request must be HydrationRequest")
@@ -693,7 +718,7 @@ class _ObjectBoundary:
             decided_at=now,
         )
         data, decision = self._store.hydrate(
-            grant, in_transaction=in_transaction
+            grant, in_transaction=in_transaction, reuse_retained=reuse_retained
         )
         return HydratedObject(data=data, decision=decision)
 
@@ -1073,6 +1098,7 @@ def open_governed_object_authority_system(
             objects=GovernedObjects(
                 admit=boundary.admit,
                 hydrate=boundary.hydrate,
+                rehydrate=boundary.rehydrate,
                 latest_access_decision=boundary.latest_access_decision,
                 revoke=boundary.revoke,
                 request_deletion=boundary.request_deletion,

@@ -529,6 +529,7 @@ def _open_with_adapter(
             objects=GovernedObjects(
                 admit=object_boundary.admit,
                 hydrate=object_boundary.hydrate,
+                rehydrate=object_boundary.rehydrate,
                 latest_access_decision=(
                     object_boundary.latest_access_decision
                 ),

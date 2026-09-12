@@ -455,6 +455,16 @@ def test_native_documents_admit_retain_context_and_reopen(
                 ).require(receipt).context_id == receipt.context_id
                 assert root._connection.execute(
                     "SELECT COUNT(*) FROM object_access_decisions"
+                ).fetchone()[0] == access_count
+                # A new delivery is still audited and rolls back with the
+                # cumulative transaction; readback alone adds no diagnostics.
+                from newsroom.authority import HydrationRequest
+                runtime.authority.objects.hydrate(
+                    HydrationRequest(receipt.admission_id, "TRIAGE_RETRIEVAL"),
+                    proof=runtime.proof,
+                )
+                assert root._connection.execute(
+                    "SELECT COUNT(*) FROM object_access_decisions"
                 ).fetchone()[0] > access_count
                 raise RuntimeError("force outer rollback")
         assert root._connection.execute(

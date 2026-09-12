@@ -677,6 +677,14 @@ class NativeEvidenceController:
 
     @staticmethod
     def _records(base, package, sources, acquired, assessment):
+        if not (
+            package.governed_claims
+            or package.substantive_new_information
+            or package.qualification_evidence
+        ):
+            raise NativeEvidenceHold(
+                "NO_QUALIFYING_NEW_INFORMATION", sources[0].unit.source_id
+            )
         common = {
             "candidate_id": package.candidate_id,
             "base_package_digest": base.digest,

@@ -27,6 +27,7 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.graphiti_requests import (
     GraphitiInternalRequestIdentity,
+    GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
 )
 from newsroom.control_plane.issue_790_contract import (
@@ -108,6 +109,15 @@ class UsageStatus(StrEnum):
     UNREPORTED = "UNREPORTED"
     AMBIGUOUS = "AMBIGUOUS"
     INVALID = "INVALID"
+
+
+def native_graphiti_usage_cycle_id(*, ingest_id: str, attempt_number: int) -> str:
+    """Stable native attempt identity, shared by admission and retained proof."""
+    return digest_canonical({
+        "namespace": "native-graphiti-model-usage-attempt-v1",
+        "ingest_id": ingest_id,
+        "attempt_number": attempt_number,
+    })
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +390,8 @@ CREATE INDEX IF NOT EXISTS model_usage_allocated_at
 ON model_invocation_allocations(allocated_at, invocation_id);
 CREATE INDEX IF NOT EXISTS model_usage_completed_at
 ON model_invocation_terminals(completed_at, invocation_id);
+CREATE INDEX IF NOT EXISTS model_usage_transport_invocation
+ON model_transport_observations(invocation_id, observed_at, observation_digest);
 CREATE INDEX IF NOT EXISTS model_usage_route_state
 ON model_usage_route_circuit_events(route, recorded_at);
 """
@@ -605,6 +617,8 @@ def _is_exact_pre_dispatch_zero(terminal: InvocationTerminal) -> bool:
         terminal.usage_status is UsageStatus.REPORTED
         and terminal.pre_dispatch_zero_proved is True
         and terminal.dispatch_at is None
+        and terminal.provider_telemetry_digest is None
+        and terminal.raw_telemetry_pointer is None
         and terminal.policy_breach is None
         and components.provenance == "CLI_DERIVED"
         and components.total_tokens == 0
@@ -702,7 +716,16 @@ def _valid_native_disposition(
     *,
     allocation: InvocationAllocation,
     terminal: InvocationTerminal,
+    validated_native_envelope: WorkEnvelope | None = None,
 ) -> dict[str, object] | None:
+    # Only bounded native retry reads supply an already authenticated envelope
+    # from their proved native unit. Creation and generic reads still prove LAND.
+    if validated_native_envelope is not None and (
+        validated_native_envelope.envelope_id != allocation.envelope_id
+        or validated_native_envelope.cycle_id != allocation.cycle_id
+        or validated_native_envelope.workload_class is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
+    ):
+        raise ModelUsageIntegrityError("native conservative envelope binding differs")
     retained_allocation, retained_terminal = _retained_terminal_allocation(
         connection, allocation.invocation_id
     )
@@ -732,7 +755,7 @@ def _valid_native_disposition(
             allocation=allocation,
             terminal=terminal,
             policy=policy,
-            envelope=_native_envelope(connection, allocation),
+            envelope=validated_native_envelope or _native_envelope(connection, allocation),
         )
         conservative_total = policy.max_total_tokens
     else:
@@ -1062,7 +1085,8 @@ def _native_embedding_progress_binding(
         (LAND, result["revision_id"]),
     ):
         payload = _object(raw)
-        units = tuple(_unit(value) for value in payload.get("units", ()))
+        bodies: dict[str, str] = {}
+        units = tuple(_unit(value, bodies) for value in payload.get("units", ()))
         NativeRevisionJournal._validate_units(units)
         if (
             raw != canonical_json_bytes(payload).decode("utf-8")
@@ -2575,21 +2599,112 @@ class ModelUsageService:
         )
         return evidence
 
+    def graphiti_ingest_retry_evidence_many(
+        self, *, ingest_ids: tuple[str, ...],
+    ) -> dict[str, GraphitiIngestRetryEvidence]:
+        """Authenticate one queue's retry history once in one read snapshot."""
+        return {
+            ingest_id: evidence
+            for ingest_id, (evidence, _) in self._graphiti_ingest_retry_evidence_batch(
+                ingest_ids=ingest_ids,
+            ).items()
+        }
+
+    def native_graphiti_ingest_retry_evidence_many(
+        self, *, failed_attempts: Mapping[str, int], max_attempts: int,
+    ) -> dict[str, GraphitiIngestRetryEvidence]:
+        """Read only the finite native attempt allowance, never unrelated history.
+
+        The caller proves native unit identity and supplies its raw failure count.
+        Deterministic envelope keys and independent internal-request bindings keep
+        missing or retargeted evidence from becoming optimistic retry credits.
+        """
+        if type(max_attempts) is not int or max_attempts <= 0 or any(
+            type(count) is not int or count < 0 for count in failed_attempts.values()
+        ):
+            raise ModelUsageIntegrityError("native Graphiti retry allowance differs")
+        native_attempts = {}
+        for ingest_id in failed_attempts:
+            _token(ingest_id, field="Graphiti ingest id")
+            for number in range(1, max_attempts + 1):
+                envelope = WorkEnvelope.create(
+                    cycle_id=native_graphiti_usage_cycle_id(
+                        ingest_id=ingest_id, attempt_number=number,
+                    ),
+                    workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                    # Admission time is not part of the envelope's identity.
+                    admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+                    admission_decision_id=None, candidate_id=None,
+                    hypothesis_digest=None, evidence_package_digest=None,
+                    ingest_id=ingest_id, graphiti_attempt_id=f"{ingest_id}:{number}",
+                )
+                native_attempts[envelope.envelope_id] = (ingest_id, number)
+        return {
+            ingest_id: evidence
+            for ingest_id, (evidence, _) in self._graphiti_ingest_retry_evidence_batch(
+                ingest_ids=tuple(failed_attempts), native_attempts=native_attempts,
+                native_failed_attempts=failed_attempts,
+            ).items()
+        }
+
     def _graphiti_ingest_retry_evidence(
-        self, *, ingest_id: str, before_attempt_number: int | None = None
+        self, *, ingest_id: str, before_attempt_number: int | None = None,
     ) -> tuple[GraphitiIngestRetryEvidence, int]:
-        _token(ingest_id, field="Graphiti ingest id")
+        return self._graphiti_ingest_retry_evidence_batch(
+            ingest_ids=(ingest_id,), before_attempt_number=before_attempt_number,
+        )[ingest_id]
+
+    def _graphiti_ingest_retry_evidence_batch(
+        self, *, ingest_ids: tuple[str, ...], before_attempt_number: int | None = None,
+        native_attempts: Mapping[str, tuple[str, int]] | None = None,
+        native_failed_attempts: Mapping[str, int] | None = None,
+    ) -> dict[str, tuple[GraphitiIngestRetryEvidence, int]]:
+        ingest_ids = tuple(dict.fromkeys(ingest_ids))
+        for ingest_id in ingest_ids:
+            _token(ingest_id, field="Graphiti ingest id")
+        if not ingest_ids:
+            return {}
         if before_attempt_number is not None and (
             type(before_attempt_number) is not int or before_attempt_number <= 0
         ):
             raise ModelUsageIntegrityError("Graphiti retry boundary differs")
         connection = self._connection()
         try:
+            connection.execute("BEGIN")
+            envelope_filter = outcome_filter = allocation_filter = ""
+            envelope_parameters: tuple[str, ...] = ()
+            allocation_parameters: tuple[str, ...] = ()
+            request_rows = ()
+            if native_attempts is not None:
+                envelope_parameters = tuple(native_attempts)
+                keys = ",".join("?" for _ in envelope_parameters)
+                attempt_parameters = tuple(
+                    f"{ingest_id}:{number}" for ingest_id, number in native_attempts.values()
+                )
+                envelope_filter = outcome_filter = f"WHERE envelope_id IN ({keys}) "
+                # Both independently retained identities are indexed. Either side
+                # still selects the leaf when the other side has been retargeted.
+                allocation_filter = (
+                    "WHERE a.invocation_id IN (SELECT invocation_id "
+                    f"FROM model_invocation_allocations WHERE envelope_id IN ({keys}) "
+                    "UNION SELECT invocation_id FROM graphiti_internal_requests "
+                    f"WHERE graphiti_attempt_id IN ({keys})) "
+                )
+                allocation_parameters = envelope_parameters + attempt_parameters
+                request_rows = connection.execute(
+                    "SELECT canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
+                    "internal_ordinal,semantic_state_digest,provider_attempt_id,"
+                    "call_shape_policy_digest,record_json FROM graphiti_internal_requests "
+                    f"WHERE graphiti_attempt_id IN ({keys}) OR invocation_id IN "
+                    "(SELECT invocation_id FROM model_invocation_allocations "
+                    f"WHERE envelope_id IN ({keys}))",
+                    attempt_parameters + envelope_parameters,
+                )
             envelope_rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
-                "ORDER BY envelope_id"
-            ).fetchall()
+                + envelope_filter + "ORDER BY envelope_id", envelope_parameters,
+            )
             envelopes: dict[str, WorkEnvelope] = {}
             attempts: dict[str, int] = {}
             for row in envelope_rows:
@@ -2605,7 +2720,7 @@ class ModelUsageService:
                         "retained Graphiti envelope binding differs"
                     )
                 envelopes[envelope.envelope_id] = envelope
-                if envelope.ingest_id != ingest_id:
+                if envelope.ingest_id not in ingest_ids:
                     continue
                 prefix, separator, suffix = str(
                     envelope.graphiti_attempt_id or ""
@@ -2618,7 +2733,7 @@ class ModelUsageService:
                         WorkloadClass.GRAPHITI_EMBEDDING,
                     }
                     or separator != ":"
-                    or prefix != ingest_id
+                    or prefix != envelope.ingest_id
                     or not suffix.isdigit()
                     or int(suffix) <= 0
                 ):
@@ -2626,20 +2741,26 @@ class ModelUsageService:
                         "retained Graphiti envelope binding differs"
                     )
                 attempt = int(suffix)
-                if attempt in attempts.values():
+                if any(
+                    number == attempt and envelopes[key].ingest_id == envelope.ingest_id
+                    for key, number in attempts.items()
+                ):
                     raise ModelUsageIntegrityError(
                         "retained Graphiti attempt identity is duplicated"
                     )
                 attempts[envelope.envelope_id] = attempt
 
             work_outcomes: set[str] = set()
+            outcome_attempts = attempts if native_attempts is None else native_attempts
             for row in connection.execute(
                 "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
-                "FROM model_work_outcomes ORDER BY envelope_id"
+                "FROM model_work_outcomes " + outcome_filter + "ORDER BY envelope_id",
+                envelope_parameters,
             ):
-                if str(row[1]) not in attempts:
-                    continue
                 record = _object(row[4])
+                if (str(row[1]) not in outcome_attempts
+                        and record.get("envelope_id") not in outcome_attempts):
+                    continue
                 unsigned = dict(record)
                 retained_digest = unsigned.pop("outcome_digest", None)
                 if (
@@ -2666,11 +2787,37 @@ class ModelUsageService:
                 "t.record_json FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=a.invocation_id "
-                "ORDER BY a.envelope_id,a.leaf_ordinal"
-            ).fetchall()
+                + allocation_filter + "ORDER BY a.envelope_id,a.leaf_ordinal",
+                allocation_parameters,
+            )
+            requests = {}
+            for row in request_rows:
+                record = _object(row[8])
+                try:
+                    values = dict(record)
+                    values.pop("schema_version", None)
+                    values["leaf_class"] = GraphitiLeafClass(values["leaf_class"])
+                    identity = GraphitiInternalRequestIdentity.create(**values)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti request identity differs"
+                    ) from exc
+                expected_attempt = (native_attempts or {}).get(identity.envelope_id)
+                if identity.as_record() != record or tuple(row[:8]) != (
+                    identity.canonical_digest, identity.invocation_id, identity.envelope_id,
+                    identity.graphiti_attempt_id, identity.internal_ordinal,
+                    identity.semantic_state_digest, identity.provider_attempt_id,
+                    identity.call_shape_policy_digest,
+                ) or expected_attempt is None or (
+                    identity.ingest_obligation_id != expected_attempt[0]
+                    or identity.graphiti_attempt_id != f"{expected_attempt[0]}:{expected_attempt[1]}"
+                ):
+                    raise ModelUsageIntegrityError("retained Graphiti request binding differs")
+                requests[identity.invocation_id] = identity
+            incomplete_envelopes: set[str] = set()
             by_attempt: dict[
-                int, list[tuple[InvocationAllocation, InvocationTerminal | None]]
-            ] = {attempt: [] for attempt in attempts.values()}
+                str, list[tuple[InvocationAllocation, InvocationTerminal | None]]
+            ] = {envelope_id: [] for envelope_id in attempts}
             for row in allocation_rows:
                 allocation = _allocation_from_record(_object(row[13]))
                 if tuple(row[index] for index in range(13)) != (
@@ -2721,83 +2868,117 @@ class ModelUsageService:
                         raise ModelUsageIntegrityError(
                             "retained Graphiti terminal binding differs"
                         )
-                by_attempt[attempt].append((allocation, terminal))
-
-            selected_attempts = {
-                envelope_id: attempt
-                for envelope_id, attempt in attempts.items()
-                if before_attempt_number is None or attempt < before_attempt_number
-            }
-            zero: list[int] = []
-            settled: list[int] = []
-            unresolved: list[int] = []
-            for envelope_id, attempt in sorted(
-                selected_attempts.items(), key=lambda item: item[1]
-            ):
-                leaves = by_attempt[attempt]
-                if envelope_id not in work_outcomes:
-                    unresolved.append(attempt)
-                    continue
-                if not leaves:
-                    # A terminal controller refusal has no provider allocation.
-                    # It counts toward raw attempts but is not proof of a zero leaf.
-                    continue
-                attempt_zero = True
-                attempt_dispatched = False
-                attempt_unresolved = False
-                for allocation, terminal in leaves:
-                    if terminal is None:
-                        attempt_unresolved = True
-                        continue
-                    policy = _policy_for_allocation(connection, allocation)
-                    self._validate_terminal(
-                        terminal,
-                        allocation.workload_class,
-                        policy,
-                        requested_max_output_tokens=allocation.max_output_tokens,
-                    )
-                    if _is_exact_pre_dispatch_zero(terminal):
-                        continue
-                    attempt_zero = False
-                    if terminal.dispatch_at is None or not _has_exact_dispatch(
-                        connection, terminal
-                    ):
-                        attempt_unresolved = True
-                        continue
-                    if terminal.usage_status is UsageStatus.REPORTED:
-                        _require_reported_telemetry(connection, terminal)
-                        attempt_dispatched = True
-                    elif _valid_native_disposition(
-                        connection,
-                        allocation=allocation,
-                        terminal=terminal,
-                    ) is not None:
-                        attempt_dispatched = True
+                if native_attempts is not None:
+                    identity = requests.pop(allocation.invocation_id, None)
+                    if identity is None:
+                        incomplete_envelopes.add(allocation.envelope_id)
                     else:
-                        attempt_unresolved = True
-                if attempt_unresolved:
-                    unresolved.append(attempt)
-                elif attempt_zero:
-                    zero.append(attempt)
-                elif attempt_dispatched:
-                    settled.append(attempt)
-                else:
-                    unresolved.append(attempt)
+                        try:
+                            self._validate_graphiti_identity(allocation, identity)
+                        except ModelUsageAdmissionError as exc:
+                            raise ModelUsageIntegrityError(str(exc)) from exc
+                by_attempt[allocation.envelope_id].append((allocation, terminal))
+            incomplete_envelopes.update(identity.envelope_id for identity in requests.values())
 
-            attempt_numbers = tuple(sorted(selected_attempts.values()))
-            settled_attempts = tuple(settled)
-            return (
-                GraphitiIngestRetryEvidence(
-                    attempt_numbers=attempt_numbers,
-                    zero_dispatch_attempts=tuple(zero),
-                    settled_provider_attempts=settled_attempts,
-                    latest_settled_provider_attempt=(
-                        settled_attempts[-1] if settled_attempts else None
+            result = {}
+            for ingest_id in ingest_ids:
+                selected_attempts = {
+                    envelope_id: attempt
+                    for envelope_id, attempt in attempts.items()
+                    if envelopes[envelope_id].ingest_id == ingest_id
+                    and (before_attempt_number is None or attempt < before_attempt_number)
+                }
+                zero: list[int] = []
+                settled: list[int] = []
+                unresolved: list[int] = []
+                for envelope_id, attempt in sorted(
+                    selected_attempts.items(), key=lambda item: item[1]
+                ):
+                    leaves = by_attempt[envelope_id]
+                    if envelope_id not in work_outcomes or envelope_id in incomplete_envelopes:
+                        unresolved.append(attempt)
+                        continue
+                    if not leaves:
+                        # A terminal controller refusal has no provider allocation.
+                        # It counts toward raw attempts but is not proof of a zero leaf.
+                        if native_attempts is not None:
+                            unresolved.append(attempt)
+                        continue
+                    attempt_zero = True
+                    attempt_dispatched = False
+                    attempt_unresolved = False
+                    for allocation, terminal in leaves:
+                        if terminal is None:
+                            attempt_unresolved = True
+                            continue
+                        policy = _policy_for_allocation(connection, allocation)
+                        self._validate_terminal(
+                            terminal,
+                            allocation.workload_class,
+                            policy,
+                            requested_max_output_tokens=allocation.max_output_tokens,
+                        )
+                        if _is_exact_pre_dispatch_zero(terminal):
+                            if _has_exact_dispatch(connection, terminal):
+                                attempt_unresolved = True
+                            continue
+                        attempt_zero = False
+                        if terminal.dispatch_at is None or not _has_exact_dispatch(
+                            connection, terminal
+                        ):
+                            attempt_unresolved = True
+                            continue
+                        if terminal.usage_status is UsageStatus.REPORTED:
+                            _require_reported_telemetry(connection, terminal)
+                            attempt_dispatched = True
+                        elif _valid_native_disposition(
+                            connection,
+                            allocation=allocation,
+                            terminal=terminal,
+                            validated_native_envelope=(
+                                envelopes[allocation.envelope_id]
+                                if native_attempts is not None else None
+                            ),
+                        ) is not None:
+                            attempt_dispatched = True
+                        else:
+                            attempt_unresolved = True
+                    if attempt_unresolved:
+                        unresolved.append(attempt)
+                    elif attempt_zero:
+                        zero.append(attempt)
+                    elif attempt_dispatched:
+                        settled.append(attempt)
+                    else:
+                        unresolved.append(attempt)
+
+                missing = {
+                    number for envelope_id, (selected_ingest, number) in
+                    (native_attempts or {}).items()
+                    if selected_ingest == ingest_id and envelope_id not in attempts
+                    and (
+                        number <= (native_failed_attempts or {})[ingest_id]
+                        or envelope_id in work_outcomes
+                        or envelope_id in incomplete_envelopes
+                    )
+                }
+                attempt_numbers = tuple(sorted(set(selected_attempts.values()) | missing))
+                unresolved = sorted(set(unresolved) | missing)
+                settled_attempts = tuple(settled)
+                result[ingest_id] = (
+                    GraphitiIngestRetryEvidence(
+                        attempt_numbers=attempt_numbers,
+                        zero_dispatch_attempts=tuple(zero),
+                        settled_provider_attempts=settled_attempts,
+                        latest_settled_provider_attempt=(
+                            settled_attempts[-1] if settled_attempts else None
+                        ),
+                        unresolved_attempts=tuple(unresolved),
                     ),
-                    unresolved_attempts=tuple(unresolved),
-                ),
-                sum(len(leaves) for leaves in by_attempt.values()),
-            )
+                    sum(len(leaves) for key, leaves in by_attempt.items()
+                        if envelopes[key].ingest_id == ingest_id),
+                )
+            return result
         finally:
             connection.close()
 
@@ -3084,6 +3265,15 @@ class ModelUsageService:
             ).fetchone()
             if row is None:
                 raise ModelUsageIntegrityError("invocation allocation is absent")
+            if terminal.pre_dispatch_zero_proved:
+                if (
+                    terminal.provider_telemetry_digest is not None
+                    or terminal.raw_telemetry_pointer is not None
+                    or provider_telemetry is not None
+                ):
+                    raise ModelUsageIntegrityError("pre-dispatch zero contradicts provider telemetry")
+                if _has_exact_dispatch(connection, terminal):
+                    raise ModelUsageIntegrityError("pre-dispatch zero contradicts committed dispatch")
             route, workload = str(row[0]), WorkloadClass(str(row[1]))
             context_manifest_digest = str(row[3])
             requested_max_output_tokens = int(row[4])

@@ -202,58 +202,45 @@ def _metered_cont_writer_route_probe(
             parent_invocation_id=None,
         )
         service.allocate(allocation, owner_emergency_stop=False)
-        dispatch_started_at: datetime | None = None
+        probe_started_at: datetime | None = None
         try:
             with owner_emergency_stop_fence(proving_store):
-                dispatch_started_at = datetime.now(tz=UTC)
+                probe_started_at = datetime.now(tz=UTC)
                 service.observe_transport(
                     invocation_id=allocation.invocation_id,
-                    observed_at=dispatch_started_at,
-                    state="DISPATCH_STARTED",
+                    observed_at=probe_started_at,
+                    state="PROBE_STARTED",
                     evidence_digest=request_digest,
                 )
                 proof = _probe_cont_writer_route()
-        except VetoError:
-            failed_at = datetime.now(tz=UTC)
-            service.complete(
-                InvocationTerminal.create(
-                    invocation_id=allocation.invocation_id,
-                    outcome="VETOED_BEFORE_PROVIDER_DISPATCH",
-                    failure_class="OWNER_EMERGENCY_STOP",
-                    usage_status=UsageStatus.REPORTED,
-                    components=UsageComponents(
-                        total_tokens=0, provenance="CLI_DERIVED"
-                    ),
-                    dispatch_at=None,
-                    completed_at=failed_at,
-                    observed_at=failed_at,
-                    subscription_cli_chat_not_cash_debited=True,
-                    pre_dispatch_zero_proved=True,
-                )
-            )
-            service.record_work_outcome(
-                envelope_id=envelope.envelope_id,
-                outcome="FAILED",
-                outcome_record_id=allocation.invocation_id,
-                payload_digest=None,
-                terminal_at=failed_at,
-            )
-            raise
-        except (OSError, RuntimeError, ValueError):
-            if dispatch_started_at is None:
+                if proof.provider_dispatched:
+                    service.observe_transport(
+                        invocation_id=allocation.invocation_id,
+                        observed_at=probe_started_at,
+                        state="DISPATCH_STARTED",
+                        evidence_digest=request_digest,
+                    )
+        except (OSError, RuntimeError, ValueError) as exc:
+            pre_dispatch_veto = isinstance(exc, VetoError) and probe_started_at is None
+            if probe_started_at is None and not pre_dispatch_veto:
                 raise
             failed_at = datetime.now(tz=UTC)
             service.complete(
                 InvocationTerminal.create(
                     invocation_id=allocation.invocation_id,
-                    outcome="PROBE_EXCEPTION",
-                    failure_class="PROBE_EXCEPTION_AFTER_POSSIBLE_DISPATCH",
-                    usage_status=UsageStatus.AMBIGUOUS,
-                    components=UsageComponents(provenance="UNAVAILABLE"),
-                    dispatch_at=dispatch_started_at,
+                    outcome=("VETOED_BEFORE_PROVIDER_DISPATCH" if pre_dispatch_veto
+                             else "PROBE_EXCEPTION"),
+                    failure_class=("OWNER_EMERGENCY_STOP" if pre_dispatch_veto
+                                   else "PROBE_EXCEPTION_AFTER_POSSIBLE_DISPATCH"),
+                    usage_status=(UsageStatus.REPORTED if pre_dispatch_veto
+                                  else UsageStatus.AMBIGUOUS),
+                    components=(UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
+                                if pre_dispatch_veto else UsageComponents(provenance="UNAVAILABLE")),
+                    dispatch_at=probe_started_at,
                     completed_at=failed_at,
                     observed_at=failed_at,
                     subscription_cli_chat_not_cash_debited=True,
+                    pre_dispatch_zero_proved=pre_dispatch_veto,
                 )
             )
             service.record_work_outcome(
@@ -265,7 +252,10 @@ def _metered_cont_writer_route_probe(
             )
             raise
         terminal_at = datetime.now(tz=UTC)
-        telemetry = asdict(proof)
+        provider_dispatched = proof.provider_dispatched
+        # Local health diagnostics remain in the governor's probe receipt; they
+        # are not evidence of provider usage or provider dispatch.
+        telemetry = asdict(proof) if provider_dispatched else None
         provider_attempt_id = (
             proof.provider_receipt_reference
             or f"{allocation.invocation_id}:pre-dispatch"
@@ -275,7 +265,6 @@ def _metered_cont_writer_route_probe(
             provider_attempt_id=provider_attempt_id,
             linked_at=terminal_at,
         )
-        provider_dispatched = proof.provider_dispatched
         service.complete(
             InvocationTerminal.create(
                 invocation_id=allocation.invocation_id,
@@ -300,13 +289,13 @@ def _metered_cont_writer_route_probe(
                     if provider_dispatched
                     else UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
                 ),
-                dispatch_at=(dispatch_started_at if provider_dispatched else None),
+                dispatch_at=(probe_started_at if provider_dispatched else None),
                 completed_at=terminal_at,
                 observed_at=terminal_at,
-                provider_telemetry_digest=digest_canonical(telemetry),
+                provider_telemetry_digest=(digest_canonical(telemetry) if telemetry is not None else None),
                 raw_telemetry_pointer=(
                     "sqlite-private://model_provider_telemetry/"
-                    f"{allocation.invocation_id}"
+                    f"{allocation.invocation_id}" if provider_dispatched else None
                 ),
                 pre_dispatch_zero_proved=not provider_dispatched,
                 subscription_cli_chat_not_cash_debited=True,

@@ -135,7 +135,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v6"
+    assert VERSION == "newsroom.native-evidence-assessor.v7"
     connection.close()
 
 
@@ -293,6 +293,41 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
 
     decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
+
+    for exact_claim, rendered, names in (
+        (
+            "The applicant must be in the UK.", "申請人必須身在UK。",
+            ("UK",),
+        ),
+        (
+            "John Smith said services would resume.",
+            "John Smith表示服務將恢復。", ("John Smith",),
+        ),
+    ):
+        current = json.loads(canonical_json_bytes(package))
+        current["governed_claims"][0].update({
+            "claim": exact_claim, "supporting_excerpt": exact_claim,
+            "rendered_assertion_zh_hant_hk": rendered,
+        })
+        current["substantive_new_information"] = [exact_claim]
+        current_acquired = SimpleNamespace(**{
+            **vars(acquired), "body": exact_claim.encode(),
+        })
+        assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(canonical_json_bytes({"package": current}).decode(), {}),
+            candidate, base, (source,), (current_acquired,),
+        )
+        assert assessment.governed_claims[0].named_entities == names
+        assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+            assessment, exact_claim, exact_claim
+        ).stable_reason_codes
+
+        current["governed_claims"][0]["rendered_assertion_zh_hant_hk"] += " unsupported prose"
+        with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+            AutonomousNativeEvidenceAssessor._validated_execution(
+                NativeAssessmentExecution(canonical_json_bytes({"package": current}).decode(), {}),
+                candidate, base, (source,), (current_acquired,),
+            )
 
     boundary_claim = "Changes were published by the Home Office"
     boundary_excerpt = "Home Office announced changes."
@@ -925,4 +960,91 @@ def test_inflight_native_assessor_is_not_a_retained_contract_failure(
     usage.begin(candidate, base, "in-flight assessor request")
 
     assert usage.retained_output_contract_failure(candidate) is None
+    connection.close()
+
+
+@pytest.mark.parametrize("new_contract", (False, True))
+def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_path, monkeypatch, new_contract):
+    import newsroom.control_plane.native_assessor as module
+
+    if new_contract:
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v6")
+        monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    service, usage = _usage(tmp_path, monkeypatch)
+    calls = []
+
+    def dispatch(_prompt):
+        calls.append("provider")
+        return NativeAssessmentExecution(
+            canonical_json_bytes({"package": _model_package_value(base)}).decode(),
+            {"usage_basis": "PROVIDER_REPORTED", "input_tokens": 1,
+             "output_tokens": 1, "cached_read_tokens": 0, "cached_write_tokens": 0,
+             "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2},
+        )
+
+    assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
+    first = assessor(candidate, base, (), ())
+    if new_contract:
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v7")
+        monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+        _, usage = _usage(tmp_path, monkeypatch)
+        assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
+    assert assessor(candidate, base, (), ()) == first
+    assert calls == ["provider"]
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (1,)
+        original_digest = retained.execute("SELECT payload_digest FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'").fetchone()[0]
+        retained.execute("UPDATE ledger SET payload_digest='corrupt' WHERE kind='NATIVE_ASSESSMENT_RESULT'")
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_UNRESOLVED_HOLD"):
+        assessor(candidate, base, (), ())
+    assert calls == ["provider"]
+    with sqlite3.connect(service.path) as retained:
+        retained.execute("UPDATE ledger SET payload_digest=? WHERE kind='NATIVE_ASSESSMENT_RESULT'", (original_digest,))
+        retained.execute("UPDATE model_work_envelopes SET record_json=json_set(record_json,'$.candidate_id','hidden')")
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_UNRESOLVED_HOLD"):
+        assessor(candidate, base, (), ())
+    assert calls == ["provider"]
+    connection.close()
+
+
+@pytest.mark.parametrize("settled", (True, False))
+def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(tmp_path, monkeypatch, settled):
+    import newsroom.control_plane.native_assessor as module
+
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v6")
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    service, old_usage = _usage(tmp_path, monkeypatch)
+    execution = NativeAssessmentExecution(
+        "not JSON",
+        {"usage_basis": "PROVIDER_REPORTED", "input_tokens": 1,
+         "output_tokens": 1, "cached_read_tokens": 0, "cached_write_tokens": 0,
+         "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2},
+    )
+    if settled:
+        with pytest.raises(NativeEvidenceHold):
+            AutonomousNativeEvidenceAssessor(
+                lambda _: execution, usage=old_usage, dispatch_fence=nullcontext,
+            )(candidate, base, (), ())
+    else:
+        old_usage.begin(candidate, base, "unknown prior attempt")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v7")
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    _, new_usage = _usage(tmp_path, monkeypatch)
+    calls = []
+
+    def dispatch(_prompt):
+        calls.append("provider")
+        return execution
+
+    assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=new_usage, dispatch_fence=nullcontext)
+    for _ in range(2):
+        with pytest.raises(NativeEvidenceHold):
+            assessor(candidate, base, (), ())
+    assert calls == (["provider"] if settled else [])
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (2 if settled else 1,)
     connection.close()

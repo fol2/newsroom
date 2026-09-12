@@ -274,7 +274,7 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
     def unrecognised_latin_term(value):
         value["governed_claims"][0][
             "rendered_assertion_zh_hant_hk"
-        ] = "UK限期安排已經更新。"
+        ] = "unsupported term限期安排已經更新。"
 
     malformed = deepcopy(model_package)
     paraphrased_claim(malformed)
@@ -422,12 +422,31 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
     ):
         malformed = deepcopy(model_package)
         mutation(malformed)
-        malformed_assessment = model_assessor(malformed)(
-            version,
-            _base_package(assessed_package),
-            (source,),
-            (acquisition,),
-        )
+        if mutation is unrecognised_latin_term:
+            with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+                model_assessor(malformed)(
+                    version, _base_package(assessed_package), (source,), (acquisition,),
+                )
+            # Keep the consumer defence independent of producer pre-validation.
+            malformed_assessment = replace(
+                assessed,
+                governed_claims=(
+                    replace(
+                        assessed.governed_claims[0],
+                        rendered_assertion_zh_hant_hk=(
+                            malformed["governed_claims"][0]["rendered_assertion_zh_hant_hk"]
+                        ),
+                    ),
+                    *assessed.governed_claims[1:],
+                ),
+            )
+        else:
+            malformed_assessment = model_assessor(malformed)(
+                version,
+                _base_package(assessed_package),
+                (source,),
+                (acquisition,),
+            )
         resolved_records = dict(evidence.retained.package.resolved_evidence_records)
         resolved_records.update(
             (
