@@ -24,6 +24,90 @@ from .authority_a2b_helpers import MutableClock, admit, open_object_system
 from .authority_helpers import FIXED_NOW, proof
 
 
+_IMMUTABLE_OBJECT_TABLES = (
+    ("rights_policy_contracts", "contract_digest"),
+    ("hydration_policy_contracts", "contract_digest"),
+    ("object_admission_definitions", "definition_digest"),
+    ("object_admission_preflights", "canonical_digest"),
+    ("object_rights_decisions", "canonical_digest"),
+    ("object_access_decisions", "canonical_digest"),
+)
+
+
+@pytest.fixture
+def immutable_object_rows():
+    from newsroom.authority._object_store_base import _ObjectStoreBase
+    from newsroom.authority.canonical import digest_bytes
+
+    class Parent:
+        parent_checks = 0
+
+        def _validate_immutable_records(self, conn):
+            self.parent_checks += 1
+
+    class Store(_ObjectStoreBase, Parent):
+        pass
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    data = b'{"fixture":"canonical"}'
+    try:
+        for table, digest_column in _IMMUTABLE_OBJECT_TABLES:
+            conn.execute(f"CREATE TABLE {table}(canonical_bytes BLOB, {digest_column} TEXT)")
+            conn.execute(f"INSERT INTO {table} VALUES(?,?)", (data, digest_bytes(data)))
+        yield Store(), conn
+    finally:
+        conn.close()
+
+
+def test_immutable_object_validation_serialises_each_record_once(
+    immutable_object_rows, monkeypatch,
+) -> None:
+    from newsroom.authority import _object_store_base as private
+
+    serialised = []
+    original = private.canonical_json_bytes
+
+    def tracked(value):
+        serialised.append(value)
+        return original(value)
+
+    monkeypatch.setattr(private, "canonical_json_bytes", tracked)
+    store, conn = immutable_object_rows
+    store._validate_immutable_records(conn)
+    assert store.parent_checks == 1
+    assert len(serialised) == len(_IMMUTABLE_OBJECT_TABLES)
+
+
+@pytest.mark.parametrize("table,digest_column", _IMMUTABLE_OBJECT_TABLES)
+def test_immutable_object_validation_retains_each_digest_check(
+    immutable_object_rows, table, digest_column,
+) -> None:
+    store, conn = immutable_object_rows
+    conn.execute(f"UPDATE {table} SET {digest_column}=?", ("sha256:" + "0" * 64,))
+    with pytest.raises(
+        AuthorityPersistenceError, match=f"immutable {table} canonical digest mismatch",
+    ):
+        store._validate_immutable_records(conn)
+
+
+@pytest.mark.parametrize("data", [
+    b'{"fixture": "canonical"}', b'{"fixture":1,"fixture":2}', b'{', b'\xff',
+])
+def test_immutable_object_validation_rejects_noncanonical_bytes_even_with_exact_hash(
+    immutable_object_rows, data,
+) -> None:
+    from newsroom.authority.canonical import digest_bytes
+
+    store, conn = immutable_object_rows
+    conn.execute(
+        "UPDATE object_access_decisions SET canonical_bytes=?,canonical_digest=?",
+        (data, digest_bytes(data)),
+    )
+    with pytest.raises(AuthorityPersistenceError, match="stored object JSON"):
+        store._validate_immutable_records(conn)
+
+
 def installed_path(root: Path, blob_digest: str) -> Path:
     hex_digest = blob_digest.split(":", 1)[1]
     return root / "objects" / hex_digest[:2] / hex_digest

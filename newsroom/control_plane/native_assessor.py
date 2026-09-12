@@ -80,9 +80,10 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v7"
+VERSION = "newsroom.native-evidence-assessor.v8"
 REASSESSABLE_HOLDS = frozenset({
-    "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD", "INVALID_GOVERNED_CLAIM_EVIDENCE",
+    "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
+    "INVALID_GOVERNED_CLAIM_EVIDENCE",
     "ASSESSOR_OUTPUT_CONTRACT_HOLD", "ASSESSOR_RENDERING_CONTRACT_HOLD",
     "SOURCE_AUTHORITY_HOLD",
 })
@@ -109,7 +110,9 @@ SYSTEM = (
     "candidate and exact source bytes. Return JSON matching the schema. Translate "
     "or localise only facts present in an exact source excerpt; never add facts or "
     "authority absent from that evidence. Every claim and supporting excerpt must "
-    "each be an exact contiguous part of the source passage; choose the shortest "
+    "each be copied byte-for-byte as an exact contiguous span of the same UTF-8 "
+    "source body. Preserve its whitespace, newlines and country labels exactly; "
+    "never normalise or elide them. Choose the shortest "
     "supporting excerpt that preserves the evidence. Return exactly "
     "one HEADLINE claim when substantive_new_information is non-empty. When no "
     "supported new information exists, governed_claims and qualification_evidence "
@@ -125,9 +128,12 @@ SYSTEM = (
     "rendered claim; do not annotate or translate named entities. The rendered claim "
     "must otherwise contain Hong Kong Traditional Chinese only. "
     "The source recognised_named_entities inventory identifies supported exact "
-    "name spellings, not additional facts. Preserve inventory names only where "
-    "they occur in the selected claim or excerpt. Ordinary English prose outside "
-    "these names must be translated, not retained as an invented name. "
+    "name and official-term spellings, not additional facts. Preserve inventory "
+    "items only where they occur in the selected claim or excerpt. For an unfamiliar "
+    "official English institution, law, policy or technical term without a supplied "
+    "approved Chinese rendering, retain its exact English name or abbreviation and "
+    "do not invent a translation. A sparse inventory is not a publication gate. "
+    "Translate ordinary English prose outside these source-bound items. "
     "Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
@@ -137,8 +143,12 @@ SYSTEM = (
     "For every claim, return semantic_relation exactly as source_modality ASSERTED, "
     "rendered_modality ASSERTED, source_polarity AFFIRMED, rendered_polarity "
     "AFFIRMED and relation SEMANTICALLY_EQUIVALENT; preserve more specific legal "
-    "or factual modality in the claim text itself. Unsupported names, acronyms, "
-    "month-based durations or numeric localisations must not be translated, guessed, "
+    "or factual modality in the claim text itself. Names or acronyms absent from the "
+    "source text must not be added. If an unfamiliar official source-bound literal is "
+    "absent from the inventory, retain it exactly and identify it in "
+    "selection_rationale so typed validation can hold truthfully; do not translate, "
+    "guess or hide it. Unsupported month-based durations or numeric localisations "
+    "must not be translated or guessed, "
     "or used to fabricate a qualification. Do not hide a material fact merely to make "
     "the package valid; preserve its source meaning and state the unsupported "
     "rendering or localisation in selection_rationale. Use only geography and "
@@ -738,10 +748,11 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v7"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"

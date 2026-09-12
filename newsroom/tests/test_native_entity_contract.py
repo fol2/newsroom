@@ -38,6 +38,46 @@ def test_short_registry_names_do_not_match_other_latin_words():
     assert evidence.bounded_named_entities("UKVI and ATASX") == frozenset()
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        "General Grounds for Refusal",
+        "Part Suitability",
+        "Appendix Victim of Domestic Abuse",
+        "AR(EU)1.1",
+        "Appendix O",
+    ),
+)
+def test_source_bound_official_english_references_can_be_preserved(source):
+    names = evidence.bounded_named_entities(source)
+    assert names == frozenset({(source, "OFFICIAL_TERM")})
+    assert evidence.rendered_named_entities(f"適用{source}。", names) == names
+    assert evidence.rendered_named_entities(f"適用{source}X。", names) != names
+    invented = "General Grounds for Refusal" if source == "Appendix O" else "Appendix O"
+    assert evidence.rendered_named_entities(f"適用{invented}。", names) != names
+
+
+def test_bounded_official_abbreviation_does_not_admit_arbitrary_all_caps_words():
+    source = "Immigration Rules Appendix ECAA: Extension of Stay. ECAA workers."
+    assert evidence.bounded_named_entities(source) == frozenset(
+        {("ECAA", "OFFICIAL_TERM")}
+    )
+    assert evidence.bounded_named_entities("ECAA workers may apply.") == frozenset(
+        {("ECAA", "OFFICIAL_TERM")}
+    )
+    assert evidence.bounded_named_entities("ECAA route applies.") == frozenset(
+        {("ECAA", "OFFICIAL_TERM")}
+    )
+    assert evidence.bounded_named_entities("ECAAX workers may apply.") == frozenset()
+    assert evidence.bounded_named_entities("DELETED workers may apply.") == frozenset()
+
+
+def test_ordinary_english_and_all_caps_prose_are_not_official_terms():
+    assert evidence.bounded_named_entities(
+        "immigration bail; Turkish; 36 months; DELETED"
+    ) == frozenset()
+
+
 def test_preserved_source_person_does_not_need_an_english_reporting_verb():
     names = evidence.bounded_named_entities("John Smith said services would resume.")
     assert names == frozenset({("John Smith", "PERSON")})

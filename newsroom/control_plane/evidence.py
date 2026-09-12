@@ -284,6 +284,13 @@ _ENGLISH_OFFICIAL_TERM = re.compile(
     r"\s+Act|(?:[A-Z][A-Za-z-]+\s+){1,5}"
     r"(?:Authorisation|Credit|Scheme|Programme|Benefit|Visa|Permit|Status))\b"
 )
+_ENGLISH_OFFICIAL_REFERENCE = re.compile(
+    r"(?:\b(?:General Grounds for Refusal|Part Suitability)\b|"
+    r"\bAppendix\s+(?:[A-Z]|[A-Z][a-z]+"
+    r"(?:\s+(?:and|of|the|for|[A-Z][a-z]+)){0,6})\b|"
+    r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
+)
+_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA"})
 
 
 def _is_bounded_english_organisation(text: str) -> bool:
@@ -298,7 +305,11 @@ def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
         return entity_type == _OWNER_APPROVED_ENTITY_REGISTRY[text]
     if re.search(r"[A-Za-z]", text):
         if entity_type == "OFFICIAL_TERM":
-            return bool(_ENGLISH_OFFICIAL_TERM.fullmatch(text))
+            return bool(
+                _ENGLISH_OFFICIAL_TERM.fullmatch(text)
+                or _ENGLISH_OFFICIAL_REFERENCE.fullmatch(text)
+                or text in _BOUNDED_OFFICIAL_ABBREVIATIONS
+            )
         if entity_type == "ORGANISATION":
             return _is_bounded_english_organisation(text)
         tokens = re.findall(r"[A-Za-z]+", text)
@@ -404,6 +415,13 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
             )
     for match in _ENGLISH_OFFICIAL_TERM.finditer(text):
         candidates.append((match.start(), match.end(), match.group(0), "OFFICIAL_TERM"))
+    for match in _ENGLISH_OFFICIAL_REFERENCE.finditer(text):
+        candidates.append((match.start(), match.end(), match.group(0), "OFFICIAL_TERM"))
+    for abbreviation in _BOUNDED_OFFICIAL_ABBREVIATIONS:
+        for match in re.finditer(_entity_pattern(abbreviation), text):
+            candidates.append(
+                (match.start(), match.end(), abbreviation, "OFFICIAL_TERM")
+            )
     titled_chinese_person = re.compile(
         r"(行政長官|財政司司長|政務司司長|律政司司長|特首|司長|局長|署長)"
         r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"

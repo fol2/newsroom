@@ -500,7 +500,8 @@ def test_native_pipeline_retries_a_bounded_acquisition_hold_next_cycle(tmp_path,
 
 
 @pytest.mark.parametrize("reason", (
-    "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD", "NO_QUALIFYING_NEW_INFORMATION",
+    "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
+    "NO_QUALIFYING_NEW_INFORMATION",
     "EDITORIAL_ADMISSION_HOLD",
 ))
 def test_native_pipeline_revalidates_only_repairable_holds_once_per_contract(tmp_path, monkeypatch, reason):

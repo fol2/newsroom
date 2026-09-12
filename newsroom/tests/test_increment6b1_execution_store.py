@@ -52,6 +52,12 @@ from newsroom.tests.test_increment6b1_execution import _batch, _decision_for, _d
 
 PROOF = AuthenticationProof(method="STATIC_TOKEN", credential="worker-token")
 OTHER_PROOF = AuthenticationProof(method="STATIC_TOKEN", credential="other-token")
+_EXECUTION_FOREIGN_KEY_CHECKS = [
+    f'PRAGMA foreign_key_check("{table}")'
+    for table in (
+        "triage_execution_batches", "triage_work_item_leases", "triage_worker_attempts",
+    )
+]
 
 
 def _fixture(tmp_path: Path):
@@ -579,11 +585,17 @@ def test_completed_predecessor_and_claimed_successor_reopen_cleanly(
     successor_lease = authority.claim(successor.attempt_id, proof=PROOF)
 
     authority.close()
+    statements = []
+    connection.set_trace_callback(statements.append)
     reopened = _open_on_connection(
         connection,
         retrieval_authority=retrieval,
         authenticator=authenticator,
         clock=lambda: now[0],
+    )
+    connection.set_trace_callback(None)
+    assert [sql for sql in statements if sql.startswith("PRAGMA foreign_key_check")] == (
+        _EXECUTION_FOREIGN_KEY_CHECKS
     )
     assert reopened.claim(successor.attempt_id, proof=PROOF) == successor_lease
 
@@ -805,7 +817,7 @@ def test_two_connections_converge_on_one_claim_and_reopen_detects_tamper(
 
 
 def test_public_open_uses_secure_checked_lifecycle_lock_and_idempotent_close(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     connection, retrieval, authenticator, authority, now, _, _, _ = _fixture(
         tmp_path
@@ -813,12 +825,24 @@ def test_public_open_uses_secure_checked_lifecycle_lock_and_idempotent_close(
     authority.close()
     connection.close()
     database = tmp_path / "execution-authority.sqlite3"
+    statements = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
     opened = open_triage_execution_authority(
         database,
         retrieval_authority=retrieval,
         authenticator=authenticator,
         clock=lambda: now[0],
     )
+    assert [sql for sql in statements if sql.startswith("PRAGMA foreign_key_check")] == [
+        "PRAGMA foreign_key_check", *_EXECUTION_FOREIGN_KEY_CHECKS,
+    ]
     with pytest.raises(TriageExecutionAuthorityError, match="writer"):
         open_triage_execution_authority(
             database,
@@ -837,3 +861,52 @@ def test_public_open_uses_secure_checked_lifecycle_lock_and_idempotent_close(
             authenticator=authenticator,
             clock=lambda: now[0],
         )
+
+
+@pytest.mark.parametrize("standalone", [False, True], ids=["composed", "standalone"])
+@pytest.mark.parametrize("parent_table", [
+    "triage_execution_batches", "triage_work_item_versions", "triage_worker_attempts",
+])
+def test_execution_reopen_rejects_missing_retained_parent(
+    tmp_path, standalone, parent_table,
+) -> None:
+    connection, retrieval, authenticator, authority, now, _, batch, attempt = _fixture(
+        tmp_path
+    )
+    authority.register_batch(batch, proof=PROOF)
+    authority.register_attempt(batch.batch_id, attempt, proof=PROOF)
+    authority.claim(attempt.attempt_id, proof=PROOF)
+    authority.close()
+    # Bypass an external writer's guards, then restore the exact schema so
+    # standalone rejection proves retained integrity, not fingerprint drift.
+    connection.execute("PRAGMA foreign_keys=OFF")
+    triggers = connection.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
+        (parent_table,),
+    ).fetchall()
+    for name, _ in triggers:
+        connection.execute(f'DROP TRIGGER "{name}"')
+    connection.execute(f"DELETE FROM {parent_table}")
+    for _, sql in triggers:
+        connection.execute(sql)
+    connection.execute("PRAGMA foreign_keys=ON")
+    assert connection.execute("PRAGMA foreign_key_check").fetchone() is not None
+    try:
+        with pytest.raises(TriageExecutionAuthorityError):
+            if standalone:
+                connection.close()
+                open_triage_execution_authority(
+                    tmp_path / "execution-authority.sqlite3",
+                    retrieval_authority=retrieval,
+                    authenticator=authenticator,
+                    clock=lambda: now[0],
+                )
+            else:
+                _open_on_connection(
+                    connection,
+                    retrieval_authority=retrieval,
+                    authenticator=authenticator,
+                    clock=lambda: now[0],
+                )
+    finally:
+        connection.close()
