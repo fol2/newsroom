@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -289,13 +290,19 @@ def test_native_service_binds_both_cycle_records_to_runtime_identity(tmp_path, m
     assert all(record["runtime_identity_digest"] == identity for record in records)
 
 
-def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, capsys):
+def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, capsys, caplog):
+    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.WARNING, logger="newsroom.authority.open")
+    caplog.handler.setLevel(logging.INFO)
     factory, _ = _pipeline(
         monkeypatch, lambda _cycle_id: NativePipelineReport((), {}, 0),
     )
 
     def service_factory(args):
         assert args.once and args.interval == 3 and args.failure_backoff == 9
+        assert logging.getLogger().level == logging.WARNING
+        assert not logging.getLogger("noisy_dependency").isEnabledFor(logging.INFO)
+        logging.getLogger("newsroom.authority.open").info("authority timing enabled")
         return NativeService(
             pipeline_factory=factory, ledger_path=args.ledger,
             lock_path=tmp_path / "cli.lock", stop_check=lambda: None,
@@ -309,6 +316,7 @@ def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, ca
         "--lock", str(tmp_path / "ignored-by-interim-factory.lock"),
         "--interval", "3", "--failure-backoff", "9",
     ]) == 0
+    assert "authority timing enabled" in caplog.messages
     assert json.loads(capsys.readouterr().out) == {
         "public_effect": False,
         "service": {

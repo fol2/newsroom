@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -25,6 +26,47 @@ from newsroom.authority._event_store_base import _INCOMPLETE_COMMAND_QUERY
 
 from .authority_event_helpers import open_test_system
 from .authority_helpers import command, proof
+
+
+def test_reopen_logs_each_existing_validation_phase(tmp_path, caplog) -> None:
+    database = tmp_path / "authority.sqlite3"
+    with open_test_system(database) as system:
+        system.commands.execute(command(), proof=proof())
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="newsroom.authority.open"):
+        with open_test_system(database):
+            pass
+    records = [r for r in caplog.records if r.name == "newsroom.authority.open"]
+    phases = (
+        "schema", "quick_check", "foreign_key_check", "connection_settings",
+        "aggregate_heads", "command_completeness", "event_routing",
+        "immutable_records", "registry_coverage",
+    )
+    assert [r.getMessage() for r in records if "STARTED" in r.getMessage()] == [
+        f"authority_open stage={stage} status=STARTED"
+        for stage in ("validation", *phases)
+    ]
+    completed = [r for r in records if "COMPLETE" in r.getMessage()]
+    assert [r.args[0] for r in completed] == [*phases, "validation"]
+    assert all(type(r.args[-1]) is int and r.args[-1] >= 0 for r in completed)
+    assert len(records) == 2 * (len(phases) + 1)
+
+
+@pytest.mark.parametrize("failure", [ValueError("private detail"), KeyboardInterrupt()])
+def test_validation_timing_preserves_original_failure(monkeypatch, caplog, failure) -> None:
+    from newsroom.authority import _event_store_base as private
+
+    ticks = iter((1_000_000, 3_999_999))
+    monkeypatch.setattr(private, "perf_counter_ns", lambda: next(ticks), raising=False)
+    with caplog.at_level(logging.INFO, logger="newsroom.authority.open"):
+        with pytest.raises(type(failure)) as raised:
+            with private._validation_stage("quick_check"):
+                raise failure
+    assert raised.value is failure
+    assert [r.getMessage() for r in caplog.records] == [
+        "authority_open stage=quick_check status=STARTED",
+        "authority_open stage=quick_check status=FAILED elapsed_ms=2",
+    ]
 
 
 def test_partial_migration_failure_is_atomic() -> None:
@@ -63,7 +105,7 @@ def test_reopen_validates_history_schema_and_relational_integrity(
 
 
 def test_schema_tamper_fails_and_constructor_releases_writer_lock(
-    tmp_path: Path,
+    tmp_path: Path, caplog,
 ) -> None:
     database = tmp_path / "authority.sqlite3"
     with open_test_system(database):
@@ -76,8 +118,11 @@ def test_schema_tamper_fails_and_constructor_releases_writer_lock(
     finally:
         conn.close()
 
-    with pytest.raises(AuthoritySchemaError, match="fingerprint"):
-        open_test_system(database)
+    with caplog.at_level(logging.INFO, logger="newsroom.authority.open"):
+        with pytest.raises(AuthoritySchemaError, match="fingerprint"):
+            open_test_system(database)
+    failed = [r for r in caplog.records if "status=FAILED" in r.getMessage()]
+    assert [r.args[0] for r in failed] == ["schema", "validation"]
 
     # A failed constructor must not retain the lifetime writer lock.
     conn = sqlite3.connect(database)
@@ -132,7 +177,7 @@ def test_raw_sql_cannot_mutate_append_only_records(
 
 
 def test_aggregate_head_tamper_is_detected_on_restart(
-    tmp_path: Path,
+    tmp_path: Path, caplog,
 ) -> None:
     database = tmp_path / "authority.sqlite3"
     with open_test_system(database) as system:
@@ -159,10 +204,13 @@ def test_aggregate_head_tamper_is_detected_on_restart(
         conn.commit()
     finally:
         conn.close()
-    with pytest.raises(
-        AuthoritySchemaError, match="foreign-key|aggregate head"
-    ):
-        open_test_system(database)
+    with caplog.at_level(logging.INFO, logger="newsroom.authority.open"):
+        with pytest.raises(
+            AuthoritySchemaError, match="foreign-key|aggregate head"
+        ):
+            open_test_system(database)
+    failed = [r for r in caplog.records if "status=FAILED" in r.getMessage()]
+    assert [r.args[0] for r in failed] == ["foreign_key_check", "validation"]
 
 
 def test_every_command_has_one_version_audit_and_event(
