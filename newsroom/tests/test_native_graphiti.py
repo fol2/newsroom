@@ -517,6 +517,32 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
             "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
             ("terminal-" + identity, identity, status, "FAILED", failure, "now", "{}"),
         )
+    # Settled and unrelated history must not enter the current-ingest selector.
+    for number in range(5, 55):
+        identity = str(number)
+        connection.execute(
+            "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
+            (identity, "old-cycle", "GRAPHITI_CHAT_PRIMARY", "now", identity,
+             json.dumps({"ingest_id": f"old-ingest-{number}"})),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_allocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (identity, identity, "old-cycle", 1, "GRAPHITI_CHAT_PRIMARY",
+             policy.canonical_digest, "cursor-agent-cli", "route", "model", identity,
+             None, "now", identity, "{}"),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
+            ("terminal-" + identity, identity, "UNREPORTED", "FAILED",
+             "MISSING_PROVIDER_TELEMETRY", "now", "{}"),
+        )
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("disposition-" + identity, identity, "terminal-" + identity,
+             identity, policy.canonical_digest, "plan-" + identity,
+             "authority", "owner", "reference", "now", "now", "ESTIMATED", "{}"),
+        )
     connection.commit()
     if not retained:
         terminal = connection.execute(
@@ -573,22 +599,24 @@ def test_missing_subscription_usage_selector_scans_only_relevant_liabilities(
         plan = connection.execute(
             "EXPLAIN QUERY PLAN "
             "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
-            "FROM model_invocation_allocations a "
+            "FROM model_work_envelopes e INDEXED BY model_usage_native_graphiti_ingest "
+            "JOIN model_invocation_allocations a ON a.envelope_id=e.envelope_id "
             "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
-            "JOIN model_work_envelopes e ON e.envelope_id=a.envelope_id "
-            "WHERE a.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "WHERE e.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "AND json_extract(e.record_json, '$.ingest_id')=? "
+            "AND a.workload_class='GRAPHITI_CHAT_PRIMARY' "
             "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
             "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
             "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
-            "WHERE d.invocation_id=a.invocation_id)"
+            "WHERE d.invocation_id=a.invocation_id)",
+            ("selected-ingest",),
         ).fetchall()
     finally:
         connection.close()
     details = tuple(str(row[3]) for row in plan)
-    assert any(
-        "model_usage_unreported_missing_telemetry" in detail
-        for detail in details
-    ), details
+    assert any("SEARCH e USING INDEX model_usage_native_graphiti_ingest" in detail
+               for detail in details), details
+    assert not any("SCAN" in detail or "TEMP" in detail for detail in details), details
 
 
 @pytest.mark.parametrize('outcome', ('MALFORMED_OUTPUT', 'AMBIGUOUS_EFFECT', 'COMPLETE'))

@@ -390,10 +390,9 @@ CREATE INDEX IF NOT EXISTS model_usage_allocated_at
 ON model_invocation_allocations(allocated_at, invocation_id);
 CREATE INDEX IF NOT EXISTS model_usage_completed_at
 ON model_invocation_terminals(completed_at, invocation_id);
-CREATE INDEX IF NOT EXISTS model_usage_unreported_missing_telemetry
-ON model_invocation_terminals(invocation_id, terminal_digest)
-WHERE usage_status='UNREPORTED'
-AND failure_class='MISSING_PROVIDER_TELEMETRY';
+CREATE INDEX IF NOT EXISTS model_usage_native_graphiti_ingest
+ON model_work_envelopes(json_extract(record_json, '$.ingest_id'), envelope_id)
+WHERE workload_class='GRAPHITI_CHAT_PRIMARY';
 CREATE INDEX IF NOT EXISTS model_usage_transport_invocation
 ON model_transport_observations(invocation_id, observed_at, observation_digest);
 CREATE INDEX IF NOT EXISTS model_usage_route_state
