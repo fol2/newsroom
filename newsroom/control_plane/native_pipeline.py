@@ -108,6 +108,9 @@ class NativePipeline:
                 tuple(cohort), work_deadline=self._monotonic_clock() + self._reassessment_quantum,
             )
         self._drain_between_work()
+        # Give never-attempted revisions their first turn before retrying older
+        # Graphiti holds; stable sorting preserves landing order within both groups.
+        pending_revisions.sort(key=lambda item: item[0] in self._journal.progress)
         pending_revisions = tuple(pending_revisions)
         fresh_deadline = self._monotonic_clock() + self._reassessment_quantum
 

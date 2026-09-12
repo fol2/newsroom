@@ -693,6 +693,41 @@ def test_native_quantum_reports_exact_deferred_ids_and_never_projects_chunk_pref
         connection.close()
 
 
+@pytest.mark.parametrize("held_retries", (0, 1))
+def test_native_processor_preserves_fresh_priority_through_ingest_queue(
+    tmp_path, monkeypatch, held_retries,
+):
+    from newsroom.control_plane.store import record_graphiti_failure
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete as completed_result
+
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    fresh = replace(_native("fresh"), observed_at="2026-09-12T12:00:00.000000Z")
+    held = replace(_native("held"), observed_at="2026-09-11T12:00:00.000000Z")
+    for _ in range(held_retries):
+        record_graphiti_failure(
+            connection, ingest_id=held.ingest_id, source_id=held.source_id,
+            item_key=held.item_key, outcome="FAILED", failure_code="TEST_FAILURE",
+        )
+    connection.commit()
+    dispatched = []
+    processor._runner = SimpleNamespace(ingest=lambda unit: (
+        dispatched.append(unit.ingest_id)
+        or completed_result(unit, proposal_count=0, entity_count=0)
+    ))
+    try:
+        outcomes = processor.advance(
+            (fresh, held), cycle_id=f"fresh-before-held-{held_retries}",
+            defer_before_unit=lambda _: bool(dispatched),
+        )
+        assert dispatched == [fresh.ingest_id]
+        assert [(item.ingest_id, item.state) for item in outcomes] == [
+            (fresh.ingest_id, "GRAPHITI_COMPLETE"),
+            (held.ingest_id, "GRAPHITI_DEFERRED"),
+        ]
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("stop", ["veto", "drain"])
 def test_native_stop_outranks_quantum_deferral(tmp_path, monkeypatch, stop):
     processor, connection, calls = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
