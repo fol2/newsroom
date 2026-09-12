@@ -311,6 +311,7 @@ class _LineageStore(_EventAuthorityStore):
         *,
         proof: object | None = None,
         exact_relationships: bool = False,
+        relationship_inputs=None,
     ):
         nodes = {
             node.version_id: node
@@ -343,6 +344,21 @@ class _LineageStore(_EventAuthorityStore):
                 current_version_ids,
                 proof=proof,
             )
+        elif relationship_inputs is not None:
+            verified_versions, verified_relationships = relationship_inputs
+            try:
+                retained_relationships = tuple(
+                    verified_relationships[digest] for digest in relationship_digests
+                )
+                retained_versions = tuple(
+                    verified_versions[version_id] for version_id in sorted(nodes)
+                )
+            except KeyError as exc:
+                raise HypothesisLineageContractError(
+                    "retained lineage relationship input is absent"
+                ) from exc
+            current_versions = ()
+            current_dispositions = ()
         else:
             retained_relationships, retained_versions = (
                 (
@@ -529,6 +545,7 @@ class _LineageStore(_EventAuthorityStore):
         current_version_ids: tuple[str, ...] = (),
         *,
         proof: object | None = None,
+        relationship_inputs=None,
     ):
         # Preserve domain replay and exact per-event authority checks without
         # rescanning unrelated source/Graphiti history on every native read.
@@ -551,6 +568,7 @@ class _LineageStore(_EventAuthorityStore):
             required_relationship_digests,
             current_version_ids,
             proof=proof,
+            relationship_inputs=relationship_inputs,
         )
         replay = replay_hypothesis_lineage(
             history,

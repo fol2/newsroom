@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,75 @@ def test_native_runtime_factory_failure_closes_base_writer(tmp_path, monkeypatch
 
     args.pop("native_dependency_factory")
     args.update(retrieval_authority=retrieval, collision_enforcer=collision)
+    with open_native_runtime(**args):
+        pass
+
+
+@pytest.mark.parametrize("failure", (None, "relationship", "lineage", "candidate"))
+def test_native_open_shares_only_one_stable_validation_transaction(
+    tmp_path, monkeypatch, failure
+):
+    from newsroom.authority import _hermes_native_system as native
+
+    args = _args(tmp_path, monkeypatch)
+    connection = None
+    shared_inputs = None
+    visited = []
+    statements = []
+    original_relationship = native._SharedRelationshipStore._verify_relationships
+    original_lineage = native._SharedLineageStore._verify
+    original_candidate = native._SharedCandidateStore._verify
+
+    def checkpoint(store, stage):
+        nonlocal connection
+        if connection is None:
+            connection = store._connection
+            connection.set_trace_callback(statements.append)
+        assert store._connection is connection
+        assert connection.in_transaction
+        visited.append(stage)
+        if stage == failure:
+            raise ValueError("injected composed validation failure")
+
+    def relationships(store):
+        nonlocal shared_inputs
+        checkpoint(store, "relationship")
+        shared_inputs = original_relationship(store)
+        return shared_inputs
+
+    def lineage(store, **kwargs):
+        checkpoint(store, "lineage")
+        assert kwargs["relationship_inputs"] is shared_inputs
+        return original_lineage(store, **kwargs)
+
+    def candidate(store, **kwargs):
+        checkpoint(store, "candidate")
+        assert kwargs["relationship_receipts"] is shared_inputs[1]
+        # A second SQLite writer cannot alter the shared baseline between checks.
+        with sqlite3.connect(args["authority_path"], timeout=0) as other:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+        return original_candidate(store, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(native._SharedRelationshipStore, "_verify_relationships", relationships)
+        scoped.setattr(native._SharedLineageStore, "_verify", lineage)
+        scoped.setattr(native._SharedCandidateStore, "_verify", candidate)
+        if failure is None:
+            with open_native_runtime(**args):
+                assert visited == ["relationship", "lineage", "candidate"]
+                assert not connection.in_transaction
+                assert "ROLLBACK" not in statements
+                assert statements.count("COMMIT") == 1
+        else:
+            with pytest.raises(ValueError, match="injected composed validation failure"):
+                open_native_runtime(**args)
+            assert visited[-1] == failure
+            assert statements[-1] == "ROLLBACK"
+        # Success and every failure path release the root writer.
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
     with open_native_runtime(**args):
         pass
 

@@ -432,8 +432,11 @@ class _RelationshipEventStore(_EventAuthorityStore):
     def _load_row(self, decision_id: str) -> RelationshipAssessment:
         return self._load_receipt(decision_id).assessment
 
-    def _verify_relationships(self) -> None:
-        _verify_relationship_reads_in_transaction(
+    def _verify_relationships(self) -> tuple[
+        dict[str, EventHypothesisVersion],
+        dict[str, RetainedRelationshipDecisionReceipt],
+    ]:
+        verified = _verify_relationship_reads_in_transaction(
             self._connection,
             self._hypotheses,
             self._command_registry,
@@ -443,6 +446,7 @@ class _RelationshipEventStore(_EventAuthorityStore):
         _verify_relationship_event_coverage(
             self._connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
         )
+        return verified
 
     @staticmethod
     def _command(
