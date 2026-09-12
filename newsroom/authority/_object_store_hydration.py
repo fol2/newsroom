@@ -383,6 +383,30 @@ class _ObjectHydrationStoreMixin:
                 raise AuthorityPersistenceError(
                     "access decision canonical identity mismatch"
                 )
+            indexed_fields = (
+                ("policy_contract_digest", "hydration_policy_contract_digest"),
+                ("authentication_context_id", "authentication_context_id"),
+                ("authorization_request_digest", "authorization_request_digest"),
+                ("authorization_decision_id", "authorization_decision_id"),
+                ("principal_id", "principal_id"),
+                ("authority_domain", "authority_domain"),
+                ("purpose", "purpose"),
+                ("admission_id", "admission_id"),
+                ("object_class", "object_class"),
+                ("allowed_use", "allowed_use"),
+                ("security_scope", "security_scope"),
+                ("retention_scope", "retention_scope"),
+                ("offset", "byte_offset"),
+                ("allowed_bytes", "allowed_bytes"),
+                ("decided_at", "decided_at"),
+            )
+            if any(
+                value.get(field) != row[column]
+                for field, column in indexed_fields
+            ):
+                raise AuthorityPersistenceError(
+                    "access decision indexed fields differ"
+                )
             cutoff_bytes = bytes(row["state_cutoff_bytes"])
             cutoff_digest = str(row["state_cutoff_digest"])
             cutoff_value = self._decode_canonical_object(cutoff_bytes)
@@ -391,11 +415,97 @@ class _ObjectHydrationStoreMixin:
                     "access decision state cutoff digest mismatch"
                 )
             if (
-                value.get("state_cutoff") != cutoff_value
+                not isinstance(cutoff_value, dict)
+                or value.get("state_cutoff") != cutoff_value
                 or value.get("state_cutoff_digest") != cutoff_digest
+                or cutoff_value.get("admission_id") != row["admission_id"]
+                or cutoff_value.get("offset") != row["byte_offset"]
+                or cutoff_value.get("length") != row["allowed_bytes"]
             ):
                 raise AuthorityPersistenceError(
                     "access decision canonical cutoff differs from indexed record"
+                )
+            decision_row = self._connection.execute(
+                "SELECT * FROM authorization_decisions "
+                "WHERE authorization_decision_id=?",
+                (row["authorization_decision_id"],),
+            ).fetchone()
+            context_row = self._connection.execute(
+                "SELECT * FROM authentication_contexts "
+                "WHERE authentication_context_id=?",
+                (row["authentication_context_id"],),
+            ).fetchone()
+            request_row = self._connection.execute(
+                "SELECT * FROM authorization_requests WHERE request_digest=?",
+                (row["authorization_request_digest"],),
+            ).fetchone()
+            if decision_row is None or context_row is None or request_row is None:
+                raise AuthorityPersistenceError(
+                    "access decision security records are missing"
+                )
+            decision = self._decision_record_from_row(decision_row)
+            context = self._authentication_record_from_row(context_row)
+            request = self._request_record_from_row(request_row)
+            request_value = self._decode_canonical_object(request.canonical_bytes)
+            policy = self._hydration_policies.resolve_digest(
+                str(row["hydration_policy_contract_digest"])
+            )
+            expected_semantics = {
+                digest_canonical({
+                    "policy_contract_digest": row["hydration_policy_contract_digest"],
+                    "admission_id": row["admission_id"],
+                    "purpose": row["purpose"],
+                    "offset": row["byte_offset"],
+                    "length": length,
+                })
+                for length in (None, row["allowed_bytes"])
+            }
+            expected_scope_digest = digest_canonical({
+                "authentication_context_digest": context.canonical_digest,
+                "effective_scopes": list(decision.effective_scopes),
+            })
+            authenticated_at = UtcTimestamp.parse(context.authenticated_at)
+            expires_at = UtcTimestamp.parse(context.expires_at)
+            authorised_at = UtcTimestamp.parse(decision.decided_at)
+            accessed_at = UtcTimestamp.parse(str(row["decided_at"]))
+            if (
+                decision.authentication_context_id
+                != context.authentication_context_id
+                or decision.authorization_request_digest != request.request_digest
+                or request.authentication_context_id
+                != context.authentication_context_id
+                or request.principal_id != context.principal_id
+                or request.authority_domain != context.authority_domain
+                or request.principal_id != row["principal_id"]
+                or request.authority_domain != row["authority_domain"]
+                or request.operation_type != f"object:hydrate:{row['purpose']}"
+                or request_value.get("command_definition_digest")
+                != policy.contract_digest
+                or policy.purpose != row["purpose"]
+                or request.required_scope != policy.required_scope
+                or request.required_scope not in decision.effective_scopes
+                or row["principal_id"] not in policy.allowed_principal_ids
+                or row["authority_domain"] not in policy.allowed_authority_domains
+                or row["object_class"] not in policy.allowed_object_classes
+                or row["allowed_use"] not in policy.allowed_uses
+                or row["security_scope"] not in policy.allowed_security_scopes
+                or row["retention_scope"] not in policy.allowed_retention_scopes
+                or row["allowed_bytes"] > policy.max_bytes
+                or (not policy.allow_ranges and row["byte_offset"] != 0)
+                or decision.effective_scope_digest != expected_scope_digest
+                or not decision.allowed
+                or not (
+                    authenticated_at.value
+                    <= authorised_at.value
+                    < expires_at.value
+                )
+                or authorised_at.value > accessed_at.value
+                or accessed_at.value >= expires_at.value
+                or request_value.get("stable_semantic_request_digest")
+                not in expected_semantics
+            ):
+                raise AuthorityPersistenceError(
+                    "access decision security binding differs"
                 )
             return ObjectAccessDecisionView(
                 access_decision_id=access_decision_id,
