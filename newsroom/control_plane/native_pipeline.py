@@ -69,9 +69,6 @@ class NativePipeline:
             raise OperatorDrainRequested
 
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
-        reassessment_deadline = (
-            self._monotonic_clock() + self._reassessment_quantum
-        )
         self._check()
         self._drain_between_work()
         self._refresh_rights()
@@ -89,16 +86,30 @@ class NativePipeline:
 
         # Fixed disjoint cohorts attempt each revision at most once per tick.
         # Retained downstream work must not wait behind fresh model requests.
-        ready, pending_revisions = [], []
+        ordinary, reassessments, pending_revisions = [], [], []
         for revision_id, units in self._journal.units.items():
-            facts = self._journal.progress.get(revision_id, {}).get("facts", {})
-            cohort = ready if facts.get("graphiti_receipts") else pending_revisions
+            previous = self._journal.progress.get(revision_id, {})
+            facts = previous.get("facts", {})
+            if not facts.get("graphiti_receipts"):
+                cohort = pending_revisions
+            elif previous.get("stage") == "EVIDENCE_HOLD" and assessment_revalidation_due(
+                facts, self._assessment_contract_version,
+            ):
+                cohort = reassessments
+            else:
+                cohort = ordinary
             cohort.append((revision_id, units))
-        self._advance_revisions(
-            tuple(ready), reassessment_deadline=reassessment_deadline,
-        )
+        # Interrupted/unknown effects settle before starting ordinary work. Each
+        # turn has the existing quantum; an atomic revision may overrun it.
+        ordinary.sort(key=lambda item: self._journal.progress.get(item[0], {}).get("stage")
+                      not in {"ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"})
+        for cohort in (ordinary, reassessments):
+            self._advance_revisions(
+                tuple(cohort), work_deadline=self._monotonic_clock() + self._reassessment_quantum,
+            )
         self._drain_between_work()
         pending_revisions = tuple(pending_revisions)
+        fresh_deadline = self._monotonic_clock() + self._reassessment_quantum
 
         # Extraction stays per ingest; projection remains one complete cohort.
         pending = tuple(unit for _, units in pending_revisions for unit in units)
@@ -106,13 +117,24 @@ class NativePipeline:
             self._drain_between_work()
             self._check()
             try:
-                results = self._graphiti.advance(pending, cycle_id=cycle_id)
+                results = self._graphiti.advance(
+                    pending, cycle_id=cycle_id,
+                    defer_before_unit=lambda _: self._monotonic_clock() >= fresh_deadline,
+                )
                 if len(results) != len(pending) or {item.ingest_id for item in results} != {unit.ingest_id for unit in pending}:
                     raise ValueError("native Graphiti continuation partition differs")
                 by_ingest = {item.ingest_id: item for item in results}
                 for revision_id in dict.fromkeys(unit.revision_id for unit in pending):
                     outcomes = tuple(by_ingest[unit.ingest_id] for unit in self._journal.units[revision_id])
                     facts = dict(self._journal.progress.get(revision_id, {}).get("facts", {}))
+                    deferred = tuple(item for item in outcomes if item.state == "GRAPHITI_DEFERRED")
+                    if deferred:
+                        if any(item.reason != "WORK_QUANTUM_EXHAUSTED" or item.receipt_digest is not None
+                               for item in deferred):
+                            raise ValueError("native Graphiti deferral reason differs")
+                        # A scheduling decision is not a durable failure. Keep
+                        # the exact previous stage/facts until a later tick.
+                        continue
                     complete = all(item.state == "GRAPHITI_COMPLETE" for item in outcomes)
                     if complete:
                         facts.pop("graphiti_outcomes", None)
@@ -151,7 +173,7 @@ class NativePipeline:
                         **facts, "reason": type(exc).__name__,
                     })
 
-        self._advance_revisions(pending_revisions)
+        self._advance_revisions(pending_revisions, work_deadline=fresh_deadline)
         self._drain_between_work()
         states = Counter(
             self._journal.progress.get(revision_id, {}).get("stage", "QUEUED")
@@ -162,7 +184,7 @@ class NativePipeline:
         )
 
     def _advance_revisions(
-        self, revisions: tuple, *, reassessment_deadline: float | None = None,
+        self, revisions: tuple, *, work_deadline: float,
     ) -> None:
         # Each revision remains in the journal even when it disappears from the
         # next feed page. This is work continuation, not a fresh provider retry.
@@ -171,12 +193,10 @@ class NativePipeline:
             self._check()
             previous = self._journal.progress.get(revision_id, {})
             if (
-                reassessment_deadline is not None
-                and previous.get("stage") == "EVIDENCE_HOLD"
-                and assessment_revalidation_due(
-                    previous.get("facts", {}), self._assessment_contract_version,
-                )
-                and self._monotonic_clock() >= reassessment_deadline
+                previous.get("stage") not in {
+                    "ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED",
+                }
+                and self._monotonic_clock() >= work_deadline
             ):
                 continue
             if previous.get("stage") == "ASSESSMENT_INTERRUPTED":

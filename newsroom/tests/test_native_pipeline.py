@@ -20,7 +20,7 @@ def _open(tmp_path, monkeypatch):
     units = (_native("one"), _native("two"))
     calls = []
     class Graphiti:
-        def advance(self, selected, *, cycle_id):
+        def advance(self, selected, *, cycle_id, **kwargs):
             calls.append(("graphiti", selected[0].item_key))
             return tuple(NativeGraphitiOutcome(unit.ingest_id, "GRAPHITI_COMPLETE", unit.digest, None) for unit in selected)
     class Discovery:
@@ -180,8 +180,8 @@ def test_native_pipeline_checkpoints_graphiti_results_before_operator_drain(
     original = pipeline._graphiti
 
     class GraphitiThenDrain:
-        def advance(self, selected, *, cycle_id):
-            result = original.advance(selected, cycle_id=cycle_id)
+        def advance(self, selected, *, cycle_id, **kwargs):
+            result = original.advance(selected, cycle_id=cycle_id, **kwargs)
             service_event.set()
             return result
 
@@ -336,7 +336,7 @@ def test_native_pipeline_retains_hold_reason_then_clears_it_on_continuation(
     attempts = 0
 
     class Graphiti:
-        def advance(self, selected, *, cycle_id):
+        def advance(self, selected, *, cycle_id, **kwargs):
             nonlocal attempts
             attempts += 1
             outcomes = []
@@ -401,7 +401,7 @@ def test_native_pipeline_rolls_up_multiple_holds_and_rejects_a_missing_reason(
     class Graphiti:
         missing = False
 
-        def advance(self, selected, *, cycle_id):
+        def advance(self, selected, *, cycle_id, **kwargs):
             return (
                 NativeGraphitiOutcome(
                     selected[0].ingest_id, "GRAPHITI_HOLD", None,
@@ -655,12 +655,12 @@ def test_native_pipeline_advances_retained_work_before_new_graphiti_once(
             raise RuntimeError("retained downstream failure")
         return object()
 
-    def graphiti(selected, *, cycle_id):
+    def graphiti(selected, *, cycle_id, **kwargs):
         assert selected == (pending,)
         # The failure is committed before new provider work, not only in memory.
         reopened = NativeRevisionJournal(connection)
         assert reopened.progress[retained.revision_id]["stage"] == "RETRIEVAL_HOLD"
-        return original_graphiti.advance(selected, cycle_id=cycle_id)
+        return original_graphiti.advance(selected, cycle_id=cycle_id, **kwargs)
 
     pipeline._check = check
     pipeline._retrieval_for = retrieval
@@ -679,5 +679,131 @@ def test_native_pipeline_advances_retained_work_before_new_graphiti_once(
                 ("retrieval", pending.item_key),
             ]
         assert calls.count(("retrieval", retained.item_key)) == 1
+    finally:
+        connection.close()
+
+
+def test_ordinary_downstream_quantum_preserves_next_revision_until_next_poll(tmp_path, monkeypatch):
+    pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
+    now = [0.0]
+    pipeline._monotonic_clock = lambda: now[0]
+    dispositions[0] = ()
+    pipeline._intake = NS(poll=lambda: calls.append(("poll", "current")) or ())
+    for unit in units:
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="GRAPHITI_COMPLETE", facts={
+            "graphiti_receipts": [{}], "candidate_version_id": "candidate:" + unit.item_key,
+        })
+    previous = dict(journal.progress[units[1].revision_id])
+    original = pipeline._publish
+
+    def publish(**kwargs):
+        original.advance(**kwargs)
+        now[0] += 301
+
+    pipeline._publish = NS(advance=publish)
+    try:
+        first = pipeline.tick(cycle_id="first")
+        assert first.revision_states == {"ACKNOWLEDGED": 1, "GRAPHITI_COMPLETE": 1}
+        assert journal.progress[units[1].revision_id] == previous
+        pipeline.tick(cycle_id="second")
+        assert [call for call in calls if call[0] in {"poll", "publish"}] == [
+            ("poll", "current"), ("publish", units[0].revision_id),
+            ("poll", "current"), ("publish", units[1].revision_id),
+        ]
+    finally:
+        connection.close()
+
+
+def test_three_disjoint_turns_progress_with_revalidation_and_sustained_fresh_work(tmp_path, monkeypatch):
+    pipeline, journal, connection, _, calls, _ = _open(tmp_path, monkeypatch)
+    ordinary = _native("ordinary")
+    due = tuple(_native(f"due-{index}") for index in range(2))
+    fresh = tuple(_native(f"fresh-{index}") for index in range(3))
+    now = [0.0]
+    incoming = [fresh[:2]]
+    pipeline._assessment_contract_version = "v9"
+    pipeline._monotonic_clock = lambda: now[0]
+
+    def poll():
+        calls.append(("poll", "current"))
+        return tuple(NS(source_id=unit.source_id, status="READY", reason_code="RETAINED", units=(unit,)) for unit in incoming[0])
+
+    pipeline._intake = NS(poll=poll)
+    for unit in (ordinary, *due):
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="EVIDENCE_HOLD" if unit in due else "GRAPHITI_COMPLETE", facts={
+            "graphiti_receipts": [{}], "candidate_version_id": "candidate:" + unit.item_key,
+            "reason": "ASSESSOR_CLAIM_BINDING_HOLD", "assessment_contract_version": "v8",
+        })
+    original = pipeline._publish
+
+    def publish(**kwargs):
+        revision_id = kwargs["revision_id"]
+        if revision_id in {unit.revision_id for unit in due}:
+            calls.append(("revalidate", revision_id))
+            journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+                **journal.progress[revision_id]["facts"], "assessment_contract_version": "v9",
+            })
+        else:
+            original.advance(**kwargs)
+        now[0] += 301
+
+    def graphiti(selected, *, cycle_id, defer_before_unit):
+        results = []
+        for unit in selected:
+            if defer_before_unit(unit):
+                results.append(NativeGraphitiOutcome(unit.ingest_id, "GRAPHITI_DEFERRED", None, "WORK_QUANTUM_EXHAUSTED"))
+            else:
+                calls.append(("extract", unit.revision_id))
+                now[0] += 301
+                results.append(NativeGraphitiOutcome(unit.ingest_id, "GRAPHITI_COMPLETE", unit.digest, None))
+        return tuple(results)
+
+    pipeline._publish = NS(advance=publish)
+    pipeline._graphiti = NS(advance=graphiti)
+    try:
+        first = pipeline.tick(cycle_id="first")
+        assert first.revision_states == {"ACKNOWLEDGED": 1, "EVIDENCE_HOLD": 2, "GRAPHITI_COMPLETE": 1, "QUEUED": 1}
+        assert fresh[1].revision_id not in journal.progress
+        incoming[0] = (fresh[2],)
+        second = pipeline.tick(cycle_id="second")
+        assert second.revision_states == {"ACKNOWLEDGED": 2, "EVIDENCE_HOLD": 2, "GRAPHITI_COMPLETE": 1, "QUEUED": 1}
+        assert fresh[2].revision_id not in journal.progress
+        assert [call for call in calls if call[0] in {"poll", "publish", "revalidate", "extract"}] == [
+            ("poll", "current"), ("publish", ordinary.revision_id),
+            ("revalidate", due[0].revision_id), ("extract", fresh[0].revision_id),
+            ("poll", "current"), ("publish", fresh[0].revision_id),
+            ("revalidate", due[1].revision_id), ("extract", fresh[1].revision_id),
+        ]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stage", ["ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"])
+def test_unknown_or_interrupted_settlement_precedes_ordinary_and_survives_expired_quantum(tmp_path, monkeypatch, stage):
+    pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
+    ordinary = _native("ordinary")
+    now = [0.0]
+    pipeline._monotonic_clock = lambda: now[0]
+    dispositions[0] = ()
+    for unit in (ordinary, *units):
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="GRAPHITI_COMPLETE" if unit == ordinary else stage, facts={
+            "graphiti_receipts": [{}], "candidate_version_id": "candidate:" + unit.item_key,
+        })
+    previous = dict(journal.progress)
+
+    def publish(**kwargs):
+        calls.append(("settle", kwargs["revision_id"]))
+        now[0] += 301
+        if stage != "ASSESSMENT_INTERRUPTED":
+            raise OSError("still unresolved; retain exact marker")
+
+    pipeline._publish = NS(advance=publish)
+    try:
+        pipeline.tick(cycle_id="settle-first")
+        assert [call for call in calls if call[0] == "settle"] == [("settle", unit.revision_id) for unit in units]
+        assert journal.progress == previous
     finally:
         connection.close()

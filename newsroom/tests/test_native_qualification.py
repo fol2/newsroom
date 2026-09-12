@@ -580,3 +580,30 @@ def test_native_invocation_must_have_resolved_retained_usage(tmp_path):
         )
     finally:
         reconciled.close()
+
+
+@pytest.mark.parametrize("states,unclassified,ready", [
+    ({}, 0, True),
+    ({"ACKNOWLEDGED": 1, "EVIDENCE_HOLD": 2}, 0, True),
+    ({"QUEUED": 1}, 1, False),
+    ({"GRAPHITI_COMPLETE": 1}, 0, False),
+    ({"QUEUED": 2, "GRAPHITI_COMPLETE": 1, "EVIDENCE_HOLD": 3}, 2, False),
+])
+def test_qualification_readiness_defers_only_valid_pending_reports(states, unclassified, ready):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    assert qualification_report_ready(states, unclassified) is ready
+
+
+@pytest.mark.parametrize("states,unclassified", [
+    ({"UNKNOWN": 1}, 0), ({"ASSESSMENT_STARTED": 1}, 0),
+    ({"QUEUED": 0}, 0), ({"QUEUED": -1}, -1), ({"QUEUED": True}, 1),
+    ({"GRAPHITI_COMPLETE": "1"}, 0), ({"QUEUED": 1}, 0),
+    ({"ACKNOWLEDGED": 1}, 1), ({"ACKNOWLEDGED": 1}, False),
+    ({1: 1}, 0), ([], 0),
+])
+def test_qualification_readiness_rejects_malformed_or_unknown_reports(states, unclassified):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
+        qualification_report_ready(states, unclassified)

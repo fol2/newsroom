@@ -87,6 +87,25 @@ def _is_terminal_revision_state(value: object) -> bool:
     return type(value) is str and value in _TERMINAL_REVISION_STATES
 
 
+def qualification_report_ready(states: object, unclassified: object) -> bool:
+    """Defer only ordinary queued work; malformed inventories still fail."""
+
+    pending = {"QUEUED", "GRAPHITI_COMPLETE"}
+    if (
+        type(states) is not dict
+        or any(
+            type(name) is not str
+            or (not _is_terminal_revision_state(name) and name not in pending)
+            or type(count) is not int or count <= 0
+            for name, count in states.items()
+        )
+        or type(unclassified) is not int
+        or unclassified != states.get("QUEUED", 0)
+    ):
+        raise NativeQualificationError("native revision terminal inventory differs")
+    return not any(name in pending for name in states)
+
+
 def _document(raw: str, payload_digest: str) -> dict:
     try:
         value = json.loads(raw)
@@ -227,19 +246,7 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
     if tuple(item["source_id"] for item in sources) != SOURCE_IDS:
         raise NativeQualificationError("native source disposition order differs")
     states = pipeline["revision_states"]
-    if (
-        type(states) is not dict
-        or any(
-            type(name) is not str
-            or not _is_terminal_revision_state(name)
-            or type(count) is not int
-            or isinstance(count, bool)
-            or count <= 0
-            for name, count in states.items()
-        )
-        or pipeline["unclassified_revisions"] != 0
-        or states.get("QUEUED", 0) != 0
-    ):
+    if not qualification_report_ready(states, pipeline["unclassified_revisions"]):
         raise NativeQualificationError("native revision terminal inventory differs")
     return tuple(sources), states
 

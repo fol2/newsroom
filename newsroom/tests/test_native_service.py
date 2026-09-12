@@ -16,6 +16,38 @@ from scripts.hermes_native import main
 from newsroom.authority.canonical import digest_canonical
 
 
+def test_pending_service_reports_continue_same_open_and_qualify_only_when_terminal(
+    tmp_path, monkeypatch,
+):
+    reports = iter((
+        NativePipelineReport((), {"QUEUED": 1}, 1),
+        NativePipelineReport((), {"GRAPHITI_COMPLETE": 1}, 0),
+        NativePipelineReport((), {"ACKNOWLEDGED": 1}, 0),
+    ))
+    order = []
+    factory, opened = _pipeline(
+        monkeypatch, lambda cycle: order.append(cycle) or next(reports),
+    )
+    identity = digest_canonical({"runtime": "cooperative-continuation"})
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = identity
+            yield pipeline
+
+    waits = []
+    result = _service(
+        tmp_path, bound,
+        cycle_id_factory=iter(("queued", "graphiti", "ack")).__next__,
+        qualify_once=lambda *_: order.append("qualified"),
+        wait=lambda _: waits.append(True) or len(waits) == 3,
+    ).run()
+    assert result.pipeline.revision_states == {"ACKNOWLEDGED": 1}
+    assert order == ["queued", "graphiti", "ack", "qualified"]
+    assert opened == ["open", "close"]
+
+
 def _pipeline(monkeypatch, tick):
     pipeline = object.__new__(NativePipeline)
     pipeline._test_tick = tick
@@ -420,3 +452,14 @@ def test_hermes_native_owner_stop_is_not_a_supervisor_crash(tmp_path, monkeypatc
     assert json.loads(capsys.readouterr().out) == {
         "service": None, "owner_stop": True, "public_effect": False,
     }
+
+
+@pytest.mark.parametrize("states,unclassified", [({"UNKNOWN": 1, "QUEUED": 1}, 1), ({"QUEUED": 1}, 0)])
+def test_malformed_pending_report_does_not_silently_defer_qualification(tmp_path, monkeypatch, states, unclassified):
+    from newsroom.control_plane.native_qualification import NativeQualificationError
+
+    factory, opened = _pipeline(monkeypatch, lambda _: NativePipelineReport((), states, unclassified))
+    with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
+        _service(tmp_path, factory, qualify_once=lambda *_: pytest.fail("invalid qualification"),
+                 wait=lambda _: pytest.fail("invalid report was silently deferred")).run()
+    assert opened == ["open", "close"]

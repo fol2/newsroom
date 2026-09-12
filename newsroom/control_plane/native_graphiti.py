@@ -118,6 +118,7 @@ class NativeGraphitiProcessor:
 
     def advance(
         self, units: tuple[CorpusIngestUnit, ...], *, cycle_id: str,
+        defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
     ) -> tuple[NativeGraphitiOutcome, ...]:
         if not units:
             return ()
@@ -140,6 +141,8 @@ class NativeGraphitiProcessor:
                     or any(unit.chunk_count != members[0].chunk_count for unit in members)):
                 raise ValueError("native Graphiti revision chunk coverage differs")
         self._stop_check()
+        # Resolve retained accounting before considering another provider call.
+        self._settle_missing_subscription_usage(units)
         terminal_holds = {}
         for unit in units:
             # The authority commits before the private receipt/failure journal.
@@ -166,6 +169,15 @@ class NativeGraphitiProcessor:
                     if head.outcome is GraphitiAdapterOutcome.COMPLETE else
                     f"{head.outcome.value}:{head.failure_code}"
                 )
+        deferred = set()
+
+        def defer(unit: CorpusIngestUnit) -> bool:
+            self._stop_check()
+            if defer_before_unit(unit):
+                deferred.add(unit.ingest_id)
+                return True
+            return False
+
         _ingest(
             self._connection, graphiti=self._runner,
             units=tuple(unit for unit in units if unit.ingest_id not in terminal_holds),
@@ -173,6 +185,7 @@ class NativeGraphitiProcessor:
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
             operator_drain_requested=self._operator_drain_requested,
+            defer_before_unit=defer,
         )
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():
@@ -188,6 +201,11 @@ class NativeGraphitiProcessor:
             if row is not None and row[0] == "COMPLETE":
                 complete.append(unit.ingest_id)
                 outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "EXTRACTION_COMPLETE", str(row[1]), None))
+            elif unit.ingest_id in deferred:
+                outcomes.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_DEFERRED", None,
+                    "WORK_QUANTUM_EXHAUSTED",
+                ))
             else:
                 failures, dead = graphiti_failure_state(self._connection, unit.ingest_id)
                 reason = (
