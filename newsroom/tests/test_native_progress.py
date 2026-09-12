@@ -86,3 +86,72 @@ def test_native_journal_retains_page_references_and_per_item_holds_across_poll(t
     reopened = NativeRevisionJournal(connection)
     assert reopened.observations[reference[1]] == reference
     connection.close()
+
+
+def _retrieval_facts():
+    return {
+        "retrieval_binding": {"request": {"nodes": ["Retained graph record. " * 200]}},
+        "retrieval_rights_inventory": [{"source_id": "UK-01", "rights": "retained"}],
+        "retrieval_embeddings": {"passage": {"state": "STARTED", "cycle_id": "cycle"}},
+        "reason": "EVIDENCE_NOT_READY",
+    }
+
+
+def test_unchanged_retrieval_pair_references_previous_record_but_returns_full_facts(tmp_path):
+    import json
+
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    revision = _native().revision_id
+    journal.land((_native(),))
+    facts = _retrieval_facts()
+    journal.advance(revision, stage="RETRIEVAL_COMPLETE", facts=facts)
+    previous = connection.execute("SELECT seq,payload_digest FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
+    result = journal.advance(revision, stage="EVIDENCE_HOLD", facts=facts)
+    raw = json.loads(connection.execute("SELECT payload_json FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()[0])
+    assert raw["retrieval_facts_ref"] == {"seq": previous[0], "payload_digest": previous[1], "ordinal": 1}
+    assert "retrieval_binding" not in raw["facts"]
+    assert "retrieval_rights_inventory" not in raw["facts"]
+    assert raw["facts"]["retrieval_embeddings"] == facts["retrieval_embeddings"]
+    assert result["facts"] == facts
+    assert result == NativeRevisionJournal(connection).progress[revision]
+    connection.close()
+
+
+def test_mutated_previous_pair_is_not_mistaken_for_committed_content(tmp_path):
+    import json
+
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    revision = _native().revision_id
+    journal.land((_native(),))
+    retained = journal.advance(revision, stage="RETRIEVAL_COMPLETE", facts=_retrieval_facts())
+    retained["facts"]["retrieval_binding"]["request"]["nodes"].append("new record")
+    result = journal.advance(revision, stage="RETRIEVAL_COMPLETE", facts=retained["facts"])
+    assert result["ordinal"] == 2
+    raw = json.loads(connection.execute("SELECT payload_json FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()[0])
+    assert "retrieval_facts_ref" not in raw
+    assert result == NativeRevisionJournal(connection).progress[revision]
+    connection.close()
+
+
+def test_failed_append_rolls_back_without_advancing_reference(tmp_path, monkeypatch):
+    import newsroom.control_plane.native_progress as progress
+
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    revision = _native().revision_id
+    journal.land((_native(),))
+    before = journal.advance(revision, stage="RETRIEVAL_COMPLETE", facts=_retrieval_facts())
+    original = progress.append_ledger
+    def fail_after_insert(*args):
+        original(*args)
+        raise RuntimeError("injected append failure")
+    monkeypatch.setattr(progress, "append_ledger", fail_after_insert)
+    with pytest.raises(RuntimeError, match="injected"):
+        journal.advance(revision, stage="EVIDENCE_HOLD", facts=_retrieval_facts())
+    assert not connection.in_transaction
+    assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 2
+    assert journal.progress[revision] == before
+    assert NativeRevisionJournal(connection).progress[revision] == before
+    connection.close()
