@@ -18,7 +18,6 @@ from newsroom.control_plane.store import (
 from newsroom.control_plane.writer import FixtureWriter
 from newsroom.effective_revision import (
     EffectiveRevisionIdentity,
-    create_effective_revision_schema,
     retain_observation_revision_first_seen,
 )
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
@@ -44,58 +43,9 @@ def _add_proving_run(
     fetched_at: str,
     rights_now: str = "2026-08-20T00:00:00.000000Z",
 ) -> None:
-    connection = sqlite3.connect(proving)
-    create_effective_revision_schema(connection)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_runs(
-            run_id TEXT PRIMARY KEY,
-            started_at TEXT NOT NULL,
-            publication INTEGER NOT NULL DEFAULT 0,
-            public_dispatch INTEGER NOT NULL DEFAULT 0,
-            openrouter_invoked INTEGER NOT NULL DEFAULT 0,
-            spend_gbp_minor INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_observations(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            url TEXT NOT NULL,
-            status_code INTEGER NOT NULL,
-            body_digest TEXT NOT NULL,
-            body BLOB NOT NULL,
-            item_count INTEGER NOT NULL,
-            error TEXT
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_gates(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id)
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_rights_packets(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            packet_digest TEXT NOT NULL,
-            packet_json TEXT NOT NULL,
-            assessed_at TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id)
-        )
-        """
-    )
+    from newsroom.increment9.proving import _connect, _store_body
+
+    connection = _connect(str(proving))
     connection.execute(
         """
         INSERT INTO proving_runs(
@@ -105,8 +55,9 @@ def _add_proving_run(
         """,
         (run_id, fetched_at),
     )
+    _store_body(connection, digest_bytes(body), body)
     connection.execute(
-        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
         (
             "UK-01",
             run_id,
@@ -114,7 +65,6 @@ def _add_proving_run(
             _URL,
             200,
             digest_bytes(body),
-            body,
             1,
             None,
         ),

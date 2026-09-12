@@ -53,10 +53,12 @@ from newsroom.control_plane.graphiti_spend_reconciliation import (
 from newsroom.control_plane.issue_790_canary import graphiti_excluded_event_ids
 from newsroom.control_plane.read_only_snapshot import read_only_snapshot
 from newsroom.increment9.proving import (
+    ProvingError,
     PROVING_GATES,
     RIGHTS_GATE_BY_SOURCE,
     SOURCE_IDS,
     SOURCE_URLS,
+    resolve_observation_body,
 )
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_EXTRACTION_TIMEOUT_MS
 from newsroom.graphiti_adapter.identity import attempt_ids
@@ -1008,17 +1010,20 @@ def _proving_accounting(
         status = str(status)
         endpoint = str(endpoint)
         observation = connection.execute(
-            "SELECT fetched_at,url,status_code,body_digest,item_count,error,body "
+            "SELECT fetched_at,url,status_code,body_digest,item_count,error "
             "FROM proving_observations WHERE run_id=? AND source_id=? "
             "ORDER BY fetched_at DESC LIMIT 1",
             (run_id, source_id),
         ).fetchone()
         expected_endpoint = SOURCE_URLS.get(source_id)
-        body_digest_valid = bool(
-            observation is not None
-            and isinstance(observation[6], bytes)
-            and digest_bytes(observation[6]) == str(observation[3])
-        )
+        body_digest_valid = False
+        if observation is not None:
+            try:
+                resolve_observation_body(connection, observation[3])
+                body_digest_valid = True
+            except (ProvingError, sqlite3.Error):
+                # Preserve typed failed readiness for corrupt or missing bodies.
+                pass
         rights_gate_status = gate_statuses.get(
             RIGHTS_GATE_BY_SOURCE.get(source_id, "")
         )

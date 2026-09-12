@@ -171,6 +171,7 @@ from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     GLOBAL_PROVING_GATES,
     assess_content,
+    resolve_observation_body,
 )
 from newsroom.increment9.rights import assess_rights
 
@@ -1984,14 +1985,14 @@ def _permitted_rows(
         run_id = str(raw_run_id)
         values = proving.execute(
             """
-            SELECT source_id, url, fetched_at, status_code, body_digest, body, error
+            SELECT source_id, url, fetched_at, status_code, body_digest, error
             FROM proving_observations
             WHERE run_id=? AND fetched_at>=?
             ORDER BY source_id, fetched_at, body_digest
             """,
             (run_id, raw_http_cutoff),
         ).fetchall()
-        for source_id, url, fetched_at, status_code, body_digest, body, error in values:
+        for source_id, url, fetched_at, status_code, body_digest, error in values:
             source_id_text = str(source_id)
             source_url = str(url)
             current = _current_rights_decision(
@@ -2005,11 +2006,10 @@ def _permitted_rows(
             if (
                 current is None
                 or int(status_code) != 200
-                or not body
                 or error is not None
             ):
                 continue
-            body_bytes = bytes(body)
+            body_bytes = resolve_observation_body(proving, body_digest)
             assessment = assess_content(source_url, body_bytes)
             if not assessment.usable:
                 continue

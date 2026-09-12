@@ -110,7 +110,7 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
         ensure_proving_revision_schema,
     )
     from newsroom.graphiti_adapter.identity import content_digest
-    from newsroom.increment9.proving import assess_content
+    from newsroom.increment9.proving import assess_content, resolve_observation_body
 
     ensure_proving_revision_schema(connection)
 
@@ -124,7 +124,7 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
     result = connection.execute(
         """
         SELECT MAX(fetched_at) FROM proving_observations
-        WHERE status_code=200 AND body IS NOT NULL AND error IS NULL
+        WHERE status_code=200 AND error IS NULL
         """
     ).fetchone()
     latest_observation_time = result[0] if result[0] else None
@@ -145,17 +145,17 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
     # Get observations to process: those newer than watermark or all if no watermark
     if watermark is None:
         query = """
-            SELECT source_id, fetched_at, url, body
+            SELECT source_id, fetched_at, url, body_digest
             FROM proving_observations
-            WHERE status_code=200 AND body IS NOT NULL AND error IS NULL
+            WHERE status_code=200 AND error IS NULL
             ORDER BY fetched_at ASC
         """
         params = ()
     else:
         query = """
-            SELECT source_id, fetched_at, url, body
+            SELECT source_id, fetched_at, url, body_digest
             FROM proving_observations
-            WHERE status_code=200 AND body IS NOT NULL AND error IS NULL
+            WHERE status_code=200 AND error IS NULL
             AND fetched_at > ?
             ORDER BY fetched_at ASC
         """
@@ -167,8 +167,8 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
     revisions_seen: dict[tuple[str, str, str], str] = {}
     pulls_seen: dict[tuple[str, str, str, str, str], str] = {}
 
-    for source_id, fetched_at, url, body in observations:
-        body_bytes = bytes(body)
+    for source_id, fetched_at, url, body_digest in observations:
+        body_bytes = resolve_observation_body(connection, body_digest)
         if not assess_content(str(url), body_bytes).usable:
             continue
         for item in parse_observation(

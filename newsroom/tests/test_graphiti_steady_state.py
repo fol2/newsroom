@@ -688,50 +688,11 @@ def _seed_proving_accountability(
     *,
     held_source_id: str | None = None,
 ) -> None:
-    connection = sqlite3.connect(proving)
-    connection.executescript(
-        """
-        DROP TABLE proof;
-        CREATE TABLE proving_runs(
-            run_id TEXT PRIMARY KEY,
-            started_at TEXT NOT NULL,
-            publication INTEGER NOT NULL,
-            public_dispatch INTEGER NOT NULL,
-            openrouter_invoked INTEGER NOT NULL,
-            spend_gbp_minor INTEGER NOT NULL
-        );
-        CREATE TABLE proving_gates(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id)
-        );
-        CREATE TABLE proving_observations(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            url TEXT NOT NULL,
-            status_code INTEGER NOT NULL,
-            body_digest TEXT NOT NULL,
-            body BLOB NOT NULL,
-            item_count INTEGER NOT NULL,
-            error TEXT,
-            PRIMARY KEY(run_id, source_id, body_digest)
-        );
-        CREATE TABLE proving_source_health(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            endpoint TEXT NOT NULL,
-            attempts INTEGER NOT NULL,
-            reason TEXT,
-            next_retry_at TEXT,
-            recovered_at TEXT,
-            PRIMARY KEY(run_id, source_id)
-        );
-        """
-    )
+    from newsroom.increment9.proving import _connect, _store_body
+
+    with sqlite3.connect(proving) as initial:
+        initial.execute("DROP TABLE proof")
+    connection = _connect(str(proving))
     connection.execute(
         "INSERT INTO proving_runs VALUES(?,?,?,?,?,?)",
         ("run-1", "2026-09-01T12:00:00Z", 0, 0, 0, 0),
@@ -742,8 +703,9 @@ def _seed_proving_accountability(
     )
     for source_id in SOURCE_IDS:
         body = source_id.encode()
+        _store_body(connection, digest_bytes(body), body)
         connection.execute(
-            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
             (
                 source_id,
                 "run-1",
@@ -751,7 +713,6 @@ def _seed_proving_accountability(
                 SOURCE_URLS[source_id],
                 200,
                 digest_bytes(body),
-                body,
                 1,
                 None,
             ),
@@ -3684,3 +3645,30 @@ def test_report_exit_zero_only_for_owner_decision_ready(
 
     assert graphiti_steady_state_report.main() == expected_exit
     assert json.loads(capsys.readouterr().out) == {"verdict": verdict}
+
+
+@pytest.mark.parametrize("corruption", ["missing", "non-blob", "mismatch"])
+def test_proving_body_corruption_is_typed_failed_readiness(tmp_path, corruption):
+    proving, unpublished, connection = _stores(tmp_path)
+    connection.close()
+    _seed_proving_accountability(proving)
+    source_id = SOURCE_IDS[0]
+    with sqlite3.connect(proving) as connection:
+        digest = connection.execute(
+            "SELECT body_digest FROM proving_observations WHERE source_id=?",
+            (source_id,),
+        ).fetchone()[0]
+        if corruption == "missing":
+            connection.execute("DELETE FROM proving_bodies WHERE body_digest=?", (digest,))
+        else:
+            connection.execute(
+                "UPDATE proving_bodies SET body=? WHERE body_digest=?",
+                ("text" if corruption == "non-blob" else b"wrong", digest),
+            )
+    packet = _packet(proving, unpublished)
+    accountability = packet["proving_accountability"]
+    assert accountability["unaccounted_source_ids"] == [source_id]
+    assert "PROVING_SOURCE_UNACCOUNTED" in packet["blockers"]
+    source = next(row for row in accountability["sources"] if row["source_id"] == source_id)
+    assert source["body_digest_valid"] is False
+    assert source["observation_success"] is False

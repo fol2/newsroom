@@ -12,6 +12,8 @@ from typing import Any, Literal, Never
 
 import pytest
 
+from newsroom.increment9.proving import _store_body, resolve_observation_body
+
 from newsroom.authority import HydrationPolicyRegistry
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
@@ -1643,13 +1645,15 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
     url = "https://www.gov.uk/search/all.atom"
     digest = digest_bytes(body)
 
+    _store_body(connection, digest, body)
     # Insert old observations (these will be missing first-seen rows)
     for i in range(5):
+        connection.execute("INSERT INTO proving_runs(run_id,started_at) VALUES(?,?)", (f"run-old-{i}", f"2026-08-20T{i:02d}:00:00.000000Z"))
         connection.execute(
             """
             INSERT INTO proving_observations(
-                source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                source_id, run_id, fetched_at, url, status_code, body_digest, item_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "UK-01",
@@ -1658,18 +1662,18 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
                 url,
                 200,
                 digest,
-                body,
                 1,
             ),
         )
 
     # Insert a recent observation that will be added to first-seen by _put()-like logic
     latest_time = "2026-08-20T10:00:00.000000Z"
+    connection.execute("INSERT INTO proving_runs(run_id,started_at) VALUES(?,?)", ("run-recent", latest_time))
     connection.execute(
         """
         INSERT INTO proving_observations(
-            source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            source_id, run_id, fetched_at, url, status_code, body_digest, item_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "UK-01",
@@ -1678,7 +1682,6 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
             url,
             200,
             digest,
-            body,
             1,
         ),
     )
@@ -1734,25 +1737,39 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
     url = "https://www.gov.uk/search/all.atom"
     connection = connect_proving(str(proving))
 
+    _store_body(connection, digest_bytes(body), body)
     for observed_at in (
         "2026-08-20T00:00:00.000000Z",
         "2026-08-20T01:00:00.000000Z",
         "2026-08-20T02:00:00.000000Z",
     ):
+        run_id = f"backlog-{observed_at}"
+        connection.execute(
+            "INSERT INTO proving_runs(run_id,started_at) VALUES(?,?)",
+            (run_id, observed_at),
+        )
+        connection.execute(
+            "INSERT INTO proving_gates SELECT ?,gate_id,status,reason "
+            "FROM proving_gates WHERE run_id='run-1'", (run_id,),
+        )
+        connection.execute(
+            "INSERT INTO proving_rights_packets "
+            "SELECT ?,gate_id,packet_digest,packet_json,assessed_at "
+            "FROM proving_rights_packets WHERE run_id='run-1'", (run_id,),
+        )
         connection.execute(
             """
             INSERT INTO proving_observations(
-                source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                source_id, run_id, fetched_at, url, status_code, body_digest, item_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "UK-01",
-                "backlog-run",
+                f"backlog-{observed_at}",
                 observed_at,
                 url,
                 200,
                 digest_bytes(body),
-                body,
                 1,
             ),
         )
@@ -2230,21 +2247,23 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
     )
     for row in connection.execute(
         """
-        SELECT source_id, url, status_code, body_digest, body, item_count, error
+        SELECT source_id, url, status_code, body_digest, item_count, error
         FROM proving_observations WHERE run_id='run-1'
         """
     ).fetchall():
-        source_id, url, status_code, digest, body, item_count, error = row
+        source_id, url, status_code, digest, item_count, error = row
+        body = resolve_observation_body(connection, digest) + b" "
+        digest = digest_bytes(body)
+        _store_body(connection, digest, body)
         connection.execute(
-            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
             (
                 source_id,
                 "run-2",
                 "2026-08-20T00:00:00.000000Z",
                 url,
                 status_code,
-                f"{digest}-run-2",
-                bytes(body) + b" ",
+                digest,
                 item_count,
                 error,
             ),
@@ -2312,13 +2331,15 @@ def test_malformed_success_observation_is_not_admitted_to_cycle(
 ) -> None:
     proving = _proving(tmp_path)
     connection = sqlite3.connect(proving)
+    if body is not None:
+        _store_body(connection, digest_bytes(body), body)
     connection.execute(
         """
         UPDATE proving_observations
-        SET error=?, body=COALESCE(?, body)
+        SET error=?, body_digest=COALESCE(?, body_digest)
         WHERE run_id='run-1' AND source_id='UK-01'
         """,
-        (stored_error, body),
+        (stored_error, None if body is None else digest_bytes(body)),
     )
     connection.commit()
     connection.close()
@@ -3902,6 +3923,8 @@ def test_proving_writer_lock_timeout_is_bounded_and_fail_closed(
 
     proving = _proving(tmp_path)
     blocker = sqlite3.connect(proving)
+    # Exercise the writer profile transition, not a read on an existing WAL store.
+    blocker.execute("PRAGMA journal_mode=DELETE")
     blocker.execute("BEGIN IMMEDIATE")
     monkeypatch.setattr(proving_module, "PROVING_WRITE_TIMEOUT_SECONDS", 0.01)
     try:
@@ -4071,8 +4094,9 @@ def _retain_source(
             "2026-08-20T00:00:00.000000Z",
         ),
     )
+    _store_body(connection, digest_bytes(body), body)
     connection.execute(
-        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
         (
             source_id,
             "run-1",
@@ -4080,7 +4104,6 @@ def _retain_source(
             url,
             200,
             digest_bytes(body),
-            body,
             1,
             None,
         ),
@@ -4681,9 +4704,10 @@ def test_ordered_chunks_wait_for_predecessor_completion(tmp_path: Path) -> None:
         "DELETE FROM proving_gates "
         "WHERE gate_id LIKE 'RIGHTS_%' AND gate_id!='RIGHTS_UK-01'"
     )
+    _store_body(connection, digest_bytes(feed), feed)
     connection.execute(
-        "UPDATE proving_observations SET body=?, body_digest=? WHERE source_id='UK-01'",
-        (feed, digest_bytes(feed)),
+        "UPDATE proving_observations SET body_digest=? WHERE source_id='UK-01'",
+        (digest_bytes(feed),),
     )
     retain_observation_revision_first_seen(
         connection,

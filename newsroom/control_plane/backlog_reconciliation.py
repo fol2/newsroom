@@ -491,19 +491,20 @@ def _usable_observation_rows(
     observations = _schema_table("proving_observations", schema=schema)
     rows = connection.execute(
         f"""
-        SELECT source_id, fetched_at, url, body
+        SELECT source_id, fetched_at, url, body_digest
         FROM {observations}
-        WHERE status_code=200 AND body IS NOT NULL AND error IS NULL
+        WHERE status_code=200 AND error IS NULL
         ORDER BY fetched_at ASC, source_id, url
         """
     ).fetchall()
-    from newsroom.increment9.proving import assess_content
+    from newsroom.increment9.proving import assess_content, resolve_observation_body
 
-    return tuple(
-        (str(source_id), str(fetched_at), str(url), bytes(body))
-        for source_id, fetched_at, url, body in rows
-        if body and assess_content(str(url), bytes(body)).usable
-    )
+    usable = []
+    for source_id, fetched_at, url, body_digest in rows:
+        body = resolve_observation_body(connection, body_digest, schema=schema)
+        if body and assess_content(str(url), body).usable:
+            usable.append((str(source_id), str(fetched_at), str(url), body))
+    return tuple(usable)
 
 
 @dataclass(frozen=True, slots=True)

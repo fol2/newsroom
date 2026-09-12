@@ -5,6 +5,8 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from newsroom.increment9.proving import _store_body, resolve_observation_body
+
 from newsroom.authority.canonical import digest_bytes
 from newsroom.control_plane.corpus import CorpusIngestUnit, revisions_from, units_from
 from newsroom.control_plane.cycle import CycleReport, run_cycle
@@ -64,13 +66,14 @@ def _set_body(proving: Path, *, source_id: str, body: bytes) -> None:
         "SELECT url, fetched_at FROM proving_observations WHERE source_id=?",
         (source_id,),
     ).fetchone()
+    _store_body(connection, digest_bytes(body), body)
     connection.execute(
         """
         UPDATE proving_observations
-        SET body=?, body_digest=?
+        SET body_digest=?
         WHERE source_id=?
         """,
-        (body, digest_bytes(body), source_id),
+        (digest_bytes(body), source_id),
     )
     connection.execute(
         "DELETE FROM proving_revision_first_seen WHERE source_id=?",
@@ -108,15 +111,15 @@ def _add_unchanged_poll(
     )
     rows = connection.execute(
         """
-        SELECT source_id, url, status_code, body_digest, body, item_count, error
+        SELECT source_id, url, status_code, body_digest, item_count, error
         FROM proving_observations WHERE run_id=?
         """,
         (latest,),
     ).fetchall()
-    for source_id, url, status_code, digest, body, item_count, error in rows:
-        body_bytes = bytes(body)
+    for source_id, url, status_code, digest, item_count, error in rows:
+        body_bytes = resolve_observation_body(connection, digest)
         connection.execute(
-            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
             (
                 source_id,
                 run_id,
@@ -124,7 +127,6 @@ def _add_unchanged_poll(
                 url,
                 status_code,
                 digest,
-                body_bytes,
                 item_count,
                 error,
             ),

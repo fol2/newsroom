@@ -42,7 +42,6 @@ from newsroom.control_plane.writer import (
     run_grok_cli,
 )
 from newsroom.effective_revision import (
-    create_effective_revision_schema,
     retain_observation_revision_first_seen,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -272,46 +271,9 @@ def _cycle_rights_inventory(
 
 def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
     path = tmp_path / "proving_store.sqlite3"
-    connection = __import__("sqlite3").connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE proving_runs(
-            run_id TEXT PRIMARY KEY,
-            started_at TEXT NOT NULL,
-            publication INTEGER NOT NULL DEFAULT 0,
-            public_dispatch INTEGER NOT NULL DEFAULT 0,
-            openrouter_invoked INTEGER NOT NULL DEFAULT 0,
-            spend_gbp_minor INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE proving_observations(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            url TEXT NOT NULL,
-            status_code INTEGER NOT NULL,
-            body_digest TEXT NOT NULL,
-            body BLOB NOT NULL,
-            item_count INTEGER NOT NULL,
-            error TEXT
-        );
-        CREATE TABLE proving_gates(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id)
-        );
-        CREATE TABLE proving_rights_packets(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            packet_digest TEXT NOT NULL,
-            packet_json TEXT NOT NULL,
-            assessed_at TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id)
-        );
-        """
-    )
-    create_effective_revision_schema(connection)
+    from newsroom.increment9.proving import _connect, _store_body
+
+    connection = _connect(str(path))
     connection.execute(
         """
         INSERT INTO proving_runs(
@@ -324,34 +286,32 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
         (
             "UK-01",
             SOURCE_URLS["UK-01"],
-            "sha256:feed",
             ATOM,
         ),
         (
             "HK-01",
             "https://www.news.gov.hk/tc/common/html/topstories.rss.xml",
-            "sha256:rss",
             RSS,
         ),
         (
             "UK-02",
             "https://www.gov.uk/api/content/british-national-overseas-bno-visa",
-            "sha256:json",
             JSON_DOC,
         ),
         *tuple(
             (
                 source_id,
                 BINDINGS[f"RIGHTS_{source_id}"][2],
-                f"sha256:{source_id}",
                 body,
             )
             for source_id, body in extra
         ),
     )
-    for source_id, url, digest, body in rows:
+    for source_id, url, body in rows:
+        digest = digest_bytes(body)
+        _store_body(connection, digest, body)
         connection.execute(
-            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
             (
                 source_id,
                 "run-1",
@@ -359,7 +319,6 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 url,
                 200,
                 digest,
-                body,
                 1,
                 None,
             ),
@@ -378,7 +337,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             "INSERT INTO proving_gates VALUES(?,?,?,?)",
             ("run-1", gate_id, "PASS", "fixture"),
         )
-    for source_id, _url, _digest, _body in rows:
+    for source_id, _url, _body in rows:
         gate_id = f"RIGHTS_{source_id}"
         connection.execute(
             "INSERT INTO proving_gates VALUES(?,?,?,?)",

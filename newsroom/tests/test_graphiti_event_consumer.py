@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 import newsroom.control_plane.cycle as cycle_module
+from newsroom.increment9.proving import _store_body
+
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -1810,9 +1812,10 @@ def test_independent_consumer_drains_four_ordered_chunks_in_one_event_attempt(
     proving_connection.execute(
         "DELETE FROM proving_observations WHERE source_id!='HK-01'"
     )
+    _store_body(proving_connection, digest_bytes(raw), raw)
     proving_connection.execute(
-        "UPDATE proving_observations SET body=?,body_digest=? WHERE source_id='HK-01'",
-        (raw, digest_bytes(raw)),
+        "UPDATE proving_observations SET body_digest=? WHERE source_id='HK-01'",
+        (digest_bytes(raw),),
     )
     proving_connection.commit()
     proving_connection.close()
