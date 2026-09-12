@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -257,3 +258,254 @@ def test_transport_index_installs_on_existing_store_without_changing_evidence(tm
         assert tuple(row[2] for row in connection.execute(
             "PRAGMA index_info(model_usage_transport_invocation)"
         )) == ("invocation_id", "observed_at", "observation_digest")
+
+
+@pytest.mark.parametrize("retained_root", ["outcome", "request"])
+def test_native_orphan_attempt_above_raw_count_stays_unresolved(tmp_path, retained_root):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("orphan-above-count")
+    for number in (1, 2, 3):
+        _settle(service, *_attempt(service, policy, shape, unit, number), zero=True)
+    envelope, allocation = _attempt(service, policy, shape, unit, 4)
+    _settle(service, envelope, allocation, zero=False)
+    with sqlite3.connect(service.path) as connection:
+        for table in ("model_invocation_allocations", "model_invocation_terminals",
+                      "model_transport_observations"):
+            connection.execute(f"DELETE FROM {table} WHERE invocation_id=?",
+                               (allocation.invocation_id,))
+        connection.execute("DELETE FROM model_work_envelopes WHERE envelope_id=?",
+                           (envelope.envelope_id,))
+        if retained_root == "outcome":
+            connection.execute("DELETE FROM graphiti_internal_requests WHERE invocation_id=?",
+                               (allocation.invocation_id,))
+        else:
+            connection.execute("DELETE FROM model_work_outcomes WHERE envelope_id=?",
+                               (envelope.envelope_id,))
+    evidence = _proof(service, unit, 3)
+    assert evidence.attempt_numbers == (1, 2, 3, 4)
+    assert evidence.zero_dispatch_attempts == (1, 2, 3)
+    assert evidence.unresolved_attempts == (4,)
+    connection = connect(service.path)
+    _failures(connection, unit)
+    assert _queue(connection, (unit,), model_usage=service) == []
+    connection.close()
+
+    # The independent root is authenticated even though its parent is absent.
+    table = "model_work_outcomes" if retained_root == "outcome" else "graphiti_internal_requests"
+    with sqlite3.connect(service.path) as connection:
+        record = json.loads(connection.execute(
+            f"SELECT record_json FROM {table} WHERE envelope_id=?", (envelope.envelope_id,),
+        ).fetchone()[0])
+        record["envelope_id"] = "tampered-parent"
+        connection.execute(f"UPDATE {table} SET record_json=? WHERE envelope_id=?",
+                           (json.dumps(record), envelope.envelope_id))
+    with pytest.raises(ModelUsageIntegrityError):
+        _proof(service, unit, 3)
+
+
+def test_native_retained_disposition_does_not_replay_growing_revision_history(tmp_path, monkeypatch):
+    from newsroom.control_plane import native_progress
+
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("retained-disposition")
+    connection = connect(service.path)
+    journal = native_progress.NativeRevisionJournal(connection)
+    journal.land((unit,))
+    for number in (2, 3):
+        _settle(service, *_attempt(service, policy, shape, unit, number), zero=True)
+    envelope, allocation = _attempt(service, policy, shape, unit, 1)
+    dispatch_at = allocation.allocated_at + timedelta(milliseconds=1)
+    service.observe_transport(
+        invocation_id=allocation.invocation_id, observed_at=dispatch_at,
+        state="DISPATCH_STARTED", evidence_digest=allocation.canonical_digest,
+    )
+    terminal = service.complete(InvocationTerminal.create(
+        invocation_id=allocation.invocation_id, outcome="FAILED",
+        failure_class="MISSING_PROVIDER_TELEMETRY", usage_status=UsageStatus.UNREPORTED,
+        components=UsageComponents(provenance="UNAVAILABLE"), dispatch_at=dispatch_at,
+        completed_at=T0 + timedelta(seconds=3), observed_at=T0 + timedelta(seconds=3),
+        subscription_cli_chat_not_cash_debited=True,
+    ))
+    service.disposition_native_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        observed_at=T0 + timedelta(seconds=4),
+    )
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id, outcome="GRAPHITI_FAILED",
+        outcome_record_id="retained-disposition", payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=4),
+    )
+    _failures(connection, unit)
+    replayed, decoded = [], []
+    original_journal = native_progress.NativeRevisionJournal
+    original_decode = usage_module._envelope_from_record
+
+    def replay(*args, **kwargs):
+        replayed.append(True)
+        return original_journal(*args, **kwargs)
+
+    def decode(record):
+        decoded.append(record["envelope_id"])
+        return original_decode(record)
+
+    monkeypatch.setattr(native_progress, "NativeRevisionJournal", replay)
+    monkeypatch.setattr(usage_module, "_envelope_from_record", decode)
+    for tick in range(2):
+        for index in range(10):
+            unrelated = _native(f"land-history-{tick}-{index}")
+            journal.land((unrelated,))
+            journal.advance(unrelated.revision_id, stage="HELD", facts={"tick": tick})
+        decoded.clear()
+        evidence = _proof(service, unit, 3)
+        assert evidence.settled_provider_attempts == (1,)
+        assert evidence.zero_dispatch_attempts == (2, 3)
+        assert evidence.unresolved_attempts == ()
+        assert replayed == []
+        assert len(decoded) == 3
+        assert [entry[-1] for entry in _queue(connection, (unit,), model_usage=service)] == [unit]
+        assert replayed == []
+    connection.close()
+
+    # Legacy reads still prove landed-source membership through journal replay.
+    assert service.graphiti_ingest_retry_evidence(ingest_id=unit.ingest_id) == evidence
+    assert replayed == [True]
+    with sqlite3.connect(service.path) as connection:
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_usage_conservative_dispositions WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone()[0])
+        record["terminal_digest"] = "tampered-terminal"
+        connection.execute(
+            "UPDATE model_usage_conservative_dispositions SET record_json=? WHERE invocation_id=?",
+            (json.dumps(record), allocation.invocation_id),
+        )
+    with pytest.raises(ModelUsageIntegrityError):
+        _proof(service, unit, 3)
+
+
+def test_completion_rejects_zero_proof_after_committed_dispatch(tmp_path):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("contradictory-new-zero")
+    envelope, allocation = _attempt(service, policy, shape, unit, 1)
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=allocation.allocated_at + timedelta(milliseconds=1),
+        state="DISPATCH_STARTED", evidence_digest=allocation.canonical_digest,
+    )
+    with pytest.raises(ModelUsageIntegrityError, match="zero.*dispatch"):
+        _settle(service, envelope, allocation, zero=True)
+    with sqlite3.connect(service.path) as connection:
+        assert connection.execute("SELECT count(*) FROM model_invocation_terminals").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM model_work_outcomes").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM model_transport_observations").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("reader", ["native", "generic"])
+def test_historical_zero_proof_with_dispatch_is_unresolved(tmp_path, reader):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("contradictory-retained-zero")
+    envelope, allocation = _attempt(service, policy, shape, unit, 1)
+    _settle(service, envelope, allocation, zero=True)
+    # Represent already retained contradictory history (or a late transport fact).
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=allocation.allocated_at + timedelta(milliseconds=1),
+        state="DISPATCH_STARTED", evidence_digest=allocation.canonical_digest,
+    )
+
+    def proof():
+        return (_proof(service, unit) if reader == "native" else
+                service.graphiti_ingest_retry_evidence(ingest_id=unit.ingest_id))
+
+    evidence = proof()
+    assert evidence.zero_dispatch_attempts == ()
+    assert evidence.unresolved_attempts == (1,)
+    assert service.graphiti_ingest_pre_dispatch_zero(ingest_id=unit.ingest_id) is False
+    with sqlite3.connect(service.path) as connection:
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_transport_observations WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone()[0])
+        record["state"] = "HIDDEN_DISPATCH"
+        connection.execute("UPDATE model_transport_observations SET record_json=? WHERE invocation_id=?",
+                           (json.dumps(record), allocation.invocation_id))
+    with pytest.raises(ModelUsageIntegrityError):
+        proof()
+
+
+@pytest.mark.parametrize("evidence", ["both", "digest", "pointer", "mapping"])
+def test_completion_rejects_zero_proof_with_provider_telemetry(tmp_path, evidence):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("new-zero-telemetry")
+    _, allocation = _attempt(service, policy, shape, unit, 1)
+    telemetry = {"invocation": allocation.invocation_id}
+    terminal = InvocationTerminal.create(
+        invocation_id=allocation.invocation_id, outcome="DISPATCH_FENCE_REFUSED",
+        failure_class="DISPATCH_FENCE_REFUSED", usage_status=UsageStatus.REPORTED,
+        components=UsageComponents(total_tokens=0, provenance="CLI_DERIVED"),
+        dispatch_at=None, completed_at=T0 + timedelta(seconds=2),
+        observed_at=T0 + timedelta(seconds=2), pre_dispatch_zero_proved=True,
+        subscription_cli_chat_not_cash_debited=True,
+        provider_telemetry_digest=(usage_module.digest_canonical(telemetry)
+                                   if evidence in {"both", "digest"} else None),
+        raw_telemetry_pointer=("private://provider-response"
+                               if evidence in {"both", "pointer"} else None),
+    )
+    with pytest.raises(ModelUsageIntegrityError, match="zero.*telemetry"):
+        service.complete(terminal, provider_telemetry=(telemetry if evidence in {"both", "mapping"} else None))
+    with sqlite3.connect(service.path) as connection:
+        assert connection.execute("SELECT count(*) FROM model_invocation_terminals").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM model_provider_telemetry").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("reader", ["native", "generic"])
+@pytest.mark.parametrize("evidence", ["both", "digest", "pointer"])
+def test_retained_zero_with_positive_telemetry_is_unresolved(tmp_path, reader, evidence):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("retained-zero-telemetry")
+    envelope, allocation = _attempt(service, policy, shape, unit, 1)
+    _settle(service, envelope, allocation, zero=True)
+    telemetry = {"invocation": allocation.invocation_id}
+    # Model an already retained, canonically bound contradictory terminal.
+    terminal = replace(
+        service.terminal(allocation.invocation_id), terminal_digest="",
+        provider_telemetry_digest=(usage_module.digest_canonical(telemetry)
+                                   if evidence in {"both", "digest"} else None),
+        raw_telemetry_pointer=("private://provider-response"
+                               if evidence in {"both", "pointer"} else None),
+    )
+    terminal = replace(terminal, terminal_digest=usage_module.digest_canonical(terminal.as_record()))
+    with sqlite3.connect(service.path) as connection:
+        connection.execute(
+            "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? WHERE invocation_id=?",
+            (terminal.terminal_digest, json.dumps(terminal.as_record()), allocation.invocation_id),
+        )
+        if evidence != "pointer":
+            usage_module._retain_provider_telemetry(
+                connection, invocation_id=allocation.invocation_id, provider_telemetry=telemetry,
+            )
+    retained = (_proof(service, unit) if reader == "native" else
+                service.graphiti_ingest_retry_evidence(ingest_id=unit.ingest_id))
+    assert retained.zero_dispatch_attempts == ()
+    assert retained.unresolved_attempts == (1,)
+    assert service.graphiti_ingest_pre_dispatch_zero(ingest_id=unit.ingest_id) is False
+
+
+def test_reconciliation_cannot_replace_exact_zero_usage(tmp_path):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("exact-zero-reconciliation")
+    envelope, allocation = _attempt(service, policy, shape, unit, 1)
+    _settle(service, envelope, allocation, zero=True)
+    with pytest.raises(ModelUsageIntegrityError, match="already exact"):
+        service.reconcile(
+            invocation_id=allocation.invocation_id,
+            components=UsageComponents(total_tokens=100, provenance="PROVIDER_REPORTED"),
+            provider_telemetry={"total": 100}, raw_telemetry_pointer="private://late-response",
+            observed_at=T0 + timedelta(seconds=3),
+        )
+    assert _proof(service, unit).zero_dispatch_attempts == (1,)
+    with sqlite3.connect(service.path) as connection:
+        assert connection.execute("SELECT count(*) FROM model_provider_telemetry").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM model_usage_reconciliations").fetchone() == (0,)

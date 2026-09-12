@@ -617,6 +617,8 @@ def _is_exact_pre_dispatch_zero(terminal: InvocationTerminal) -> bool:
         terminal.usage_status is UsageStatus.REPORTED
         and terminal.pre_dispatch_zero_proved is True
         and terminal.dispatch_at is None
+        and terminal.provider_telemetry_digest is None
+        and terminal.raw_telemetry_pointer is None
         and terminal.policy_breach is None
         and components.provenance == "CLI_DERIVED"
         and components.total_tokens == 0
@@ -714,7 +716,16 @@ def _valid_native_disposition(
     *,
     allocation: InvocationAllocation,
     terminal: InvocationTerminal,
+    validated_native_envelope: WorkEnvelope | None = None,
 ) -> dict[str, object] | None:
+    # Only bounded native retry reads supply an already authenticated envelope
+    # from their proved native unit. Creation and generic reads still prove LAND.
+    if validated_native_envelope is not None and (
+        validated_native_envelope.envelope_id != allocation.envelope_id
+        or validated_native_envelope.cycle_id != allocation.cycle_id
+        or validated_native_envelope.workload_class is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
+    ):
+        raise ModelUsageIntegrityError("native conservative envelope binding differs")
     retained_allocation, retained_terminal = _retained_terminal_allocation(
         connection, allocation.invocation_id
     )
@@ -744,7 +755,7 @@ def _valid_native_disposition(
             allocation=allocation,
             terminal=terminal,
             policy=policy,
-            envelope=_native_envelope(connection, allocation),
+            envelope=validated_native_envelope or _native_envelope(connection, allocation),
         )
         conservative_total = policy.max_total_tokens
     else:
@@ -2740,13 +2751,15 @@ class ModelUsageService:
                 attempts[envelope.envelope_id] = attempt
 
             work_outcomes: set[str] = set()
+            outcome_attempts = attempts if native_attempts is None else native_attempts
             for row in connection.execute(
                 "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
                 "FROM model_work_outcomes " + outcome_filter + "ORDER BY envelope_id",
                 envelope_parameters,
             ):
                 record = _object(row[4])
-                if str(row[1]) not in attempts and record.get("envelope_id") not in attempts:
+                if (str(row[1]) not in outcome_attempts
+                        and record.get("envelope_id") not in outcome_attempts):
                     continue
                 unsigned = dict(record)
                 retained_digest = unsigned.pop("outcome_digest", None)
@@ -2906,6 +2919,8 @@ class ModelUsageService:
                             requested_max_output_tokens=allocation.max_output_tokens,
                         )
                         if _is_exact_pre_dispatch_zero(terminal):
+                            if _has_exact_dispatch(connection, terminal):
+                                attempt_unresolved = True
                             continue
                         attempt_zero = False
                         if terminal.dispatch_at is None or not _has_exact_dispatch(
@@ -2920,6 +2935,10 @@ class ModelUsageService:
                             connection,
                             allocation=allocation,
                             terminal=terminal,
+                            validated_native_envelope=(
+                                envelopes[allocation.envelope_id]
+                                if native_attempts is not None else None
+                            ),
                         ) is not None:
                             attempt_dispatched = True
                         else:
@@ -2937,7 +2956,11 @@ class ModelUsageService:
                     number for envelope_id, (selected_ingest, number) in
                     (native_attempts or {}).items()
                     if selected_ingest == ingest_id and envelope_id not in attempts
-                    and number <= (native_failed_attempts or {})[ingest_id]
+                    and (
+                        number <= (native_failed_attempts or {})[ingest_id]
+                        or envelope_id in work_outcomes
+                        or envelope_id in incomplete_envelopes
+                    )
                 }
                 attempt_numbers = tuple(sorted(set(selected_attempts.values()) | missing))
                 unresolved = sorted(set(unresolved) | missing)
@@ -3242,6 +3265,15 @@ class ModelUsageService:
             ).fetchone()
             if row is None:
                 raise ModelUsageIntegrityError("invocation allocation is absent")
+            if terminal.pre_dispatch_zero_proved:
+                if (
+                    terminal.provider_telemetry_digest is not None
+                    or terminal.raw_telemetry_pointer is not None
+                    or provider_telemetry is not None
+                ):
+                    raise ModelUsageIntegrityError("pre-dispatch zero contradicts provider telemetry")
+                if _has_exact_dispatch(connection, terminal):
+                    raise ModelUsageIntegrityError("pre-dispatch zero contradicts committed dispatch")
             route, workload = str(row[0]), WorkloadClass(str(row[1]))
             context_manifest_digest = str(row[3])
             requested_max_output_tokens = int(row[4])
