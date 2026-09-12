@@ -65,7 +65,7 @@ def test_native_service_runs_two_ticks_without_story_cap_and_closes(tmp_path, mo
 
     report = _service(tmp_path, factory, wait=wait).run()
     assert ticks == ["cycle-1", "cycle-2"]
-    assert waits == [2, 2]
+    assert len(waits) == 2 and all(0 <= seconds <= 2 for seconds in waits)
     assert opened == ["open", "close"]
     assert report.outcome == "COMPLETE"
     assert report.pipeline.revision_states == {"ACKNOWLEDGED": 4}
@@ -76,6 +76,52 @@ def test_native_service_runs_two_ticks_without_story_cap_and_closes(tmp_path, mo
             ("NATIVE_SERVICE_CYCLE_STARTED",), ("NATIVE_SERVICE_CYCLE_TERMINAL",),
             ("NATIVE_SERVICE_CYCLE_STARTED",), ("NATIVE_SERVICE_CYCLE_TERMINAL",),
         ]
+
+
+def test_native_service_interval_is_measured_from_cycle_start(tmp_path, monkeypatch):
+    now = [10.0]
+    waits = []
+
+    def tick(cycle_id):
+        now[0] += 1.25 if cycle_id == "cycle-1" else 3
+        return NativePipelineReport((), {}, 0)
+
+    factory, _ = _pipeline(monkeypatch, tick)
+
+    def wait(seconds):
+        waits.append(seconds)
+        return len(waits) == 2
+
+    _service(
+        tmp_path, factory, interval_seconds=2, wait=wait,
+        monotonic_clock=lambda: now[0],
+    ).run()
+    assert waits == [0.75, 0]
+
+
+def test_native_service_failure_keeps_its_full_backoff(tmp_path, monkeypatch):
+    now = [10.0]
+    outcomes = iter((RuntimeError("failed"), NativePipelineReport((), {}, 0)))
+    waits = []
+
+    def tick(_cycle_id):
+        now[0] += 3
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    factory, _ = _pipeline(monkeypatch, tick)
+
+    def wait(seconds):
+        waits.append(seconds)
+        return len(waits) == 2
+
+    _service(
+        tmp_path, factory, interval_seconds=2, failure_backoff_seconds=7,
+        wait=wait, monotonic_clock=lambda: now[0],
+    ).run()
+    assert waits == [7, 0]
 
 
 def test_continuous_service_qualifies_first_complete_cycle_before_second_tick(

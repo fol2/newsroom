@@ -538,6 +538,87 @@ def test_native_pipeline_revalidates_only_repairable_holds_once_per_contract(tmp
         connection.close()
 
 
+def test_native_pipeline_time_slices_changed_contract_reassessment_without_starving_work(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, _, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    due = tuple(_native(f"due-{index}") for index in range(3))
+    ordinary = _native("ordinary")
+    fresh = _native("fresh")
+    now = [0.0]
+    polls = []
+    pipeline._assessment_contract_version = "v8"
+    pipeline._reassessment_quantum = 300
+    pipeline._monotonic_clock = lambda: now[0]
+    dispositions[0] = ()
+    pipeline._intake = NS(poll=lambda: (polls.append(now[0]) or dispositions[0]))
+    for unit in due:
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="EVIDENCE_HOLD", facts={
+            "graphiti_receipts": [{"retained": True}],
+            "candidate_version_id": "candidate:" + unit.item_key,
+            "reason": "ASSESSOR_CLAIM_BINDING_HOLD",
+            "assessment_contract_version": "v7",
+        })
+    journal.land((ordinary,))
+    journal.advance(ordinary.revision_id, stage="GRAPHITI_COMPLETE", facts={
+        "graphiti_receipts": [{"retained": True}],
+        "candidate_version_id": "candidate:" + ordinary.item_key,
+    })
+    dispositions[0] = (NS(
+        source_id=fresh.source_id, status="READY", reason_code="RETAINED",
+        units=(fresh,),
+    ),)
+    original_publish = pipeline._publish
+
+    class Publisher:
+        def advance(self, *, revision_id, candidate_version_id):
+            if revision_id in {unit.revision_id for unit in due}:
+                if journal.progress[revision_id]["stage"] == "ASSESSMENT_STARTED":
+                    calls.append(("resume", revision_id))
+                    journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+                        **journal.progress[revision_id]["facts"],
+                        "assessment_contract_version": "v8",
+                    })
+                    return
+                calls.append(("revalidate", revision_id))
+                now[0] += 301
+                if revision_id == due[0].revision_id:
+                    journal.advance(
+                        revision_id, stage="ASSESSMENT_STARTED",
+                        facts=journal.progress[revision_id]["facts"],
+                    )
+                    return
+                journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+                    **journal.progress[revision_id]["facts"],
+                    "assessment_contract_version": "v8",
+                })
+                return
+            original_publish.advance(
+                revision_id=revision_id,
+                candidate_version_id=candidate_version_id,
+            )
+
+    pipeline._publish = Publisher()
+    try:
+        for cycle in ("first", "second", "third", "unchanged"):
+            pipeline.tick(cycle_id=cycle)
+            dispositions[0] = ()
+        assert [revision_id for kind, revision_id in calls if kind == "revalidate"] == [
+            unit.revision_id for unit in due
+        ]
+        assert [revision_id for kind, revision_id in calls if kind == "resume"] == [
+            due[0].revision_id
+        ]
+        assert len(polls) == 4
+        assert journal.progress[ordinary.revision_id]["stage"] == "ACKNOWLEDGED"
+        assert journal.progress[fresh.revision_id]["stage"] == "ACKNOWLEDGED"
+    finally:
+        connection.close()
+
+
 def test_native_pipeline_honours_global_stop_before_source_poll(tmp_path, monkeypatch):
     pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
     def stop(): raise VetoError("owner stop")

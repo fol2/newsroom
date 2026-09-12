@@ -7,6 +7,7 @@ import math
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager
@@ -70,6 +71,7 @@ class NativeService:
         interval_seconds: float = 300,
         failure_backoff_seconds: float = 60,
         wait: Callable[[float], bool] | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         cycle_id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         qualify_once: Callable[[sqlite3.Connection, str], object] | None = None,
         preflight: Callable[[], None] = lambda: None,
@@ -78,6 +80,7 @@ class NativeService:
         if (
             not callable(pipeline_factory) or not callable(stop_check)
             or not callable(preflight)
+            or not callable(monotonic_clock)
         ):
             raise TypeError(
                 "native service pipeline, stop check and preflight are required"
@@ -97,6 +100,7 @@ class NativeService:
         self._interval, self._backoff = interval_seconds, failure_backoff_seconds
         self._shutdown = service_event or threading.Event()
         self._wait = wait or self._shutdown.wait
+        self._monotonic_clock = monotonic_clock
         self._cycle_id = cycle_id_factory
         self._qualify_once = qualify_once
         self._preflight = preflight
@@ -120,6 +124,7 @@ class NativeService:
                     binding = {} if identity is None else {"runtime_identity_digest": identity}
                     qualified = False
                     while not self._shutdown.is_set():
+                        cycle_started = self._monotonic_clock()
                         self._stop_check()
                         cycle_id = self._cycle_id()
                         if type(cycle_id) is not str or not cycle_id:
@@ -176,9 +181,16 @@ class NativeService:
                                 raise ValueError("native qualification requires a runtime identity")
                             self._qualify_once(ledger, identity)
                             qualified = True
-                        if last.outcome == "DRAINED" or once or self._wait(
-                            self._interval if last.outcome == "COMPLETE" else self._backoff
-                        ):
+                        if last.outcome == "DRAINED" or once:
+                            break
+                        if last.outcome == "COMPLETE":
+                            elapsed = self._monotonic_clock() - cycle_started
+                            if not math.isfinite(elapsed) or elapsed < 0:
+                                raise ValueError("native service monotonic clock differs")
+                            wait_seconds = max(0, self._interval - elapsed)
+                        else:
+                            wait_seconds = self._backoff
+                        if self._wait(wait_seconds):
                             break
             finally:
                 ledger.close()

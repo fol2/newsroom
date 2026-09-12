@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+import math
+import time
 from typing import ContextManager
 
 from newsroom.authority import UtcTimestamp
@@ -37,12 +39,20 @@ class NativePipeline:
         refresh_rights: Callable[[], None] = lambda: None,
         operator_drain_requested: Callable[[], bool] = lambda: False,
         assessment_contract_version: str | None = None,
+        reassessment_quantum_seconds: float = 300,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
         if assessment_contract_version is not None and (
             type(assessment_contract_version) is not str or not assessment_contract_version
         ):
             raise ValueError("native assessment contract version differs")
+        if (
+            not callable(monotonic_clock)
+            or not math.isfinite(reassessment_quantum_seconds)
+            or reassessment_quantum_seconds <= 0
+        ):
+            raise ValueError("native reassessment quantum differs")
         self._runtime, self._journal = runtime, journal
         self._intake, self._graphiti, self._discovery = source_intake, graphiti, discovery
         self._retrieval_for, self._collision, self._publish = retrieval_for, collision, publish
@@ -50,6 +60,8 @@ class NativePipeline:
         self._refresh_rights = refresh_rights
         self._operator_drain_requested = operator_drain_requested
         self._assessment_contract_version = assessment_contract_version
+        self._reassessment_quantum = reassessment_quantum_seconds
+        self._monotonic_clock = monotonic_clock
         self.runtime_identity_digest: str | None = None
 
     def _drain_between_work(self) -> None:
@@ -57,6 +69,9 @@ class NativePipeline:
             raise OperatorDrainRequested
 
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
+        reassessment_deadline = (
+            self._monotonic_clock() + self._reassessment_quantum
+        )
         self._check()
         self._drain_between_work()
         self._refresh_rights()
@@ -79,7 +94,9 @@ class NativePipeline:
             facts = self._journal.progress.get(revision_id, {}).get("facts", {})
             cohort = ready if facts.get("graphiti_receipts") else pending_revisions
             cohort.append((revision_id, units))
-        self._advance_revisions(tuple(ready))
+        self._advance_revisions(
+            tuple(ready), reassessment_deadline=reassessment_deadline,
+        )
         self._drain_between_work()
         pending_revisions = tuple(pending_revisions)
 
@@ -144,13 +161,24 @@ class NativePipeline:
             self._journal.portfolio, dict(states), states.get("QUEUED", 0),
         )
 
-    def _advance_revisions(self, revisions: tuple) -> None:
+    def _advance_revisions(
+        self, revisions: tuple, *, reassessment_deadline: float | None = None,
+    ) -> None:
         # Each revision remains in the journal even when it disappears from the
         # next feed page. This is work continuation, not a fresh provider retry.
         for revision_id, units in revisions:
             self._drain_between_work()
             self._check()
             previous = self._journal.progress.get(revision_id, {})
+            if (
+                reassessment_deadline is not None
+                and previous.get("stage") == "EVIDENCE_HOLD"
+                and assessment_revalidation_due(
+                    previous.get("facts", {}), self._assessment_contract_version,
+                )
+                and self._monotonic_clock() >= reassessment_deadline
+            ):
+                continue
             if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
                 candidate_version_id = previous.get("facts", {}).get(
                     "candidate_version_id"
