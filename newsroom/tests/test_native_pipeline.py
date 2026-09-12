@@ -619,6 +619,67 @@ def test_native_pipeline_time_slices_changed_contract_reassessment_without_starv
         connection.close()
 
 
+def test_fresh_graphiti_crosses_real_queue_before_old_contract_reassessment(
+    tmp_path, monkeypatch,
+):
+    from newsroom.control_plane import cycle
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete
+    from newsroom.tests.test_native_graphiti import _open as open_graphiti
+
+    pipeline, journal, connection, _, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    due = _native("due-reassessment")
+    fresh = _native("fresh-graphiti")
+    pipeline._assessment_contract_version = "v10"
+    journal.land((due,))
+    journal.advance(due.revision_id, stage="EVIDENCE_HOLD", facts={
+        "graphiti_receipts": [{"retained": True}],
+        "candidate_version_id": "candidate:" + due.item_key,
+        "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        "assessment_contract_version": "v9",
+    })
+    dispositions[0] = (NS(
+        source_id=fresh.source_id, status="READY", reason_code="RETAINED",
+        units=(fresh,),
+    ),)
+    processor, graph_connection, _ = open_graphiti(
+        tmp_path, monkeypatch, ingest=cycle._ingest,
+    )
+    processor._runner = NS(ingest=lambda unit: (
+        calls.append(("extract", unit.revision_id))
+        or _complete(unit, proposal_count=0, entity_count=0)
+    ))
+    pipeline._graphiti = processor
+    original_publish = pipeline._publish
+
+    class Publisher:
+        def advance(self, *, revision_id, candidate_version_id):
+            if revision_id == due.revision_id:
+                calls.append(("revalidate", revision_id))
+                journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+                    **journal.progress[revision_id]["facts"],
+                    "assessment_contract_version": "v10",
+                })
+                return
+            original_publish.advance(
+                revision_id=revision_id,
+                candidate_version_id=candidate_version_id,
+            )
+
+    pipeline._publish = Publisher()
+    try:
+        pipeline.tick(cycle_id="fresh-before-reassessment")
+        relevant = [call for call in calls if call[0] in {"extract", "revalidate"}]
+        assert relevant == [
+            ("extract", fresh.revision_id),
+            ("revalidate", due.revision_id),
+        ]
+    finally:
+        graph_connection.close()
+        connection.close()
+
+
 def test_native_pipeline_honours_global_stop_before_source_poll(tmp_path, monkeypatch):
     pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
     def stop(): raise VetoError("owner stop")
@@ -772,9 +833,9 @@ def test_three_disjoint_turns_progress_with_revalidation_and_sustained_fresh_wor
         assert fresh[2].revision_id not in journal.progress
         assert [call for call in calls if call[0] in {"poll", "publish", "revalidate", "extract"}] == [
             ("poll", "current"), ("publish", ordinary.revision_id),
-            ("revalidate", due[0].revision_id), ("extract", fresh[0].revision_id),
+            ("extract", fresh[0].revision_id), ("revalidate", due[0].revision_id),
             ("poll", "current"), ("publish", fresh[0].revision_id),
-            ("revalidate", due[1].revision_id), ("extract", fresh[1].revision_id),
+            ("extract", fresh[1].revision_id), ("revalidate", due[1].revision_id),
         ]
     finally:
         connection.close()

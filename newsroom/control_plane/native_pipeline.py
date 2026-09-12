@@ -103,10 +103,10 @@ class NativePipeline:
         # turn has the existing quantum; an atomic revision may overrun it.
         ordinary.sort(key=lambda item: self._journal.progress.get(item[0], {}).get("stage")
                       not in {"ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"})
-        for cohort in (ordinary, reassessments):
-            self._advance_revisions(
-                tuple(cohort), work_deadline=self._monotonic_clock() + self._reassessment_quantum,
-            )
+        self._advance_revisions(
+            tuple(ordinary),
+            work_deadline=self._monotonic_clock() + self._reassessment_quantum,
+        )
         self._drain_between_work()
         # Give never-attempted revisions their first turn before retrying older
         # Graphiti holds; stable sorting preserves landing order within both groups.
@@ -177,6 +177,13 @@ class NativePipeline:
                     })
 
         self._advance_revisions(pending_revisions, work_deadline=fresh_deadline)
+        self._drain_between_work()
+        # Changed-contract reassessment has its own quantum after fresh work;
+        # stale model requests cannot delay a newly landed revision's first turn.
+        self._advance_revisions(
+            tuple(reassessments),
+            work_deadline=self._monotonic_clock() + self._reassessment_quantum,
+        )
         self._drain_between_work()
         states = Counter(
             self._journal.progress.get(revision_id, {}).get("stage", "QUEUED")
