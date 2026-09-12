@@ -2,6 +2,8 @@
 
 Load once at daemon start; append only changed state. Source bytes are retained
 once, never copied into each stage receipt. No additional database or schema.
+Unchanged retrieval binding/rights pairs refer to the previous same-revision
+progress record; ordered replay restores the original logical facts.
 The journal records work, not evidence/publication authority.
 """
 
@@ -106,6 +108,8 @@ class NativeRevisionJournal:
             ordinal = value["ordinal"]
             if type(ordinal) is not int or ordinal != (previous.ordinal if previous else 0) + 1:
                 raise ValueError("native progress ordinal has a gap")
+            if type(value.get("facts")) is not dict:
+                raise ValueError("native progress facts must be an object")
             facts = dict(value["facts"])
             if "retrieval_facts_ref" in value:
                 reference = value["retrieval_facts_ref"]
@@ -185,6 +189,8 @@ class NativeRevisionJournal:
     def advance(self, revision_id: str, *, stage: str, facts: dict) -> dict:
         if revision_id not in self.units or not stage:
             raise ValueError("native progress stage lacks a landed revision")
+        if type(facts) is not dict:
+            raise ValueError("native progress facts must be an object")
         previous = self._records.get(revision_id)
         facts = json.loads(canonical_json_bytes(facts))
         pair_digest = _pair_digest(facts)
