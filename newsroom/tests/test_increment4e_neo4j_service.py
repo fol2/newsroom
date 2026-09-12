@@ -7,9 +7,10 @@ import os
 from pathlib import Path
 import sqlite3
 import uuid
+from unittest.mock import Mock
 
 import pytest
-from neo4j import AsyncDriver, AsyncGraphDatabase, EagerResult
+from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncSession, EagerResult
 
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
@@ -62,8 +63,19 @@ class _DatabaseBoundAsyncDriver:
             database_=self._database,
         )
 
+    def session(self) -> AsyncSession:
+        return self._driver.session(database=self._database)
+
     async def close(self) -> None:
         await self._driver.close()
+
+
+def test_database_bound_driver_streaming_session_uses_configured_database() -> None:
+    driver = Mock(spec=AsyncDriver)
+    bound = _DatabaseBoundAsyncDriver(driver, database="guard-test-database")
+
+    assert bound.session() is driver.session.return_value
+    driver.session.assert_called_once_with(database="guard-test-database")
 
 
 @lru_cache(maxsize=1)
