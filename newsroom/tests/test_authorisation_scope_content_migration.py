@@ -264,3 +264,35 @@ def test_reopen_rejects_shared_scope_corruption(tmp_path, tamper: str) -> None:
     with pytest.raises((AuthorityPersistenceError, sqlite3.IntegrityError, sqlite3.DatabaseError)):
         with open_test_system(path):
             pass
+
+
+def test_v36_fixture_downgrade_preserves_references_inside_rollback(tmp_path) -> None:
+    path = tmp_path / "nested-downgrade.sqlite3"
+    with open_test_system(path) as system:
+        system.commands.execute(command(key="retained-downgrade"), proof=proof())
+    with sqlite3.connect(path, isolation_level=None) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        before = _v35_state(connection)
+        retained_ids = tuple(connection.execute(
+            "SELECT authorization_decision_id,canonical_digest "
+            "FROM authorization_decisions ORDER BY authorization_decision_id"
+        ))
+        commands = tuple(connection.execute("SELECT * FROM authority_commands"))
+        connection.execute("SAVEPOINT caller_downgrade")
+        _drop_v36_shared_scope_schema(connection)
+        assert connection.in_transaction
+        assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (35,)
+        assert schema_fingerprint(connection) == (
+            scope_migration.AUTHORISATION_SCOPE_CONTENT_PREDECESSOR_FINGERPRINT
+        )
+        assert tuple(connection.execute(
+            "SELECT authorization_decision_id,canonical_digest "
+            "FROM authorization_decisions ORDER BY authorization_decision_id"
+        )) == retained_ids
+        assert tuple(connection.execute("SELECT * FROM authority_commands")) == commands
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        connection.execute("ROLLBACK TO SAVEPOINT caller_downgrade")
+        connection.execute("RELEASE SAVEPOINT caller_downgrade")
+        assert not connection.in_transaction
+        assert _v35_state(connection) == before

@@ -279,7 +279,13 @@ def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:
     )
     names = tuple(item[0] for item in cursor.description)
     rows = tuple(dict(zip(names, row, strict=True)) for row in cursor)
-    connection.execute("PRAGMA foreign_keys=OFF")
+    # An enclosing checked downgrade owns a savepoint. SQLite ignores
+    # foreign_keys=OFF inside it; defer the retained NO ACTION references
+    # until the same decision rows have been restored instead.
+    if connection.in_transaction:
+        connection.execute("PRAGMA defer_foreign_keys=ON")
+    else:
+        connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("DROP TRIGGER immutable_authorization_decisions_update")
     connection.execute("DROP TRIGGER immutable_authorization_decisions_delete")
     connection.execute("DROP TABLE authorization_decisions")
@@ -324,6 +330,10 @@ def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM authority_migrations WHERE version=36")
     connection.execute(guard)
     connection.execute("PRAGMA user_version=35")
+    if connection.execute(
+        'PRAGMA foreign_key_check("authorization_decisions")'
+    ).fetchone() is not None:
+        raise sqlite3.IntegrityError("restored v35 fixture references differ")
 
 
 def _drop_empty_v35_accounted_zero_schema(connection: sqlite3.Connection) -> None:
