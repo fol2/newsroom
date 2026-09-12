@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import OrderedDict
 from typing import Sequence
 
 from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
@@ -471,11 +472,27 @@ class _EventStoreReadMixin:
 
     def _scope_content_from_row(self, row: sqlite3.Row) -> list[str]:
         data = bytes(row["canonical_bytes"])
-        if digest_bytes(data) != str(row["scope_content_digest"]):
+        digest = str(row["scope_content_digest"])
+        key = (data, digest)
+        cache = getattr(self, "_validated_scope_contents", None)
+        if len(data) <= 4096 and cache is not None:
+            retained = cache.get(key)
+            if retained is not None:
+                cache.move_to_end(key)
+                return list(retained)
+        if digest_bytes(data) != digest:
             raise AuthorityPersistenceError("stored effective scopes digest differs")
         value = self._decode_canonical(data)
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise AuthorityPersistenceError("stored effective scopes are invalid")
+        # Reuse only fully validated exact content, never a decision or store
+        # identity. Bounds also cap retained input bytes; larger scopes stay uncached.
+        if len(data) <= 4096:
+            if cache is None:
+                cache = self._validated_scope_contents = OrderedDict()
+            cache[key] = tuple(value)
+            if len(cache) > 8:
+                cache.popitem(last=False)
         return value
 
     # Private adversarial test seams; never exported as application API.
