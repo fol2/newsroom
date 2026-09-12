@@ -286,7 +286,7 @@ class _EvaluationFeedbackAuthorityRoot:
             "c.authentication_context_id,c.authorization_request_digest,c.authorization_decision_id,"
             "e.authentication_context_id,e.authorization_request_digest,e.authorization_decision_id,"
             "au.authentication_context_id,au.authorization_request_digest,au.authorization_decision_id,"
-            "au.event_type,au.detail_digest,r.operation_type,r.required_scope,d.allowed,d.effective_scopes,"
+            "au.event_type,au.detail_digest,r.operation_type,r.required_scope,d.allowed,s.canonical_bytes,"
             "a.authority_domain,c.command_id,c.result_bytes,c.result_digest,e.ledger_seq,"
             "e.correlation_id,e.causation_kind,e.causation_identifier,e.causation_external_system "
             "FROM ledger_events e JOIN authority_commands c ON c.command_id=e.command_id "
@@ -298,6 +298,7 @@ class _EvaluationFeedbackAuthorityRoot:
             "JOIN authentication_contexts a ON a.authentication_context_id=c.authentication_context_id "
             "JOIN authorization_requests r ON r.request_digest=c.authorization_request_digest "
             "JOIN authorization_decisions d ON d.authorization_decision_id=c.authorization_decision_id "
+            "JOIN authorization_scope_contents s ON s.scope_content_digest=d.scope_content_digest "
             "WHERE e.event_id=?",
             (event_id,),
         ).fetchone()

@@ -405,8 +405,8 @@ class _EventStoreCommitMixin:
     ) -> None:
         auth_bytes = canonical_json_bytes(authentication.canonical_value())
         request_bytes = canonical_json_bytes(request.canonical_value())
-        decision_bytes = canonical_json_bytes(decision.canonical_value())
         scopes_bytes = canonical_json_bytes(list(decision.effective_scopes))
+        scope_content_digest = digest_bytes(scopes_bytes)
 
         conn.execute(
             "INSERT OR IGNORE INTO authentication_contexts("
@@ -445,24 +445,36 @@ class _EventStoreCommitMixin:
             ),
         )
         conn.execute(
+            "INSERT OR IGNORE INTO authorization_scope_contents("
+            "scope_content_digest,canonical_bytes) VALUES(?,?)",
+            (scope_content_digest, scopes_bytes),
+        )
+        scope_row = conn.execute(
+            "SELECT canonical_bytes FROM authorization_scope_contents "
+            "WHERE scope_content_digest=?", (scope_content_digest,),
+        ).fetchone()
+        if scope_row is None or bytes(scope_row[0]) != scopes_bytes:
+            raise AuthorityPersistenceError("authorization scope content differs")
+        conn.execute(
             "INSERT OR IGNORE INTO authorization_decisions("
             "authorization_decision_id,authentication_context_id,"
             "authorization_request_digest,authorization_policy_version,"
-            "effective_scopes,effective_scope_digest,allowed,reason_code,"
-            "decided_at,canonical_bytes,canonical_digest) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "storage_scope_marker,effective_scope_digest,allowed,reason_code,"
+            "decided_at,storage_decision_marker,canonical_digest,scope_content_digest) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(decision.authorization_decision_id),
                 str(authentication.authentication_context_id),
                 request.request_digest,
                 decision.authorization_policy_version,
-                scopes_bytes,
+                b"v36",
                 decision.effective_scope_digest,
                 int(decision.allowed),
                 decision.reason_code,
                 decision.decided_at.to_text(),
-                decision_bytes,
+                b"v36",
                 decision.digest,
+                scope_content_digest,
             ),
         )
         auth_row = conn.execute(

@@ -22,7 +22,6 @@ from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.effective_revision import (
-    create_effective_revision_schema,
     retain_observation_revision_first_seen,
 )
 from newsroom.increment9.prospective_run_authority import (
@@ -484,6 +483,13 @@ def _connect(path: str) -> sqlite3.Connection:
         wal=None,
         busy_timeout_ms=int(PROVING_WRITE_TIMEOUT_SECONDS * 1_000),
     )
+    from newsroom.increment9.proving_store_schema import create_proving_schema
+
+    try:
+        create_proving_schema(connection)
+    except (ValueError, sqlite3.Error) as exc:
+        connection.close()
+        raise ProvingError(str(exc)) from exc
     deadline = time.monotonic() + PROVING_WRITE_TIMEOUT_SECONDS
     while True:
         try:
@@ -497,61 +503,6 @@ def _connect(path: str) -> sqlite3.Connection:
                 connection.close()
                 raise ProvingError("proving store writer lock timed out") from exc
             time.sleep(min(0.05, remaining))
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS proving_runs(
-            run_id TEXT PRIMARY KEY,
-            started_at TEXT NOT NULL,
-            publication INTEGER NOT NULL DEFAULT 0 CHECK(publication=0),
-            public_dispatch INTEGER NOT NULL DEFAULT 0 CHECK(public_dispatch=0),
-            openrouter_invoked INTEGER NOT NULL DEFAULT 0 CHECK(openrouter_invoked=0),
-            spend_gbp_minor INTEGER NOT NULL DEFAULT 0 CHECK(spend_gbp_minor=0)
-        );
-        CREATE TABLE IF NOT EXISTS proving_observations(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            url TEXT NOT NULL,
-            status_code INTEGER NOT NULL,
-            body_digest TEXT NOT NULL,
-            body BLOB NOT NULL,
-            item_count INTEGER NOT NULL,
-            error TEXT,
-            PRIMARY KEY(run_id, source_id, body_digest),
-            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
-        );
-        CREATE TABLE IF NOT EXISTS proving_gates(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id),
-            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
-        );
-        CREATE TABLE IF NOT EXISTS proving_rights_packets(
-            run_id TEXT NOT NULL,
-            gate_id TEXT NOT NULL,
-            packet_digest TEXT NOT NULL,
-            packet_json TEXT NOT NULL,
-            assessed_at TEXT NOT NULL,
-            PRIMARY KEY(run_id, gate_id),
-            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
-        );
-        CREATE TABLE IF NOT EXISTS proving_source_health(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('ACTIVE','DEGRADED','HELD','BLOCKED')),
-            endpoint TEXT NOT NULL,
-            attempts INTEGER NOT NULL CHECK(attempts >= 0),
-            reason TEXT,
-            next_retry_at TEXT,
-            recovered_at TEXT,
-            PRIMARY KEY(run_id, source_id),
-            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
-        );
-        """
-    )
-    create_effective_revision_schema(connection)
     return connection
 
 
@@ -618,30 +569,65 @@ def _put_rights_packets(
         )
 
 
-def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observation: Observation, body: bytes) -> None:
+def resolve_observation_body(
+    connection: sqlite3.Connection, body_digest: str, *, schema: str = "main"
+) -> bytes:
+    """Resolve exact retained bytes without hiding observations with broken bodies."""
+    quoted_schema = '"' + schema.replace('"', '""') + '"'
+    row = connection.execute(
+        f"SELECT body FROM {quoted_schema}.proving_bodies WHERE body_digest=?",
+        (body_digest,),
+    ).fetchone()
+    if row is None or not isinstance(row[0], bytes):
+        raise ProvingError("retained proving body is missing or is not a BLOB")
+    body = row[0]
+    if digest_bytes(body) != body_digest:
+        raise ProvingError("retained proving body digest mismatch")
+    return body
+
+
+def _store_body(connection: sqlite3.Connection, body_digest: str, body: bytes) -> None:
+    if not isinstance(body, bytes) or digest_bytes(body) != body_digest:
+        raise ProvingError("proving body digest mismatch or non-BLOB input")
     connection.execute(
-        "INSERT OR IGNORE INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
-        (
-            observation.source_id,
-            run_id,
-            fetched_at,
-            observation.url,
-            observation.status_code,
-            observation.body_digest,
-            body,
-            observation.item_count,
-            observation.error,
-        ),
+        "INSERT INTO proving_bodies(body_digest,body) VALUES(?,?) "
+        "ON CONFLICT(body_digest) DO NOTHING",
+        (body_digest, body),
     )
-    if observation.status_code != 200 or observation.error is not None:
-        return
-    retain_observation_revision_first_seen(
-        connection,
-        source_id=observation.source_id,
-        url=observation.url,
-        body=body,
-        observed_at=fetched_at,
-    )
+    existing = connection.execute(
+        "SELECT body FROM proving_bodies WHERE body_digest=?", (body_digest,)
+    ).fetchone()
+    if existing is None or existing[0] != body or not isinstance(existing[0], bytes):
+        raise ProvingError("proving body digest conflict")
+
+
+def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observation: Observation, body: bytes) -> None:
+    # Preserve the caller's transaction; a failed first-seen write must not leave
+    # either a new body or observation behind, even if the caller catches it.
+    if not connection.in_transaction:
+        connection.execute("BEGIN")
+    connection.execute("SAVEPOINT proving_observation")
+    try:
+        _store_body(connection, observation.body_digest, body)
+        connection.execute(
+            "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id,source_id,body_digest) DO NOTHING",
+            (
+                observation.source_id, run_id, fetched_at, observation.url,
+                observation.status_code, observation.body_digest,
+                observation.item_count, observation.error,
+            ),
+        )
+        if observation.status_code == 200 and observation.error is None:
+            retain_observation_revision_first_seen(
+                connection, source_id=observation.source_id,
+                url=observation.url, body=body, observed_at=fetched_at,
+            )
+        connection.execute("RELEASE proving_observation")
+    except BaseException:
+        connection.execute("ROLLBACK TO proving_observation")
+        connection.execute("RELEASE proving_observation")
+        raise
 
 
 def _retry_at(fetched_at: str) -> str:

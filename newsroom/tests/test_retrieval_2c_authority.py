@@ -986,9 +986,21 @@ def test_redigested_security_rebinding_fails_store_reopen(tmp_path: Path) -> Non
         rebound_decision_id = (
             "00000000-0000-4000-8000-000000002501"
         )
-        decision_value = json.loads(
-            bytes(original_decision["canonical_bytes"]).decode("utf-8")
-        )
+        decision_value = {
+            field: original_decision[field]
+            for field in (
+                "authorization_decision_id", "authentication_context_id",
+                "authorization_request_digest", "authorization_policy_version",
+                "effective_scope_digest", "reason_code", "decided_at",
+            )
+        }
+        decision_value["allowed"] = bool(original_decision["allowed"])
+        decision_value["effective_scopes"] = json.loads(conn.execute(
+            "SELECT canonical_bytes FROM authorization_scope_contents "
+            "WHERE scope_content_digest=?",
+            (original_decision["scope_content_digest"],),
+        ).fetchone()[0])
+        assert digest_canonical(decision_value) == original_decision["canonical_digest"]
         decision_value["authorization_decision_id"] = rebound_decision_id
         decision_value["authorization_request_digest"] = (
             rebound_request_digest
@@ -998,21 +1010,22 @@ def test_redigested_security_rebinding_fails_store_reopen(tmp_path: Path) -> Non
             "INSERT INTO authorization_decisions("
             "authorization_decision_id,authentication_context_id,"
             "authorization_request_digest,authorization_policy_version,"
-            "effective_scopes,effective_scope_digest,allowed,reason_code,"
-            "decided_at,canonical_bytes,canonical_digest) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "storage_scope_marker,effective_scope_digest,allowed,reason_code,"
+            "decided_at,storage_decision_marker,canonical_digest,scope_content_digest) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rebound_decision_id,
                 original_decision["authentication_context_id"],
                 rebound_request_digest,
                 original_decision["authorization_policy_version"],
-                original_decision["effective_scopes"],
+                b"v36",
                 original_decision["effective_scope_digest"],
                 original_decision["allowed"],
                 original_decision["reason_code"],
                 original_decision["decided_at"],
-                decision_bytes,
+                b"v36",
                 digest_bytes(decision_bytes),
+                original_decision["scope_content_digest"],
             ),
         )
 

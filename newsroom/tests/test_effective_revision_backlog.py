@@ -39,7 +39,6 @@ from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import CANONICAL_PROVING_STORE
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.store import connect, ensure_reconciliation_schema
-from newsroom.effective_revision import create_effective_revision_schema
 from scripts.reconcile_effective_revision_backlog import main
 
 _EVALUATED_AT = datetime(2026, 8, 21, 12, tzinfo=UTC)
@@ -103,31 +102,9 @@ def _file_digest(path: Path) -> str:
 
 
 def _open_proving(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE proving_runs(
-            run_id TEXT PRIMARY KEY,
-            started_at TEXT NOT NULL,
-            publication INTEGER NOT NULL DEFAULT 0,
-            public_dispatch INTEGER NOT NULL DEFAULT 0,
-            openrouter_invoked INTEGER NOT NULL DEFAULT 0,
-            spend_gbp_minor INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE proving_observations(
-            source_id TEXT NOT NULL,
-            run_id TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            url TEXT NOT NULL,
-            status_code INTEGER NOT NULL,
-            body_digest TEXT NOT NULL,
-            body BLOB NOT NULL,
-            item_count INTEGER NOT NULL,
-            error TEXT
-        );
-        """
-    )
-    create_effective_revision_schema(connection)
+    from newsroom.increment9.proving import _connect, _store_body
+
+    connection = _connect(str(path))
     return connection
 
 
@@ -152,8 +129,11 @@ def _insert_observation(
         """,
         (run_id, fetched_at),
     )
+    from newsroom.increment9.proving import _store_body
+
+    _store_body(connection, digest_bytes(body), body)
     connection.execute(
-        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?)",
         (
             source_id,
             run_id,
@@ -161,7 +141,6 @@ def _insert_observation(
             url,
             status_code,
             digest_bytes(body),
-            body,
             1,
             error,
         ),

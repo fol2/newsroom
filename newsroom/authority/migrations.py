@@ -206,6 +206,14 @@ from .graphiti_accounted_zero_migrations import (
     prepare_graphiti_accounted_zero_backup,
     require_graphiti_accounted_zero_backup,
 )
+from .authorisation_scope_content_migrations import (
+    AUTHORISATION_SCOPE_CONTENT_MIGRATION,
+    AUTHORISATION_SCOPE_CONTENT_MIGRATION_CHECKSUM,
+    AUTHORISATION_SCOPE_CONTENT_MIGRATION_NAME,
+    AUTHORISATION_SCOPE_CONTENT_MIGRATION_STATEMENTS,
+    AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION,
+    migrate_authorisation_scope_content,
+)
 from .graphiti_evaluation_migrations import (
     GRAPHITI_EVALUATION_MIGRATION,
     GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
@@ -312,7 +320,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = GRAPHITI_ACCOUNTED_ZERO_SCHEMA_VERSION
+SCHEMA_VERSION = AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION
 ISOLATED_SCHEMA_VERSION_RESERVATIONS = frozenset({33})
 MIGRATION_NAME = "authority_event_foundation_v1"
 
@@ -1611,6 +1619,20 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  GRAPHITI_ACCOUNTED_ZERO_MIGRATION_CHECKSUM, applied_at),
             )
             current = GRAPHITI_ACCOUNTED_ZERO_SCHEMA_VERSION
+        if current == GRAPHITI_ACCOUNTED_ZERO_SCHEMA_VERSION:
+            migrate_authorisation_scope_content(
+                conn,
+                expected_history=tuple(
+                    (r.version, r.name, r.checksum) for r in MIGRATIONS
+                    if r.version <= GRAPHITI_ACCOUNTED_ZERO_SCHEMA_VERSION
+                ),
+            )
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION, AUTHORISATION_SCOPE_CONTENT_MIGRATION_NAME,
+                 AUTHORISATION_SCOPE_CONTENT_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1655,6 +1677,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     INCREMENT8_RECOVERY_MIGRATION,
     GRAPHITI_EVALUATION_MIGRATION,
     GRAPHITI_ACCOUNTED_ZERO_MIGRATION,
+    AUTHORISATION_SCOPE_CONTENT_MIGRATION,
 )
 
 
@@ -1831,6 +1854,11 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         GRAPHITI_ACCOUNTED_ZERO_SCHEMA_VERSION,
         GRAPHITI_ACCOUNTED_ZERO_MIGRATION_NAME,
         GRAPHITI_ACCOUNTED_ZERO_MIGRATION_CHECKSUM,
+    ),
+    (
+        AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION,
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_NAME,
+        AUTHORISATION_SCOPE_CONTENT_MIGRATION_CHECKSUM,
     ),
 )
 # fmt: on

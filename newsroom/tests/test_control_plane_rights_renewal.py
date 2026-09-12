@@ -78,28 +78,14 @@ def _packets(arguments: dict[str, object]) -> dict[str, dict[str, object]]:
 def _retain(
     proving: Path, arguments: dict[str, object], *, run_id: str
 ) -> None:
+    from newsroom.increment9.proving_store_schema import create_proving_schema
+
     connection = sqlite3.connect(proving)
+    connection.execute("PRAGMA foreign_keys=ON")
     try:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS proving_runs(
-                run_id TEXT PRIMARY KEY,
-                started_at TEXT NOT NULL,
-                publication INTEGER NOT NULL DEFAULT 0,
-                public_dispatch INTEGER NOT NULL DEFAULT 0,
-                openrouter_invoked INTEGER NOT NULL DEFAULT 0,
-                spend_gbp_minor INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS proving_rights_packets(
-                run_id TEXT NOT NULL,
-                gate_id TEXT NOT NULL,
-                packet_digest TEXT NOT NULL,
-                packet_json TEXT NOT NULL,
-                assessed_at TEXT NOT NULL,
-                PRIMARY KEY(run_id, gate_id)
-            );
-            """
-        )
+        # Legacy endpoint packets can inhabit the current physical store; this
+        # fixture also exercises intake, not just metadata-only rights reads.
+        create_proving_schema(connection)
         connection.execute(
             """
             INSERT INTO proving_runs(

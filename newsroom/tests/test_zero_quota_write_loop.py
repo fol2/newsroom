@@ -15,6 +15,8 @@ from uuid import UUID
 
 import pytest
 
+from newsroom.increment9.proving import _store_body
+
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -2151,10 +2153,11 @@ def test_five_ready_candidates_with_valid_primary_results_insert_five(
       <entry><id>uk-3</id><title>Rule three changed</title><link href="https://example.test/uk-3"/><summary>Rule three took effect.</summary></entry>
     </feed>"""
     connection = sqlite3.connect(proving)
+    _store_body(connection, digest_bytes(expanded), expanded)
     connection.execute(
-        "UPDATE proving_observations SET body=?, body_digest=?, item_count=3 "
+        "UPDATE proving_observations SET body_digest=?, item_count=3 "
         "WHERE source_id='UK-01'",
-        (expanded, digest_bytes(expanded)),
+        (digest_bytes(expanded),),
     )
     connection.commit()
     connection.close()
@@ -3573,10 +3576,11 @@ def test_default_package_builder_can_admit_explicit_governed_input(
         "explicit_exclusions": [],
     }
     connection = sqlite3.connect(proving)
+    _store_body(connection, digest_bytes(body), body)
     connection.execute(
-        "UPDATE proving_observations SET body=?, body_digest=?, item_count=1 "
+        "UPDATE proving_observations SET body_digest=?, item_count=1 "
         "WHERE source_id='UK-02'",
-        (body, digest_bytes(body)),
+        (digest_bytes(body),),
     )
     retain_observation_revision_first_seen(
         connection,
@@ -3840,9 +3844,10 @@ def test_default_package_builder_can_admit_explicit_governed_input(
         }
     ).encode()
     connection = sqlite3.connect(proving)
+    _store_body(connection, digest_bytes(drifted_body), drifted_body)
     connection.execute(
-        "UPDATE proving_observations SET body=?, body_digest=? WHERE source_id='UK-02'",
-        (drifted_body, digest_bytes(drifted_body)),
+        "UPDATE proving_observations SET body_digest=? WHERE source_id='UK-02'",
+        (digest_bytes(drifted_body),),
     )
     retain_observation_revision_first_seen(
         connection,

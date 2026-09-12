@@ -19,6 +19,9 @@ from .persistence import (
 )
 
 
+_UNSELECTED_SCOPE_CONTENT = object()
+
+
 class _EventStoreReadMixin:
     """Policy-filtered metadata reads and exact provenance reconstruction."""
 
@@ -399,23 +402,35 @@ class _EventStoreReadMixin:
         )
 
     def _decision_record_from_row(
-        self, row: sqlite3.Row
+        self,
+        row: sqlite3.Row,
+        *,
+        connection: sqlite3.Connection | None = None,
+        selected_scope_bytes: object = _UNSELECTED_SCOPE_CONTENT,
     ) -> AuthorizationDecisionRecord:
-        data = bytes(row["canonical_bytes"])
         digest = str(row["canonical_digest"])
-        value = self._decode_canonical(data)
-        scopes_value = value.get("effective_scopes") if isinstance(value, dict) else None
         if (
-            not isinstance(scopes_value, list)
-            or not all(isinstance(item, str) for item in scopes_value)
+            bytes(row["storage_scope_marker"]) != b"v36"
+            or bytes(row["storage_decision_marker"]) != b"v36"
         ):
-            raise AuthorityPersistenceError("stored effective scopes are invalid")
-        # The full decision already supplied canonical-validated scopes. Keep
-        # exact indexed-byte equality without decoding the same list again.
-        if canonical_json_bytes(scopes_value) != bytes(row["effective_scopes"]):
-            raise AuthorityPersistenceError(
-                "stored authorization decision is not canonical"
-            )
+            raise AuthorityPersistenceError("stored authorization decision format differs")
+        scope_digest = str(row["scope_content_digest"])
+        if selected_scope_bytes is _UNSELECTED_SCOPE_CONTENT:
+            scope_row = (connection or self._connection).execute(
+                "SELECT scope_content_digest,canonical_bytes "
+                "FROM authorization_scope_contents WHERE scope_content_digest=?",
+                (scope_digest,),
+            ).fetchone()
+            if scope_row is None:
+                raise AuthorityPersistenceError("stored effective scopes are missing")
+        else:
+            if selected_scope_bytes is None:
+                raise AuthorityPersistenceError("stored effective scopes are missing")
+            scope_row = {
+                "scope_content_digest": scope_digest,
+                "canonical_bytes": selected_scope_bytes,
+            }
+        scopes_value = self._scope_content_from_row(scope_row)
         expected = {
             "authorization_decision_id": str(row["authorization_decision_id"]),
             "authentication_context_id": str(row["authentication_context_id"]),
@@ -431,7 +446,8 @@ class _EventStoreReadMixin:
             "reason_code": str(row["reason_code"]),
             "decided_at": str(row["decided_at"]),
         }
-        if digest_bytes(data) != digest or value != expected:
+        data = canonical_json_bytes(expected)
+        if digest_bytes(data) != digest:
             raise AuthorityPersistenceError(
                 "stored authorization decision is not canonical"
             )
@@ -452,6 +468,15 @@ class _EventStoreReadMixin:
             canonical_digest=digest,
             canonical_bytes=data,
         )
+
+    def _scope_content_from_row(self, row: sqlite3.Row) -> list[str]:
+        data = bytes(row["canonical_bytes"])
+        if digest_bytes(data) != str(row["scope_content_digest"]):
+            raise AuthorityPersistenceError("stored effective scopes digest differs")
+        value = self._decode_canonical(data)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise AuthorityPersistenceError("stored effective scopes are invalid")
+        return value
 
     # Private adversarial test seams; never exported as application API.
     def _execute_test_sql(

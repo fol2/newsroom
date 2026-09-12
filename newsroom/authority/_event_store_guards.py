@@ -80,14 +80,6 @@ class _ExactAuthorityGuards:
                 request.digest,  # type: ignore[attr-defined]
                 "canonical_record_digest",
             ),
-            (
-                "authorization_decisions",
-                "authorization_decision_id",
-                str(decision.authorization_decision_id),  # type: ignore[attr-defined]
-                canonical_json_bytes(decision.canonical_value()),  # type: ignore[attr-defined]
-                decision.digest,  # type: ignore[attr-defined]
-                "canonical_digest",
-            ),
         )
         for (
             table,
@@ -110,6 +102,21 @@ class _ExactAuthorityGuards:
                 raise AuthorityPersistenceError(
                     f"{table} identity already belongs to different provenance"
                 )
+        decision_row = conn.execute(
+            "SELECT * FROM authorization_decisions WHERE authorization_decision_id=?",
+            (str(decision.authorization_decision_id),),  # type: ignore[attr-defined]
+        ).fetchone()
+        if decision_row is None:
+            raise AuthorityPersistenceError("authorization decision is missing")
+        retained = self._decision_record_from_row(decision_row, connection=conn)
+        if (
+            retained.canonical_bytes
+            != canonical_json_bytes(decision.canonical_value())  # type: ignore[attr-defined]
+            or retained.canonical_digest != decision.digest  # type: ignore[attr-defined]
+        ):
+            raise AuthorityPersistenceError(
+                "authorization_decisions identity already belongs to different provenance"
+            )
 
     @staticmethod
     def _validate_relational_invariants(

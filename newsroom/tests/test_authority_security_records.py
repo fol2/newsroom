@@ -182,7 +182,7 @@ def test_authorization_decision_rejects_malformed_policy_and_scopes() -> None:
 
 
 def _stored_decision_row():
-    from newsroom.authority.canonical import canonical_json_bytes
+    from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
     context = authentication()
     scopes = ("authority.observed.write", "authority.second.read")
@@ -198,9 +198,13 @@ def _stored_decision_row():
         decided_at=FIXED_NOW,
     )
     value = decision.canonical_value()
+    scope_bytes = canonical_json_bytes(value["effective_scopes"])
     return {
         **value,
-        "effective_scopes": canonical_json_bytes(value["effective_scopes"]),
+        "scope_content_digest": digest_bytes(scope_bytes),
+        "storage_scope_marker": b"v36",
+        "storage_decision_marker": b"v36",
+        "scope_bytes": scope_bytes,
         "canonical_bytes": canonical_json_bytes(value),
         "canonical_digest": decision.digest,
     }
@@ -219,13 +223,19 @@ def test_retained_decision_checks_scopes_without_a_second_decode(monkeypatch):
 
     monkeypatch.setattr(store, "_decode_canonical", decode)
     row = _stored_decision_row()
+    store._closed = False
+    store._conn = type("Connection", (), {
+        "execute": lambda *_: type("Cursor", (), {
+            "fetchone": lambda _self: {"scope_content_digest": row["scope_content_digest"], "canonical_bytes": row["scope_bytes"]},
+        })(),
+    })()
     retained = store._decision_record_from_row(row)
     assert retained.effective_scopes == (
         "authority.observed.write", "authority.second.read",
     )
     assert retained.canonical_bytes == row["canonical_bytes"]
     assert retained.canonical_digest == row["canonical_digest"]
-    assert decoded == [row["canonical_bytes"]]
+    assert decoded == [row["scope_bytes"]]
 
 
 @pytest.mark.parametrize("scopes", [
@@ -239,6 +249,12 @@ def test_retained_decision_rejects_changed_or_noncanonical_scopes(scopes):
     from newsroom.authority._event_store import _EventAuthorityStore
 
     row = _stored_decision_row()
-    row["effective_scopes"] = scopes
+    store = object.__new__(_EventAuthorityStore)
+    store._closed = False
+    store._conn = type("Connection", (), {
+        "execute": lambda *_: type("Cursor", (), {
+            "fetchone": lambda _self: {"scope_content_digest": row["scope_content_digest"], "canonical_bytes": scopes},
+        })(),
+    })()
     with pytest.raises(AuthorityPersistenceError):
-        object.__new__(_EventAuthorityStore)._decision_record_from_row(row)
+        store._decision_record_from_row(row)

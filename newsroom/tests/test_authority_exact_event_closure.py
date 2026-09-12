@@ -56,10 +56,10 @@ def _tamper_request(store: _EventAuthorityStore, command_id: str) -> None:
 def _tamper_decision(store: _EventAuthorityStore, command_id: str) -> None:
     _drop(store, "immutable_authorization_decisions_update")
     store._execute_test_sql(
-        "UPDATE authorization_decisions SET canonical_bytes=? WHERE "
+        "UPDATE authorization_decisions SET reason_code=? WHERE "
         "authorization_decision_id=(SELECT authorization_decision_id FROM "
         "authority_commands WHERE command_id=?)",
-        (b"{}", command_id),
+        ("TAMPERED", command_id),
     )
 
 

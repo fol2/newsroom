@@ -13,6 +13,7 @@ from newsroom.authority import (
     canonical_json_bytes,
 )
 from newsroom.authority._event_store import _EventAuthorityStore
+from newsroom.authority.canonical import digest_bytes
 
 from .authority_helpers import FIXED_NOW, command, make_service, proof
 
@@ -127,7 +128,6 @@ def test_authorization_decision_id_cannot_be_reused_for_other_provenance(
         grant.authorization,
         authorization_policy_version="authz-other",
     )
-    decision_bytes = canonical_json_bytes(conflicting.canonical_value())
     scopes_bytes = canonical_json_bytes(list(conflicting.effective_scopes))
     with _store_for_service(
         tmp_path / "authority.sqlite3", service
@@ -135,24 +135,29 @@ def test_authorization_decision_id_cannot_be_reused_for_other_provenance(
         _insert_authentication(store, grant.authentication)
         _insert_request(store, grant.authorization_request)
         store._execute_test_sql(
+            "INSERT INTO authorization_scope_contents VALUES(?,?)",
+            (digest_bytes(scopes_bytes), scopes_bytes),
+        )
+        store._execute_test_sql(
             "INSERT INTO authorization_decisions("
             "authorization_decision_id,authentication_context_id,"
             "authorization_request_digest,authorization_policy_version,"
-            "effective_scopes,effective_scope_digest,allowed,reason_code,"
-            "decided_at,canonical_bytes,canonical_digest) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "storage_scope_marker,effective_scope_digest,allowed,reason_code,"
+            "decided_at,storage_decision_marker,canonical_digest,scope_content_digest) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(conflicting.authorization_decision_id),
                 str(conflicting.authentication_context_id),
                 conflicting.authorization_request_digest,
                 conflicting.authorization_policy_version,
-                scopes_bytes,
+                b"v36",
                 conflicting.effective_scope_digest,
                 int(conflicting.allowed),
                 conflicting.reason_code,
                 conflicting.decided_at.to_text(),
-                decision_bytes,
+                b"v36",
                 conflicting.digest,
+                digest_bytes(scopes_bytes),
             ),
         )
         with pytest.raises(
