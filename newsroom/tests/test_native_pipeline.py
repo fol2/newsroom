@@ -780,6 +780,94 @@ def test_three_disjoint_turns_progress_with_revalidation_and_sustained_fresh_wor
         connection.close()
 
 
+def test_unattempted_revisions_precede_held_retries_without_partial_progress(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, _, _calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    held = _native("held-retry")
+    fresh = _native("fresh")
+    first_chunk = replace(_native("fresh-chunks"), chunk_count=2)
+    second_chunk = replace(
+        first_chunk, chunk_ordinal=2, predecessor_ingest_id=first_chunk.ingest_id,
+    )
+    now = [0.0]
+    completed = set()
+    extracted = []
+    pipeline._monotonic_clock = lambda: now[0]
+    pipeline._reassessment_quantum = 300
+    journal.land((held,))
+    journal.advance(held.revision_id, stage="GRAPHITI_HOLD", facts={
+        "graphiti_outcomes": [{"state": "GRAPHITI_HOLD"}],
+        "reason": "RETRY_PENDING",
+    })
+    held_progress = dict(journal.progress[held.revision_id])
+    dispositions[0] = (
+        NS(
+            source_id=fresh.source_id, status="READY", reason_code="RETAINED",
+            units=(fresh,),
+        ),
+        NS(
+            source_id=first_chunk.source_id, status="READY",
+            reason_code="RETAINED", units=(first_chunk, second_chunk),
+        ),
+    )
+
+    def graphiti(selected, *, cycle_id, defer_before_unit):
+        results = []
+        for unit in selected:
+            if unit.ingest_id in completed:
+                results.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_COMPLETE", unit.observation_digest, None,
+                ))
+            elif defer_before_unit(unit):
+                results.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_DEFERRED", None,
+                    "WORK_QUANTUM_EXHAUSTED",
+                ))
+            else:
+                extracted.append((unit.item_key, unit.chunk_ordinal))
+                completed.add(unit.ingest_id)
+                now[0] += 301
+                results.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_COMPLETE", unit.observation_digest, None,
+                ))
+        return tuple(results)
+
+    pipeline._graphiti = NS(advance=graphiti)
+    try:
+        first = pipeline.tick(cycle_id="fresh-first")
+        dispositions[0] = ()
+        assert extracted == [(fresh.item_key, 1)]
+        assert first.unclassified_revisions == 1
+        assert first.revision_states == {
+            "GRAPHITI_COMPLETE": 1, "GRAPHITI_HOLD": 1, "QUEUED": 1,
+        }
+        assert journal.progress[held.revision_id] == held_progress
+        assert first_chunk.revision_id not in journal.progress
+
+        pipeline.tick(cycle_id="fresh-first-chunk")
+        assert extracted == [(fresh.item_key, 1), (first_chunk.item_key, 1)]
+        assert first_chunk.revision_id not in journal.progress
+        assert journal.progress[held.revision_id] == held_progress
+
+        pipeline.tick(cycle_id="fresh-second-chunk")
+        assert extracted == [
+            (fresh.item_key, 1),
+            (first_chunk.item_key, 1),
+            (second_chunk.item_key, 2),
+        ]
+        assert journal.progress[first_chunk.revision_id]["stage"] == "GRAPHITI_COMPLETE"
+        assert journal.progress[held.revision_id] == held_progress
+
+        pipeline.tick(cycle_id="held-after-fresh")
+        assert extracted[-1] == (held.item_key, 1)
+        assert journal.progress[held.revision_id]["stage"] == "GRAPHITI_COMPLETE"
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("stage", ["ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"])
 def test_unknown_settlement_keeps_priority_but_defers_next_unit_after_quantum(tmp_path, monkeypatch, stage):
     pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
