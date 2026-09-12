@@ -394,16 +394,25 @@ def _content_hold(reason="SOURCE_ITEM_NOT_YET_PUBLISHED"):
     "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+    "SOURCE_ITEM_METADATA_HOLD",
 ])
-def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason):
+@pytest.mark.parametrize("repeated", [False, True])
+def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason, repeated):
     path = tmp_path / "content-hold.sqlite3"
     connection = _open(path)
     try:
-        journal = _cycle(connection, source_override=_content_hold(reason))
+        held = _content_hold(reason)
+        if repeated:
+            # A feed item and its direct-child inventory can reach the same
+            # retained observation and local HOLD; keep the original evidence.
+            held["observations"] *= 2
+            held["item_holds"] *= 2
+        journal = _cycle(connection, source_override=held)
         retained = record_qualification(connection, IDENTITY)
         source = journal.portfolio[0]
         assert source["status"] == "HOLD"
-        assert source["item_holds"] == [["https://www.gov.uk/held-item", reason]]
+        assert source["item_holds"] == [list(value) for value in held["item_holds"]]
+        assert source["observations"] == [list(value) for value in held["observations"]]
         assert source["revision_ids"] == sorted(journal.units)
         assert validate_qualification(connection, IDENTITY) == retained
     finally:
@@ -416,15 +425,17 @@ def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_pat
 
 
 @pytest.mark.parametrize("case", [
-    "metadata", "transport", "invented", "missing_observation", "wrong_url",
-    "duplicate_observation", "bad_digest", "bad_admission", "bad_access",
-    "no_items", "duplicate_items", "ready", "rights_reason", "other_route",
+    "unsupported", "transport", "invented", "missing_observation", "wrong_url",
+    "conflicting_digest", "conflicting_admission", "conflicting_access",
+    "bad_digest", "bad_admission", "bad_access", "bad_extra_observation",
+    "no_items", "conflicting_items", "ready", "rights_reason", "other_route",
 ])
-def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case):
-    value = _content_hold()
-    if case in {"metadata", "transport", "invented"}:
+@pytest.mark.parametrize("held_reason", ["SOURCE_ITEM_NOT_YET_PUBLISHED", "SOURCE_ITEM_METADATA_HOLD"])
+def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case, held_reason):
+    value = _content_hold(held_reason)
+    if case in {"unsupported", "transport", "invented"}:
         reason = {
-            "metadata": "SOURCE_ITEM_METADATA_HOLD",
+            "unsupported": "SOURCE_ITEM_DOCUMENT_TYPE_UNKNOWN",
             "transport": "SOURCE_ITEM_FETCH_INCOMPLETE",
             "invented": "INVENTED_HOLD",
         }[case]
@@ -436,12 +447,20 @@ def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case):
         index = {"wrong_url": 0, "bad_digest": 1, "bad_admission": 2, "bad_access": 3}[case]
         parts[index] = "https://www.gov.uk/api/content/unrelated" if index == 0 else "invalid"
         value["observations"] = (tuple(parts),)
-    elif case == "duplicate_observation":
-        value["observations"] *= 2
+    elif case in {"conflicting_digest", "conflicting_admission", "conflicting_access", "bad_extra_observation"}:
+        parts = list(value["observations"][0])
+        index = {"conflicting_digest": 1, "conflicting_admission": 2, "conflicting_access": 3,
+                 "bad_extra_observation": 1}[case]
+        parts[index] = (
+            "invalid" if case == "bad_extra_observation" else
+            digest_canonical({"different": "source capture"}) if index == 1 else
+            "00000000-0000-4000-8000-000000000103"
+        )
+        value["observations"] += (tuple(parts),)
     elif case == "no_items":
         value["item_holds"] = ()
-    elif case == "duplicate_items":
-        value["item_holds"] *= 2
+    elif case == "conflicting_items":
+        value["item_holds"] += ((value["item_holds"][0][0], "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD"),)
     elif case == "ready":
         value.update(status="READY", reason_code="GOVERNED_REVISIONS_RETAINED")
     elif case == "rights_reason":

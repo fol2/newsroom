@@ -63,6 +63,7 @@ _RETAINED_CONTENT_HOLDS = frozenset({
     "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+    "SOURCE_ITEM_METADATA_HOLD",
 })
 
 
@@ -261,7 +262,10 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
 
 def _source_item_holds(item: dict) -> None:
     """Keep evidenced content holds local; never relabel them as ready revisions."""
-    holds = item["item_holds"]
+    # Feed and child inventories can reach the same retained item twice. Only
+    # exact repeats are equivalent; conflicting reasons or receipts still fail.
+    # The original portfolio/ledger bytes remain unchanged and authenticated.
+    holds = tuple(dict.fromkeys(tuple(value) for value in item["item_holds"]))
     if item["reason_code"] != "SOURCE_ITEMS_HELD":
         if holds:
             raise NativeQualificationError("native source item hold disposition differs")
@@ -278,7 +282,9 @@ def _source_item_holds(item: dict) -> None:
             if reason not in _RETAINED_CONTENT_HOLDS:
                 raise ValueError("unclassified content hold")
             endpoint = _api_url(url)
-            observations = [value for value in item["observations"] if value[0] == endpoint]
+            observations = tuple(dict.fromkeys(
+                tuple(value) for value in item["observations"] if value[0] == endpoint
+            ))
             if len(observations) != 1:
                 raise ValueError("exact source observation is absent")
             _, digest, admission, access = observations[0]

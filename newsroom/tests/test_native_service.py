@@ -538,3 +538,40 @@ def test_unknown_assessment_continues_same_open_without_redispatch(tmp_path, mon
         assert runtime.authority.receives == 0 and runtime.publication.calls == 0
     finally:
         connection.close()
+
+
+def test_service_qualifies_exact_repeated_metadata_hold_without_restart(tmp_path, monkeypatch):
+    from newsroom.control_plane.native_qualification import record_qualification, validate_qualification
+    from newsroom.tests.test_native_qualification import IDENTITY, _content_hold, _cycle, _open
+
+    connection = _open(tmp_path / "unpublished.sqlite3")
+    held = _content_hold("SOURCE_ITEM_METADATA_HOLD")
+    held["observations"] *= 2
+    held["item_holds"] *= 2
+    journal = _cycle(connection, source_override=held)
+    report = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
+    factory, opened = _pipeline(monkeypatch, lambda _: report)
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = IDENTITY
+            yield pipeline
+
+    qualified, waits = [], []
+
+    def qualify(ledger, identity):
+        qualified.append(record_qualification(ledger, identity))
+
+    try:
+        result = _service(tmp_path, bound, qualify_once=qualify,
+                          wait=lambda _: waits.append(True) or len(waits) == 2).run()
+        assert result.outcome == "COMPLETE"
+        assert opened == ["open", "close"] and len(qualified) == 1
+        assert validate_qualification(connection, IDENTITY) == qualified[0]
+        source = result.pipeline.sources[0]
+        assert source["status"] == "HOLD"
+        assert source["item_holds"] == [list(value) for value in held["item_holds"]]
+        assert source["observations"] == [list(value) for value in held["observations"]]
+    finally:
+        connection.close()
