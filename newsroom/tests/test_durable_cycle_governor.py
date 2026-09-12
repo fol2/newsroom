@@ -892,10 +892,12 @@ def test_grok_route_probe_checks_pinned_model_without_article_content(
     assert proof.provider_receipt_reference.startswith("sha256:")
 
 
+@pytest.mark.parametrize("probe_case", ["local", "provider", "exception", "veto", "crash"])
 def test_cli_health_probe_releases_open_route_with_configured_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    probe_case: str,
 ) -> None:
     import scripts.hermes_control_plane as hermes
 
@@ -923,7 +925,21 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
     connection.commit()
     connection.close()
     monkeypatch.setattr(hermes, "ensure_control_plane_state_root", lambda: None)
-    monkeypatch.setattr(hermes, "_probe_cont_writer_route", _healthy_route)
+    def configured_probe() -> WriterRouteHealthProof:
+        with sqlite3.connect(path) as connection:
+            assert tuple(connection.execute("SELECT state FROM model_transport_observations")) == (("PROBE_STARTED",),)
+        if probe_case == "exception":
+            raise RuntimeError("probe interrupted after possible provider dispatch")
+        if probe_case == "veto":
+            raise hermes.VetoError("probe veto after possible provider dispatch")
+        if probe_case == "crash":
+            raise KeyboardInterrupt("process lost after probe start")
+        if probe_case == "provider":
+            return WriterRouteHealthProof(True, True, True, True, True,
+                                          digest_canonical({"provider": "probe"}))
+        return _healthy_route()
+
+    monkeypatch.setattr(hermes, "_probe_cont_writer_route", configured_probe)
     usage = ModelUsageService(str(path))
     usage.register_policy(
         InvocationEfficiencyPolicy.create(
@@ -975,28 +991,43 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
     )
     connection.close()
 
-    return_code = hermes.main(
-        [
-            "writer-health-probe",
-            "--unpublished",
-            str(path),
-            "--proving",
-            str(proving),
-        ]
-    )
-
-    body = json.loads(capsys.readouterr().out)
+    arguments = ["writer-health-probe", "--unpublished", str(path),
+                 "--proving", str(proving)]
+    if probe_case == "crash":
+        with pytest.raises(KeyboardInterrupt):
+            hermes.main(arguments)
+        usage.recover_unresolved(observed_at=datetime.now(tz=UTC) + timedelta(minutes=2))
+    else:
+        return_code = hermes.main(arguments)
+        body = json.loads(capsys.readouterr().out)
+        passed = probe_case in {"local", "provider"}
+        assert return_code == (0 if passed else 2)
+        assert body["event"] == ("CONT_WRITER_HEALTH_PROBE_PASSED" if passed
+                                 else "CONT_WRITER_HEALTH_PROBE_FAILED")
     assert failed.writer_circuit_state == "OPEN"
-    assert return_code == 0
-    assert body["event"] == "CONT_WRITER_HEALTH_PROBE_PASSED"
-    assert governor.status().writer_circuit_state == "CLOSED"
+    assert governor.status().writer_circuit_state == (
+        "CLOSED" if probe_case in {"local", "provider"} else "OPEN"
+    )
     leaves = usage.query(
         start=datetime.now(tz=UTC) - timedelta(minutes=1),
-        end=datetime.now(tz=UTC) + timedelta(minutes=1),
+        end=datetime.now(tz=UTC) + timedelta(minutes=3),
     )["leaves"]
     assert len(leaves) == 1
     assert leaves[0]["workload_class"] == "CONT_ROUTE_HEALTH_PROBE"
-    assert leaves[0]["total_tokens"] == 0
+    assert leaves[0]["total_tokens"] == (0 if probe_case == "local" else None)
+    assert leaves[0]["usage_status"] == (
+        "REPORTED" if probe_case == "local" else
+        "UNREPORTED" if probe_case == "provider" else "AMBIGUOUS"
+    )
+    assert leaves[0]["pre_dispatch_zero_proved"] is (probe_case == "local")
+    with sqlite3.connect(path) as connection:
+        terminal = json.loads(connection.execute("SELECT record_json FROM model_invocation_terminals").fetchone()[0])
+        states = {row[0] for row in connection.execute("SELECT state FROM model_transport_observations")}
+        assert states == ({"PROBE_STARTED", "DISPATCH_STARTED"} if probe_case == "provider" else {"PROBE_STARTED"})
+        assert connection.execute("SELECT count(*) FROM model_provider_telemetry").fetchone()[0] == int(probe_case == "provider")
+        assert (terminal["provider_telemetry_digest"] is not None) is (probe_case == "provider")
+        assert (terminal["raw_telemetry_pointer"] is not None) is (probe_case == "provider")
+        assert (terminal["dispatch_at"] is None) is (probe_case == "local")
 
 
 def test_health_probe_owner_stop_after_allocation_vetoes_provider_call(
