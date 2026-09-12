@@ -298,7 +298,10 @@ def _source_item_holds(item: dict) -> None:
 def _revision_inventory(
     connection: sqlite3.Connection, sources: tuple[dict, ...], states: dict[str, int],
 ) -> tuple[NativeRevisionJournal, dict[str, int]]:
-    journal = NativeRevisionJournal(connection)
+    try:
+        journal = NativeRevisionJournal(connection)
+    except (KeyError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+        raise NativeQualificationError("native revision progress differs") from exc
     retained_states = Counter(
         journal.progress.get(revision_id, {}).get("stage", "QUEUED")
         for revision_id in journal.units

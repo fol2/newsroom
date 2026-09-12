@@ -502,12 +502,12 @@ class _CandidateStore(_EventAuthorityStore):
         if counts[0] != counts[1]:
             raise CandidateContractError("Candidate event coverage differs")
 
-    def _verify(self):
+    def _verify(self, *, relationship_receipts=None):
         verified = self._verify_local()
-        self._verify_upstream(verified)
+        self._verify_upstream(verified, relationship_receipts=relationship_receipts)
         return verified
 
-    def _verify_upstream(self, verified, *, exact: bool = False):
+    def _verify_upstream(self, verified, *, exact: bool = False, relationship_receipts=None):
         if exact:
             relationships = {}
             for admission, *_ in verified.values():
@@ -521,6 +521,17 @@ class _CandidateStore(_EventAuthorityStore):
                 relationships[manifest.relationship_assessment_digest] = (
                     receipt.assessment
                 )
+        elif relationship_receipts is not None:
+            try:
+                relationships = {
+                    admission.governing_manifest.relationship_assessment_digest:
+                    relationship_receipts[
+                        admission.governing_manifest.relationship_assessment_digest
+                    ].assessment
+                    for admission, *_ in verified.values()
+                }
+            except KeyError as exc:
+                raise CandidateContractError("Candidate relationship is absent") from exc
         else:
             digests = {
                 admission.governing_manifest.relationship_assessment_digest

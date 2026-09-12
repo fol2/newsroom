@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import replace
+
+import pytest
 
 from newsroom.authority import (
     ObjectLimits,
@@ -12,7 +15,11 @@ from newsroom.authority import (
 )
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority._hermes_native_system import open_hermes_native_authority_system
-from newsroom.authority.persistence import EventReadPolicy, MetadataClass
+from newsroom.authority.persistence import (
+    AuthoritySchemaError,
+    EventReadPolicy,
+    MetadataClass,
+)
 from newsroom.authority.types import TrustScope
 from newsroom.discovery import (
     DecisionTerminality,
@@ -501,12 +508,35 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
             == admitted.candidate
         )
 
+    from newsroom.authority._event_hypothesis_system import _HypothesisStore
+    from newsroom.increment6.dispositions import ProposalDispositionStore
+
+    verification_calls = {"hypothesis": 0, "disposition": 0}
+    original_hypothesis_verify = _HypothesisStore._verify
+    original_disposition_verify = ProposalDispositionStore._verify_integrity
+
+    def counted_hypothesis_verify(store):
+        verification_calls["hypothesis"] += 1
+        return original_hypothesis_verify(store)
+
+    def counted_disposition_verify(store):
+        verification_calls["disposition"] += 1
+        return original_disposition_verify(store)
+
+    monkeypatch.setattr(_HypothesisStore, "_verify", counted_hypothesis_verify)
+    monkeypatch.setattr(
+        ProposalDispositionStore, "_verify_integrity", counted_disposition_verify
+    )
+
     with _shared_system(
         tmp_path,
         monkeypatch,
         retrieval_authority,
         collision=enforcer,
     ) as restarted:
+        # Constructor validation remains complete; the final native transaction
+        # verifies relationship/lineage/Candidate upstream history only once.
+        assert verification_calls == {"hypothesis": 2, "disposition": 3}
         restarted_admission = advance_native_triage(
             restarted,
             work=work,
@@ -517,3 +547,77 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
             candidate_request=candidate_request,
         )
         assert restarted_admission.candidate == admitted.candidate
+
+        # Opening's local values are not retained by subsequent independent reads.
+        for _ in range(2):
+            before = dict(verification_calls)
+            assert restarted.candidates.load_version(admitted.candidate.version_id) == (
+                admitted.candidate
+            )
+            assert verification_calls == {
+                name: count + 1 for name, count in before.items()
+            }
+
+        candidate_store = (
+            restarted.candidates._StoryCandidateAuthority__authority._authority
+        )
+        with candidate_store._transaction():
+            with pytest.raises(ValueError, match="Candidate relationship is absent"):
+                candidate_store._verify(relationship_receipts={})
+
+        def rewrite_relationship(raw):
+            with closing(sqlite3.connect(tmp_path / "native.sqlite3")) as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    trigger_name = "immutable_event_hypothesis_relationship_update"
+                    trigger_sql = connection.execute(
+                        "SELECT sql FROM sqlite_schema WHERE name=?", (trigger_name,)
+                    ).fetchone()[0]
+                    connection.execute(f"DROP TRIGGER {trigger_name}")
+                    connection.execute(
+                        "UPDATE event_hypothesis_relationship_decisions "
+                        "SET assessment_bytes=?", (raw,),
+                    )
+                    connection.execute(trigger_sql)
+
+        # Same-count mutation after OPEN must be observed, not served from the
+        # earlier transaction's relationship receipts.
+        rewrite_relationship(b"{}")
+        try:
+            with pytest.raises(ValueError, match="relationship|Candidate"):
+                restarted.candidates.load_version(admitted.candidate.version_id)
+        finally:
+            rewrite_relationship(result.relationship.canonical_bytes)
+        assert restarted.candidates.load_version(admitted.candidate.version_id) == (
+            admitted.candidate
+        )
+
+    # The composed OPEN also rechecks the altered row and releases its writer
+    # on failure; restoring the exact bytes permits a fully checked reopen.
+    rewrite_relationship(b"{}")
+    try:
+        with pytest.raises(ValueError, match="relationship"):
+            _shared_system(tmp_path, monkeypatch, retrieval_authority, collision=enforcer)
+    finally:
+        rewrite_relationship(result.relationship.canonical_bytes)
+    with _shared_system(
+        tmp_path, monkeypatch, retrieval_authority, collision=enforcer
+    ) as corrected:
+        assert corrected.candidates.load_version(admitted.candidate.version_id) == (
+            admitted.candidate
+        )
+
+    # The retained authority event and Candidate still refer to the now missing
+    # relationship. Reuse must not convert that missing upstream into success.
+    with closing(sqlite3.connect(tmp_path / "native.sqlite3")) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            trigger_name = "retained_event_hypothesis_relationship_delete"
+            trigger_sql = connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE name=?", (trigger_name,)
+            ).fetchone()[0]
+            connection.execute(f"DROP TRIGGER {trigger_name}")
+            connection.execute("DELETE FROM event_hypothesis_relationship_decisions")
+            connection.execute(trigger_sql)
+    with pytest.raises((AuthoritySchemaError, ValueError), match="relationship|foreign"):
+        _shared_system(tmp_path, monkeypatch, retrieval_authority, collision=enforcer)

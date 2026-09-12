@@ -194,6 +194,75 @@ def test_rollback_scope_reverifies_retained_relationship_history(tmp_path) -> No
         authority.close()
 
 
+def test_composed_lineage_reuses_exact_transaction_inputs_but_replays_local_rows(
+    tmp_path, monkeypatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_relationship_system as relations
+
+    seed, args, receipt = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    try:
+        authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+        store = authority._EventHypothesisLineageAuthority__authority._store
+        calls = []
+        original = relations._verify_relationship_reads_in_transaction
+
+        def capture_inputs(*args, **kwargs):
+            values = original(*args, **kwargs)
+            calls.append(values)
+            return values
+
+        monkeypatch.setattr(
+            relations, "_verify_relationship_reads_in_transaction", capture_inputs
+        )
+        with store._transaction():
+            expected = store._verify()
+            assert len(calls) == 1
+            inputs = calls[0]
+            reused = store._verify(relationship_inputs=inputs)
+            assert (*reused[:3], *reused[4:]) == (*expected[:3], *expected[4:])
+            assert tuple((p.assessment, p.evidence) for p in reused[3]) == tuple(
+                (p.assessment, p.evidence) for p in expected[3]
+            )
+            assert expected[0] == (receipt,)
+            assert len(calls) == 1
+
+            # Missing upstream records do not become empty/default lineage inputs.
+            versions, relationships = inputs
+            missing_versions = dict(versions)
+            del missing_versions[receipt.inputs[0].version_id]
+            missing_relationships = dict(relationships)
+            del missing_relationships[receipt.relationships[0].assessment_digest]
+            for incomplete in (
+                (missing_versions, relationships),
+                (versions, missing_relationships),
+            ):
+                with pytest.raises(ValueError, match="relationship input is absent"):
+                    store._verify(relationship_inputs=incomplete)
+
+            # Reuse covers upstream values only: local replay/head checks still run.
+            store._connection.execute("SAVEPOINT head_tamper")
+            try:
+                store._connection.execute(
+                    "UPDATE event_hypothesis_lineage_heads SET generation=99"
+                )
+                with pytest.raises(AuthoritySchemaError, match="materialised heads"):
+                    store._verify(relationship_inputs=inputs)
+            finally:
+                store._connection.execute("ROLLBACK TO head_tamper")
+                store._connection.execute("RELEASE head_tamper")
+
+        # Independent calls never reuse the previous transaction's values.
+        assert authority.history() == (receipt,)
+        assert authority.history() == (receipt,)
+        assert len(calls) == 3
+        _rewrite_retained_relationship_evidence(args["database"])
+        with pytest.raises(ValueError, match="relationship|lineage"):
+            authority.history()
+    finally:
+        authority.close()
+
+
 def test_retain_replay_reopen_and_guarded_heads(tmp_path) -> None:
     seed, args, receipt = _seed(tmp_path)
     authority = open_event_hypothesis_lineage_authority(**args)

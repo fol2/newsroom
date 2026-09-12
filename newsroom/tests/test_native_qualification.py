@@ -80,11 +80,12 @@ def _cycle(
     reason="SOURCE_LOCAL_EVIDENCE_HOLD",
     source_reason=None,
     source_override=None,
+    facts=None,
 ):
     journal = NativeRevisionJournal(connection)
     unit = _native("qualification-hold")
     journal.land((unit,))
-    journal.advance(unit.revision_id, stage=revision_state, facts={"reason": reason})
+    journal.advance(unit.revision_id, stage=revision_state, facts={"reason": reason} if facts is None else facts)
     _portfolio(journal, unit, first_reason=source_reason, source_override=source_override)
     append_ledger(connection, "NATIVE_SERVICE_CYCLE_STARTED", {
         "cycle_id": "qualification-cycle", "runtime_identity_digest": identity,
@@ -651,3 +652,37 @@ def test_durable_continuation_defers_readiness_but_never_qualifies(tmp_path, sta
             record_qualification(connection, IDENTITY)
     finally:
         connection.close()
+
+
+def test_qualification_accepts_shared_progress_and_rejects_broken_reference(tmp_path):
+    from newsroom.control_plane.native_progress import STATE
+    from newsroom.tests.test_native_progress import _retrieval_facts
+
+    connection = _open(tmp_path / "shared-progress.sqlite3")
+    journal = NativeRevisionJournal(connection)
+    unit = _native("qualification-hold")
+    journal.land((unit,))
+    facts = _retrieval_facts()
+    journal.advance(unit.revision_id, stage="RETRIEVAL_COMPLETE", facts=facts)
+    _cycle(connection, facts=facts)
+    latest = json.loads(connection.execute(
+        "SELECT payload_json FROM ledger WHERE kind=? ORDER BY seq DESC LIMIT 1",
+        (STATE,),
+    ).fetchone()[0])
+    assert "retrieval_facts_ref" in latest
+    assert NativeRevisionJournal(connection).progress[unit.revision_id]["facts"] == facts
+    retained = record_qualification(connection, IDENTITY)
+    assert validate_qualification(connection, IDENTITY) == retained
+    append_ledger(connection, STATE, {
+        "revision_id": unit.revision_id, "ordinal": 3, "stage": "EVIDENCE_HOLD",
+        "facts": {"reason": "SOURCE_LOCAL_EVIDENCE_HOLD"},
+        "retrieval_facts_ref": {"seq": 0, "ordinal": 2, "payload_digest": "sha256:" + "0" * 64},
+    })
+    connection.commit()
+    before = connection.total_changes
+    with pytest.raises(NativeQualificationError, match="native revision"):
+        record_qualification(connection, IDENTITY)
+    with pytest.raises(NativeQualificationError):
+        validate_qualification(connection, IDENTITY)
+    assert connection.total_changes == before
+    connection.close()
