@@ -34,8 +34,15 @@ from newsroom.control_plane.zh_hant import (
     contains_simplified_variant,
 )
 
+_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION = (
+    "newsroom.write-admission.v3+newsroom.evid-012.v7+"
+    "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+    "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+    "newsroom.named-entity.v8+newsroom.cont-originality.v3+"
+    "newsroom.zh-hant-hk-shape.v13"
+)
 WRITE_ADMISSION_POLICY_VERSION = (
-    "newsroom.write-admission.v3+"
+    "newsroom.write-admission.v4+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -476,7 +483,10 @@ class WriteAdmissionDecision:
     def __post_init__(self) -> None:
         if self.decision not in {"WRITE_READY", "HOLD", "REJECT"}:
             raise ValueError("invalid write-admission result")
-        if self.policy_version != WRITE_ADMISSION_POLICY_VERSION:
+        if self.policy_version not in {
+            WRITE_ADMISSION_POLICY_VERSION,
+            _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
+        }:
             raise ValueError("unsupported write-admission policy version")
         expected = _decision_id(
             candidate_id=self.candidate_id,
@@ -1048,6 +1058,11 @@ def select_write_ready(
 
     if limit < 0:
         raise ValueError("write-ready selection limit must be non-negative")
+    if any(
+        decision.policy_version != WRITE_ADMISSION_POLICY_VERSION
+        for _candidate, _package, decision in admitted
+    ):
+        raise ValueError("write admission policy is not current")
 
     def quality(
         item: tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision],

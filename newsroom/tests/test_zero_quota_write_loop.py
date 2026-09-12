@@ -21,9 +21,12 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.admission import (
+    _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
+    WriteAdmissionDecision,
     WriteSelectionRecord,
+    _decision_id,
     _duration_is_exactly_supported,
     select_write_ready,
 )
@@ -1411,14 +1414,140 @@ def test_material_duration_classifier_must_be_exact_in_retained_fact() -> None:
 
 
 def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
+    assert _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION == (
+        "newsroom.write-admission.v3+newsroom.evid-012.v7+"
+        "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+        "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+        "newsroom.named-entity.v8+newsroom.cont-originality.v3+"
+        "newsroom.zh-hant-hk-shape.v13"
+    )
     assert WRITE_ADMISSION_POLICY_VERSION == (
-        "newsroom.write-admission.v3+"
+        "newsroom.write-admission.v4+"
         f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
         f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
         f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
     )
+
+
+def test_changed_admission_semantics_replay_the_exact_previous_policy(
+    tmp_path: Path,
+) -> None:
+    candidate, package = _candidate_package()
+    original = package.governed_claims[0]
+    claim = "The Home Office published changes"
+    excerpt = "The Home Office published changes to the Skilled Worker Visa."
+    legacy_entity_records = (
+        ("Home Office", "ORGANISATION", "legacy-entity:home-office"),
+        (
+            "Skilled Worker Visa",
+            "OFFICIAL_TERM",
+            "legacy-entity:skilled-worker-visa",
+        ),
+    )
+    legacy_claim = replace(
+        original,
+        claim=claim,
+        supporting_excerpt=excerpt,
+        rendered_assertion_zh_hant_hk=(
+            "Home Office 已公布 Skilled Worker Visa 的修訂。"
+        ),
+        named_entity_evidence=legacy_entity_records,
+        named_entities=("Home Office", "Skilled Worker Visa"),
+        rendered_named_entities=("Home Office", "Skilled Worker Visa"),
+    )
+    legacy_package = replace(
+        package,
+        passages=(excerpt,),
+        substantive_new_information=(claim,),
+        governed_claims=(legacy_claim,),
+        qualification_evidence=(),
+        evidence_gate_evidence=tuple(
+            replace(item, governed_claim_ids=(legacy_claim.claim_id,))
+            for item in package.evidence_gate_evidence
+        ),
+        resolved_evidence_records=(
+            *package.resolved_evidence_records,
+            *(
+                (record_id, "legacy-record")
+                for _text, _type, record_id in legacy_entity_records
+            ),
+        ),
+    )
+    current = DeterministicWriteAdmission().decide(
+        candidate, legacy_package, decided_at="2026-09-12T12:00:00Z"
+    )
+    assert current.decision == "HOLD"
+    assert current.stable_reason_codes == (
+        "INVALID_GOVERNED_CLAIM_EVIDENCE",
+        "INVALID_SUBSTANTIVE_CLAIM_INVENTORY",
+        "UNQUALIFIED_HEADLINE_CLAIM",
+    )
+
+    values = {
+        "candidate_id": legacy_package.candidate_id,
+        "evidence_package_digest": legacy_package.digest,
+        "decision": "HOLD",
+        "substantive_new_information": legacy_package.substantive_new_information,
+        "qualification_tests": (),
+        "selection_rationale": legacy_package.selection_rationale,
+        "geography": legacy_package.geography,
+        "categories": legacy_package.categories,
+        "evidence_gate_results": legacy_package.evidence_gate_results,
+        "freshness_result": legacy_package.freshness_result,
+        "integrity_result": legacy_package.integrity_result,
+        "stable_reason_codes": (
+            "INVALID_SUBSTANTIVE_CLAIM_INVENTORY",
+            "UNQUALIFIED_HEADLINE_CLAIM",
+        ),
+        "policy_version": _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
+    }
+    legacy = WriteAdmissionDecision(
+        decision_id=_decision_id(**values),
+        decided_at="2026-09-11T12:00:00Z",
+        **values,
+    )
+    assert WriteAdmissionDecision.from_record(legacy.as_record()) == legacy
+    with pytest.raises(ValueError, match="policy is not current"):
+        select_write_ready(
+            ((candidate, legacy_package, legacy),),
+            limit=1,
+            selected_at="2026-09-12T12:00:00Z",
+        )
+
+    connection = connect(str(tmp_path / "write-admission-policy-replay.sqlite3"))
+    retain_write_admission_decision(connection, legacy)
+    retain_write_admission_decision(connection, legacy)
+    retain_write_admission_decision(connection, current)
+    assert connection.execute(
+        "SELECT policy_version,decision FROM unpublished_write_admission_decisions "
+        "ORDER BY policy_version"
+    ).fetchall() == [
+        (_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
+        (WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
+    ]
+
+    relabelled = legacy.as_record()
+    relabelled["policy_version"] = WRITE_ADMISSION_POLICY_VERSION
+    with pytest.raises(ValueError, match="identity is not canonical"):
+        WriteAdmissionDecision.from_record(relabelled)
+    forged = legacy.as_record()
+    forged["decision"] = "REJECT"
+    with pytest.raises(ValueError, match="identity is not canonical"):
+        WriteAdmissionDecision.from_record(forged)
+    unknown = legacy.as_record()
+    unknown["policy_version"] = "newsroom.write-admission.unknown"
+    with pytest.raises(ValueError, match="unsupported write-admission policy"):
+        WriteAdmissionDecision.from_record(unknown)
+    connection.execute(
+        "UPDATE unpublished_write_admission_decisions SET record_digest=? "
+        "WHERE decision_id=?",
+        ("sha256:" + "0" * 64, legacy.decision_id),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-admission"):
+        retain_write_admission_decision(connection, legacy)
+    connection.close()
 
 
 def test_route_number_cannot_masquerade_as_material_disruption_duration() -> None:
