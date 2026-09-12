@@ -688,11 +688,16 @@ def _seed_proving_accountability(
     *,
     held_source_id: str | None = None,
 ) -> None:
-    from newsroom.increment9.proving import _connect, _store_body
+    from newsroom.increment9.proving import _store_body
+    from newsroom.increment9.proving_store_schema import create_proving_schema
 
     with sqlite3.connect(proving) as initial:
         initial.execute("DROP TABLE proof")
-    connection = _connect(str(proving))
+    # Metadata fixture setup is not a proving writer dispatch. Pytest directory
+    # names may contain "production"; the real writer path guard stays intact.
+    connection = sqlite3.connect(proving)
+    connection.execute("PRAGMA foreign_keys=ON")
+    create_proving_schema(connection)
     connection.execute(
         "INSERT INTO proving_runs VALUES(?,?,?,?,?,?)",
         ("run-1", "2026-09-01T12:00:00Z", 0, 0, 0, 0),
