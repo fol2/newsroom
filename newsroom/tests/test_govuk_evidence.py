@@ -184,6 +184,33 @@ def test_content_parser_accepts_observed_complete_speech():
     assert document.body_text == "Exact delivered speech."
 
 
+@pytest.mark.parametrize("skew_seconds", [1, 12])
+def test_content_parser_preserves_observed_publication_timestamp_skew(skew_seconds):
+    value = _document("/government/example")
+    value["public_updated_at"] = "2026-09-11T10:00:00+01:00"
+    value["first_published_at"] = (
+        f"2026-09-11T10:00:{skew_seconds:02d}+01:00"
+    )
+    document = parse_govuk_content_document(
+        "https://www.gov.uk/government/example", json.dumps(value).encode(),
+        retrieved_at=datetime(2026, 9, 11, 10, tzinfo=UTC),
+    )
+    assert document.publication == datetime(
+        2026, 9, 11, 9, 0, skew_seconds, tzinfo=UTC,
+    )
+    assert document.updated == datetime(2026, 9, 11, 9, tzinfo=UTC)
+
+
+def test_content_parser_still_rejects_future_first_publication_timestamp():
+    value = _document("/government/example")
+    value["first_published_at"] = "2026-09-12T10:00:00Z"
+    with pytest.raises(ValueError, match="source temporal order differs"):
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 11, 10, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize(("document_type", "reason_code"), [
     ("document_collection", "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE"),
     ("statutory_guidance", "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"),
@@ -349,6 +376,29 @@ def test_observed_corporate_report_exposes_its_html_child_inventory():
         )
     assert caught.value.reason_code == "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"
     assert caught.value.child_items[0] == (child["url"], child["title"])
+
+
+@pytest.mark.parametrize("binary", [False, True])
+def test_observed_regulation_exposes_its_exact_attachment_inventory(binary):
+    value = _dfe_correspondence_shape()
+    value["document_type"] = "regulation"
+    if binary:
+        value["details"]["attachments"] = [{
+            "attachment_type": "file",
+            "url": "https://assets.publishing.service.gov.uk/media/id/rules.pdf",
+            "title": "Qualification level conditions",
+        }]
+    attachments = value["details"]["attachments"]
+    with pytest.raises(GovUkContentHold) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk" + value["base_path"],
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, 12, 50, tzinfo=UTC),
+        )
+    assert caught.value.reason_code == "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"
+    expected = tuple((item["url"], item["title"]) for item in attachments)
+    assert caught.value.child_items == (() if binary else expected)
+    assert caught.value.unsupported_attachments == (expected if binary else ())
 
 
 @pytest.mark.parametrize("mutation", ["schema", "body", "attachments", "duplicate"])
@@ -674,4 +724,30 @@ def test_manual_inventory_requires_every_unique_child_section():
         parse_govuk_manual_inventory(
             "https://www.gov.uk/guidance/immigration-rules", json.dumps(value).encode(),
             retrieved_at=datetime(2026, 9, 8, 11, tzinfo=UTC),
+        )
+
+
+def test_manual_inventory_preserves_observed_publication_timestamp_skew():
+    from newsroom.control_plane.govuk_evidence import parse_govuk_manual_inventory
+
+    value = _content_shape("manual")
+    value["public_updated_at"] = "2026-09-11T10:00:00+01:00"
+    value["first_published_at"] = "2026-09-11T10:00:12+01:00"
+    inventory = parse_govuk_manual_inventory(
+        "https://www.gov.uk/government/example", json.dumps(value).encode(),
+        retrieved_at=datetime(2026, 9, 11, 10, tzinfo=UTC),
+    )
+    assert inventory.publication == datetime(2026, 9, 11, 9, 0, 12, tzinfo=UTC)
+    assert inventory.updated == datetime(2026, 9, 11, 9, tzinfo=UTC)
+
+
+def test_manual_inventory_still_rejects_future_first_publication_timestamp():
+    from newsroom.control_plane.govuk_evidence import parse_govuk_manual_inventory
+
+    value = _content_shape("manual")
+    value["first_published_at"] = "2026-09-12T10:00:00Z"
+    with pytest.raises(ValueError, match="source temporal order differs"):
+        parse_govuk_manual_inventory(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 11, 10, tzinfo=UTC),
         )
