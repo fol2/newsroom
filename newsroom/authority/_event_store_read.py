@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Sequence
 
-from .canonical import digest_bytes, digest_canonical
+from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from .persistence import (
     AuthenticationContextRecord,
     AuthorityPersistenceError,
@@ -404,12 +404,18 @@ class _EventStoreReadMixin:
         data = bytes(row["canonical_bytes"])
         digest = str(row["canonical_digest"])
         value = self._decode_canonical(data)
-        scopes_value = self._decode_canonical(bytes(row["effective_scopes"]))
+        scopes_value = value.get("effective_scopes") if isinstance(value, dict) else None
         if (
             not isinstance(scopes_value, list)
             or not all(isinstance(item, str) for item in scopes_value)
         ):
             raise AuthorityPersistenceError("stored effective scopes are invalid")
+        # The full decision already supplied canonical-validated scopes. Keep
+        # exact indexed-byte equality without decoding the same list again.
+        if canonical_json_bytes(scopes_value) != bytes(row["effective_scopes"]):
+            raise AuthorityPersistenceError(
+                "stored authorization decision is not canonical"
+            )
         expected = {
             "authorization_decision_id": str(row["authorization_decision_id"]),
             "authentication_context_id": str(row["authentication_context_id"]),

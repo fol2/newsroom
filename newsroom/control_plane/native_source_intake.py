@@ -719,7 +719,7 @@ def native_evidence_sources(
             raise hold("NATIVE_SOURCE_AUTHORITY_HOLD")
         for item in ordered:
             expected = " ".join(item.episode_body.split()).encode()
-            hydrated = objects.hydrate(HydrationRequest(
+            hydrated = objects.rehydrate(HydrationRequest(
                 ObjectAdmissionId.parse(item.authority.admission_id),
                 GRAPHITI_EVALUATION_HYDRATION_POLICY.purpose, 0, len(expected),
             ), proof=proof)
@@ -729,7 +729,7 @@ def native_evidence_sources(
             raw_admission_id, raw_access = _require_observation_access(
                 observation=observation, objects=objects, proof=proof,
             )
-            raw = objects.hydrate(HydrationRequest(
+            raw = objects.rehydrate(HydrationRequest(
                 raw_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
                 0, raw_access.allowed_bytes,
             ), proof=proof).data
@@ -799,7 +799,7 @@ def _require_parent_inventory_binding(
     admission_id, access = _require_observation_access(
         observation=root, objects=objects, proof=proof,
     )
-    raw = objects.hydrate(HydrationRequest(
+    raw = objects.rehydrate(HydrationRequest(
         admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE, 0, access.allowed_bytes,
     ), proof=proof).data
     if digest_bytes(raw) != root_digest:
@@ -821,7 +821,7 @@ def _require_parent_inventory_binding(
                 feed_admission_id, feed_access = _require_observation_access(
                     observation=feed, objects=objects, proof=proof,
                 )
-                feed_raw = objects.hydrate(HydrationRequest(
+                feed_raw = objects.rehydrate(HydrationRequest(
                     feed_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
                     0, feed_access.allowed_bytes,
                 ), proof=proof).data

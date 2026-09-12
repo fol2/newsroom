@@ -1,5 +1,6 @@
 from contextlib import contextmanager, nullcontext
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -28,6 +29,16 @@ from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
 from newsroom.tests.test_native_runtime import _args
 
 ATOM = b'''<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><id>item-1</id><title>Visa rules updated</title><summary>The official deadline changed.</summary><link href="https://www.gov.uk/item-1"/><published>2026-09-08T10:00:00Z</published><updated>2026-09-08T11:00:00Z</updated></entry></feed>'''
+
+
+def _source_read_audit_counts(path):
+    with sqlite3.connect(path) as connection:
+        return tuple(connection.execute(
+            f"SELECT COUNT(*) FROM {table}"
+        ).fetchone()[0] for table in (
+            "object_access_decisions", "authentication_contexts",
+            "authorization_requests", "authorization_decisions",
+        ))
 
 
 def _atom_for(path):
@@ -207,6 +218,14 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
         assert evidence_sources[0].unit == unit
         assert evidence_sources[0].dependency.dependency_status == "RESOLVED"
         assert evidence_sources[0].dependency.evidential_origin_id == unit.observation_digest
+        audit_counts = _source_read_audit_counts(args["authority_path"])
+        assert native_evidence_sources(
+            units=first[0].units, sources=runtime.authority.sources,
+            objects=runtime.authority.objects,
+            observations={item[1]: item for item in first[0].observations},
+            licence=_licence(), proof=runtime.proof,
+        ) == evidence_sources
+        assert _source_read_audit_counts(args["authority_path"]) == audit_counts
         with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_CHUNK_BINDING_HOLD"):
             native_evidence_sources(
                 units=(replace(unit, observation_digest="sha256:" + "f" * 64),),
@@ -564,12 +583,21 @@ def test_feed_parent_settles_each_exact_declared_html_child(
         assert all(item.canonical_url != "https://www.gov.uk" + parent_path
                    for item in disposition.units)
         assert len(disposition.observations) == 3
-        assert native_evidence_sources(
+        evidence_sources = native_evidence_sources(
             units=disposition.units, sources=runtime.authority.sources,
             objects=runtime.authority.objects,
             observations={item[1]: item for item in disposition.observations},
             licence=_licence(), proof=runtime.proof,
         )
+        assert evidence_sources
+        audit_counts = _source_read_audit_counts(args["authority_path"])
+        assert native_evidence_sources(
+            units=disposition.units, sources=runtime.authority.sources,
+            objects=runtime.authority.objects,
+            observations={item[1]: item for item in disposition.observations},
+            licence=_licence(), proof=runtime.proof,
+        ) == evidence_sources
+        assert _source_read_audit_counts(args["authority_path"]) == audit_counts
         if binary:
             assert disposition.status == "HOLD"
             assert disposition.item_holds == ((

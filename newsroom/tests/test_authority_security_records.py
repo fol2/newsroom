@@ -179,3 +179,66 @@ def test_authorization_decision_rejects_malformed_policy_and_scopes() -> None:
             decision,
             effective_scope_digest="not-a-digest",
         )
+
+
+def _stored_decision_row():
+    from newsroom.authority.canonical import canonical_json_bytes
+
+    context = authentication()
+    scopes = ("authority.observed.write", "authority.second.read")
+    decision = _AuthorizationDecision(
+        authorization_decision_id=AuthorizationDecisionId.new(),
+        authentication_context_id=context.authentication_context_id,
+        authorization_request_digest=request(context).request_digest,
+        authorization_policy_version="authz-v1",
+        effective_scopes=scopes,
+        effective_scope_digest=_effective_scope_digest(context, scopes),
+        allowed=True,
+        reason_code="AUTHZ_ALLOWED",
+        decided_at=FIXED_NOW,
+    )
+    value = decision.canonical_value()
+    return {
+        **value,
+        "effective_scopes": canonical_json_bytes(value["effective_scopes"]),
+        "canonical_bytes": canonical_json_bytes(value),
+        "canonical_digest": decision.digest,
+    }
+
+
+def test_retained_decision_checks_scopes_without_a_second_decode(monkeypatch):
+    from newsroom.authority._event_store import _EventAuthorityStore
+
+    store = object.__new__(_EventAuthorityStore)
+    original_decode = store._decode_canonical
+    decoded = []
+
+    def decode(data):
+        decoded.append(data)
+        return original_decode(data)
+
+    monkeypatch.setattr(store, "_decode_canonical", decode)
+    row = _stored_decision_row()
+    retained = store._decision_record_from_row(row)
+    assert retained.effective_scopes == (
+        "authority.observed.write", "authority.second.read",
+    )
+    assert retained.canonical_bytes == row["canonical_bytes"]
+    assert retained.canonical_digest == row["canonical_digest"]
+    assert decoded == [row["canonical_bytes"]]
+
+
+@pytest.mark.parametrize("scopes", [
+    b'["authority.observed.write"]',
+    b'[ "authority.observed.write", "authority.\\u0073econd.read" ]',
+    b'["authority.observed.write","authority.\\u0073econd.read"]',
+    b'[1]', b'{}', b'null', b'not-json',
+])
+def test_retained_decision_rejects_changed_or_noncanonical_scopes(scopes):
+    from newsroom.authority import AuthorityPersistenceError
+    from newsroom.authority._event_store import _EventAuthorityStore
+
+    row = _stored_decision_row()
+    row["effective_scopes"] = scopes
+    with pytest.raises(AuthorityPersistenceError):
+        object.__new__(_EventAuthorityStore)._decision_record_from_row(row)
