@@ -41,7 +41,9 @@ def _decode_old_decision(row: Mapping[str, object]) -> tuple[bytes, str]:
         "reason_code": str(row["reason_code"]),
         "decided_at": str(row["decided_at"]),
     }
-    if value != expected or digest_bytes(data) != str(row["canonical_digest"]):
+    if canonical_json_bytes(expected) != data or digest_bytes(data) != str(
+        row["canonical_digest"]
+    ):
         raise sqlite3.IntegrityError("stored authorization decision fields mismatch")
     return scopes_bytes, digest_bytes(scopes_bytes)
 
@@ -51,6 +53,8 @@ def migrate_authorisation_scope_content(
     *,
     expected_history: tuple[tuple[int, str, str], ...],
 ) -> None:
+    if not connection.in_transaction:
+        raise sqlite3.DatabaseError("v36 migration requires an active transaction")
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if (
         version not in (0, 34, 35)
