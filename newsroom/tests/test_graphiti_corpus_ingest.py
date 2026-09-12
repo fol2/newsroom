@@ -7188,6 +7188,98 @@ def test_operator_drain_stops_before_next_ingest_after_current_attempt_settles(
     connection.close()
 
 
+def test_quantum_yields_after_settlement_without_spending_deferred_queue_entries(tmp_path):
+    from newsroom.control_plane import cycle
+    from newsroom.control_plane.store import record_graphiti_failure
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "cooperative-quantum.sqlite3"))
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    units = tuple(
+        replace(unit, proving_run_id="native-source:" + unit.observation_digest)
+        for unit in (_unit(item_key="fresh-one"), _unit(item_key="retry"), _unit(item_key="fresh-two"))
+    )
+    record_graphiti_failure(
+        connection, ingest_id=units[1].ingest_id, source_id=units[1].source_id,
+        item_key=units[1].item_key, outcome="FAILED", failure_code="TEST_FAILURE",
+    )
+    connection.commit()
+    expected_order = [entry[-1].ingest_id for entry in cycle._queue(connection, units)]
+    assert expected_order[0] == units[1].ingest_id
+    clock = [0]
+    dispatched, deferred = [], []
+
+    class Graphiti:
+        def ingest(self, unit):
+            dispatched.append(unit.ingest_id)
+            clock[0] += 301
+            return _complete(unit, proposal_count=0, entity_count=0)
+
+    @contextmanager
+    def fence(_unit):
+        yield _DispatchAuthority({"current": True}, now + timedelta(minutes=15), lambda: None)
+
+    def run():
+        deadline = clock[0] + 300
+
+        def defer(unit):
+            if clock[0] < deadline:
+                return False
+            # The preceding attempt is fully retained and reconciled before
+            # the callback sees another eligible unit. No retry credit is made.
+            assert connection.execute(
+                "SELECT count(*) FROM unpublished_graphiti_spend WHERE status!='RECONCILED'"
+            ).fetchone() == (0,)
+            deferred.append(unit.ingest_id)
+            return True
+
+        return _ingest(
+            connection, graphiti=Graphiti(), units=units, max_graphiti=3,
+            rights_check=lambda _unit: {"current": True}, rights_fence=fence,
+            clock=lambda: now, defer_before_unit=defer,
+        )
+
+    try:
+        assert run() == 1
+        assert dispatched == expected_order[:1]
+        assert deferred == expected_order[1:]
+        for ingest_id in deferred:
+            assert next_graphiti_attempt_number(connection, ingest_id) == 1
+            assert connection.execute(
+                "SELECT count(*) FROM unpublished_graphiti_spend WHERE ingest_id=?", (ingest_id,),
+            ).fetchone() == (0,)
+        assert run() == 1
+        assert run() == 1
+        assert run() == 0
+        assert dispatched == expected_order
+        assert connection.execute(
+            "SELECT count(*) FROM unpublished_graphiti_ingest WHERE outcome='COMPLETE'"
+        ).fetchone() == (3,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stop", ["drain", "count-bound"])
+def test_existing_ingest_stop_bounds_precede_quantum_callback(tmp_path, stop):
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "stop-before-quantum.sqlite3"))
+    before = connection.total_changes
+    try:
+        assert _ingest(
+            connection, graphiti=object(), units=(_unit(),),
+            max_graphiti=0 if stop == "count-bound" else 1,
+            rights_check=lambda _: pytest.fail("rights after stop"),
+            rights_fence=lambda _: pytest.fail("fence after stop"),
+            clock=lambda: datetime(2026, 9, 12, tzinfo=UTC),
+            operator_drain_requested=lambda: stop == "drain",
+            defer_before_unit=lambda _: pytest.fail("quantum callback after stop"),
+        ) == 0
+        assert connection.total_changes == before
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     "native,zeros,providers,unresolved,failures,eligible",
     [
