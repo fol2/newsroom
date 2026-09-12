@@ -54,6 +54,7 @@ _EXPECTED_NAMES = {
     32: "increment8_recovery_authority_v32",
     34: "graphiti_evaluation_extraction_authority_v34",
     35: "graphiti_accounted_zero_proposal_authority_v35",
+    36: "authorisation_shared_scope_content_v36",
 }
 _EXPECTED_CHECKSUMS = {
     13: "sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab",
@@ -78,6 +79,7 @@ _EXPECTED_CHECKSUMS = {
     32: "sha256:513d983ce8f21f576c08b6a99337f3164025b73e588867d8dde4d500805f79ee",
     34: "sha256:ff4d4c7fdb3d9ebe8354002fe0c71739edd549f46f685782821038ab535f350f",
     35: "sha256:5618c2a4392aabc196687b1fccbb47deee20bcdccc52cc21759cb46e32277829",
+    36: "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
 }
 
 _EXPECTED_MATRIX = """version | migration | objects | history fingerprint | schema fingerprint | object fingerprint
@@ -104,6 +106,7 @@ v31 | increment8_operational_authority_v31 | 1486 | sha256:7a1592121ba3f2c399f7f
 v32 | increment8_recovery_authority_v32 | 1511 | sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910 | sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676 | sha256:ca9ce0c8b304f7d7bccb2f1e3796f02ff4d0c024a6fa78dc4d2098478afe4fae
 v34 | graphiti_evaluation_extraction_authority_v34 | 1516 | sha256:f589854a5241991459ba5052be2cb3804c75da2742ca52d035c679292c8c8d9f | sha256:8b38a4c2279363ed4105c272370bfdc733591c30032aed4cbab5e83ef92b7065 | sha256:cc181b84140510c0239bc812b690c66cd085cdce314381b08bdad78244b0f6b4
 v35 | graphiti_accounted_zero_proposal_authority_v35 | 1516 | sha256:eb02cf288b626cbd2a895d972a8ebd69ab66a2b3e243445edfc7241bca546b20 | sha256:e6f107455a75986a977008073e3882780155d51b73660b1a2ed780a2e573455a | sha256:38a2ffa11cfd76250cf9782102093708cdf64570fe201d68a1ef3fdd64d3c7a0
+v36 | authorisation_shared_scope_content_v36 | 1522 | sha256:cddffffe87f4c5123c3f5f501bb246668dd7b13077e1e4b0cbced4d7aab2b1d1 | sha256:df4cd39f154791d3e5680ac4fa501c2a076427d0ea18caff40145319c08647d0 | sha256:66ecc87b40ee20a59a0c67ddc0ade6c6a6ca670b9c883939b84b7faa0b6d183c
 """
 
 
@@ -127,14 +130,18 @@ def test_registry_history_and_statement_pins_are_complete_and_named() -> None:
     )[-2]
     assert NEWER_VERSION == CURRENT_VERSION + 1
     assert UPGRADE_PREDECESSOR_VERSIONS == RETAINED_VERSIONS[:-1]
-    assert BACKUP_PREDECESSOR_VERSIONS[-1] == PREDECESSOR_VERSION
+    assert (
+        BACKUP_PREDECESSOR_VERSIONS[-1]
+        == authority_migrations.GRAPHITI_EVALUATION_SCHEMA_VERSION
+    )
+    assert PREDECESSOR_VERSION not in BACKUP_PREDECESSOR_VERSIONS
     assert tuple(authority_migrations.EXPECTED_MIGRATION_HISTORY) == (
         PINNED_MIGRATION_HISTORY
     )
     assert RETAINED_MIN_VERSION == 13
     assert RETAINED_VERSIONS == tuple(_EXPECTED_NAMES)
     assert tuple(record.version for record in MIGRATION_REGISTRY) == tuple(
-        (*range(1, 33), 34, 35)
+        (*range(1, 33), 34, 35, 36)
     )
     assert (
         tuple(
@@ -205,6 +212,32 @@ def test_fresh_current_migrator_equals_direct_exact_current_prefix(
     assert inspect_exact_prefix(fresh_path, expected_version=CURRENT_VERSION) == direct
 
 
+@pytest.mark.parametrize(
+    ("version", "expected_calls"),
+    ((PREDECESSOR_VERSION, 0), (CURRENT_VERSION, 1)),
+)
+def test_exact_prefix_invokes_v36_procedure_once_only_for_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
+    expected_calls: int,
+) -> None:
+    calls = 0
+    original = authority_migrations.migrate_authorisation_scope_content
+
+    def counted(connection: sqlite3.Connection, *, expected_history) -> None:
+        nonlocal calls
+        calls += 1
+        assert connection.in_transaction
+        original(connection, expected_history=expected_history)
+
+    monkeypatch.setattr(
+        authority_migrations, "migrate_authorisation_scope_content", counted
+    )
+    build_exact_prefix(tmp_path / f"procedural-v{version}.sqlite3", version)
+    assert calls == expected_calls
+
+
 @pytest.mark.parametrize("predecessor", UPGRADE_PREDECESSOR_VERSIONS)
 def test_exact_predecessors_upgrade_to_current(
     tmp_path: Path, predecessor: int
@@ -267,19 +300,27 @@ def test_failed_upgrade_rolls_back_to_exact_predecessor(
 ) -> None:
     database = tmp_path / f"rollback-v{PREDECESSOR_VERSION}.sqlite3"
     before = build_exact_prefix(database, PREDECESSOR_VERSION)
-    statement_symbol = statement_symbol_for_version(CURRENT_VERSION)
-    statements = getattr(authority_migrations, statement_symbol)
+    original = authority_migrations.migrate_authorisation_scope_content
+
+    def fail_after_v36_conversion(
+        connection: sqlite3.Connection, *, expected_history
+    ) -> None:
+        original(connection, expected_history=expected_history)
+        assert connection.execute(
+            "SELECT count(*) FROM authorization_scope_contents"
+        ).fetchone()[0] == 0
+        raise sqlite3.OperationalError("injected after v36 conversion")
+
     monkeypatch.setattr(
         authority_migrations,
-        statement_symbol,
-        statements + ("CREATE TABLE injected_then_fail(value TEXT)", "INVALID SQL"),
+        "migrate_authorisation_scope_content",
+        fail_after_v36_conversion,
     )
 
     connection = sqlite3.connect(database)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
-        prepare_default_connection_backup(connection)
-        with pytest.raises(sqlite3.DatabaseError):
+        with pytest.raises(sqlite3.DatabaseError, match="after v36 conversion"):
             authority_migrations.apply_pending_migrations(
                 connection, applied_at="1970-01-02T00:00:00.000000Z"
             )
@@ -295,8 +336,9 @@ def test_failed_upgrade_rolls_back_to_exact_predecessor(
 def test_successful_upgrade_can_restore_exact_backup_then_reupgrade(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / f"restore-v{PREDECESSOR_VERSION}.sqlite3"
-    exact_predecessor = build_exact_prefix(database, PREDECESSOR_VERSION)
+    backup_predecessor = BACKUP_PREDECESSOR_VERSIONS[-1]
+    database = tmp_path / f"restore-v{backup_predecessor}.sqlite3"
+    exact_predecessor = build_exact_prefix(database, backup_predecessor)
 
     connection = sqlite3.connect(database)
     try:
@@ -314,7 +356,7 @@ def test_successful_upgrade_can_restore_exact_backup_then_reupgrade(
         database, expected_version=CURRENT_VERSION
     ) == canonical_cell(CURRENT_VERSION)
     assert (
-        inspect_exact_prefix(backup, expected_version=PREDECESSOR_VERSION)
+        inspect_exact_prefix(backup, expected_version=backup_predecessor)
         == exact_predecessor
     )
     assert digest.read_text(encoding="ascii") == (
@@ -324,11 +366,11 @@ def test_successful_upgrade_can_restore_exact_backup_then_reupgrade(
     database.unlink()
     shutil.copy2(backup, database)
     assert (
-        inspect_exact_prefix(database, expected_version=PREDECESSOR_VERSION)
+        inspect_exact_prefix(database, expected_version=backup_predecessor)
         == exact_predecessor
     )
 
-    _upgrade_to_current(database, PREDECESSOR_VERSION)
+    _upgrade_to_current(database, backup_predecessor)
     assert inspect_exact_prefix(
         database, expected_version=CURRENT_VERSION
     ) == canonical_cell(CURRENT_VERSION)

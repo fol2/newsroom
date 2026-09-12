@@ -32,7 +32,11 @@ UPGRADE_PREDECESSOR_VERSIONS = RETAINED_VERSIONS[:-1]
 BACKUP_PREDECESSOR_VERSIONS = tuple(
     version
     for version in UPGRADE_PREDECESSOR_VERSIONS
-    if version >= authority_migrations.GRAPHITI_ADAPTER_SCHEMA_VERSION
+    if (
+        authority_migrations.GRAPHITI_ADAPTER_SCHEMA_VERSION
+        <= version
+        <= authority_migrations.GRAPHITI_EVALUATION_SCHEMA_VERSION
+    )
 )
 FIXTURE_APPLIED_AT = "1970-01-01T00:00:00.000000Z"
 
@@ -223,6 +227,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "graphiti_accounted_zero_proposal_authority_v35",
         "sha256:5618c2a4392aabc196687b1fccbb47deee20bcdccc52cc21759cb46e32277829",
     ),
+    (
+        36,
+        "authorisation_shared_scope_content_v36",
+        "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
+    ),
 )
 
 
@@ -324,7 +333,7 @@ def _checked_registry() -> tuple[MigrationLike, ...]:
             "EXPECTED_MIGRATION_HISTORY differs from independent literal release pins"
         )
     versions = tuple(record[0] for record in record_history)
-    if versions != (*range(1, 33), 34, 35):
+    if versions != (*range(1, 33), 34, 35, 36):
         raise MigrationCompatibilityError(
             "authority migration registry differs from the central release sequence"
         )
@@ -428,8 +437,20 @@ def build_exact_prefix(
         for record in MIGRATION_REGISTRY:
             if record.version > version:
                 break
-            for index, statement in enumerate(statements_for_version(record.version)):
-                statement_executor(connection, record.version, index, statement)
+            if record.version == authority_migrations.AUTHORISATION_SCOPE_CONTENT_SCHEMA_VERSION:
+                authority_migrations.migrate_authorisation_scope_content(
+                    connection,
+                    expected_history=tuple(
+                        _record_tuple(previous)
+                        for previous in MIGRATION_REGISTRY
+                        if previous.version < record.version
+                    ),
+                )
+            else:
+                for index, statement in enumerate(
+                    statements_for_version(record.version)
+                ):
+                    statement_executor(connection, record.version, index, statement)
             connection.execute(
                 "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
                 "VALUES(?,?,?,?)",
