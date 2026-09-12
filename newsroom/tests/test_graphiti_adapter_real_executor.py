@@ -1429,6 +1429,10 @@ def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
                 def __init__(self, records: list[dict[str, object]]) -> None:
                     self.records = records
 
+                async def single(self, *, strict: bool) -> dict[str, object]:
+                    assert strict and len(self.records) == 1
+                    return self.records[0]
+
                 async def __aiter__(self):
                     for record in self.records:
                         yield record
@@ -1486,6 +1490,8 @@ def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
             if "SET m.state = 'RECOVERED_AMBIGUOUS'" in query:
                 marker["state"] = "RECOVERED_AMBIGUOUS"
                 return ([{"state": "RECOVERED_AMBIGUOUS"}], None, None)
+            if "RETURN count(s) AS snapshot_count" in query:
+                return ([{"snapshot_count": 0}], None, None)
             return ([], None, None)
 
     guard = Neo4jMutationGuard(
@@ -1685,6 +1691,7 @@ def test_guard_streams_preexisting_validation_in_managed_write_transactions() ->
 
     events: list[str] = []
     node = {
+        "snapshot_identity": "snapshot-node-1",
         "snapshot": {
             "uuid": "node-1", "embedding": [1.0, 2.0],
             "_newsroom_source_labels": ["Entity"],
@@ -1693,6 +1700,7 @@ def test_guard_streams_preexisting_validation_in_managed_write_transactions() ->
         "current_labels": ["Entity"],
     }
     relationship = {
+        "snapshot_identity": "snapshot-relationship-1",
         "snapshot": {
             "uuid": "relationship-1", "weight": 1.0,
             "_newsroom_source_uuid": "node-1",
@@ -1711,6 +1719,11 @@ def test_guard_streams_preexisting_validation_in_managed_write_transactions() ->
         def __iter__(self):
             raise AssertionError("guard validation must not eagerly consume results")
 
+        async def single(self, *, strict: bool) -> dict[str, object]:
+            assert strict and len(self.records) == 1
+            events.append("count")
+            return self.records[0]
+
         async def __aiter__(self):
             for record in self.records:
                 events.append("record")
@@ -1719,6 +1732,8 @@ def test_guard_streams_preexisting_validation_in_managed_write_transactions() ->
     class Transaction:
         async def run(self, query: str, **params: object) -> Result:
             assert params == {"snapshot_id": "episode-id:1"}
+            if "RETURN count(s) AS snapshot_count" in query:
+                return Result([{"snapshot_count": 1}])
             return Result([node] if "labels(n) AS current_labels" in query else [relationship])
 
     class Session:
@@ -1746,8 +1761,8 @@ def test_guard_streams_preexisting_validation_in_managed_write_transactions() ->
     )
     asyncio.run(guard.assert_preexisting_unchanged())
     assert events == [
-        "session-enter", "managed-write", "record", "session-exit",
-        "session-enter", "managed-write", "record", "session-exit",
+        "session-enter", "managed-write", "count", "record", "session-exit",
+        "session-enter", "managed-write", "count", "record", "session-exit",
     ]
 
 
@@ -1758,14 +1773,20 @@ def test_guard_streaming_validation_closes_session_after_failure(failure: str) -
     exit_error: type[BaseException] | None = None
 
     class Result:
+        async def single(self, *, strict: bool) -> dict[str, object]:
+            assert strict
+            return {"snapshot_count": 2}
+
         async def __aiter__(self):
             yield {
+                "snapshot_identity": "snapshot-node-1",
                 "snapshot": {"uuid": "node-1", "_newsroom_source_labels": []},
                 "current": {"uuid": "node-1"}, "current_labels": [],
             }
             if failure == "cancellation":
                 raise asyncio.CancelledError
             yield {
+                "snapshot_identity": "snapshot-node-2",
                 "snapshot": {"uuid": "node-2", "_newsroom_source_labels": []},
                 "current": {"uuid": "changed"}, "current_labels": [],
             }

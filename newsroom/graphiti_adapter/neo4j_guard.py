@@ -128,12 +128,34 @@ class Neo4jMutationGuard:
 
     async def _stream_query(
         self, query: str, validate: Callable[[object], None],
+        *, snapshot_label: str,
         **parameters: object,
     ) -> None:
         async def consume(transaction: Any) -> None:
+            # Reinitialise coverage on every managed transaction attempt. MATCH
+            # avoids correlated full scans, but omitted originals must still fail.
+            count_result = await transaction.run(
+                f"""
+                MATCH (s:{snapshot_label} {{_newsroom_snapshot_id: $snapshot_id}})
+                RETURN count(s) AS snapshot_count
+                """,
+                **parameters,
+            )
+            count_record = await count_result.single(strict=True)
+            expected_count = _record_value(count_record, "snapshot_count")
+            if type(expected_count) is not int or expected_count < 0:
+                raise GuardError("Graphiti snapshot coverage count is invalid")
+            covered: set[str] = set()
             records = await transaction.run(query, **parameters)
             async for record in records:
                 validate(record)
+                identity = _record_value(record, "snapshot_identity")
+                if not isinstance(identity, str) or not identity:
+                    raise GuardError("Graphiti snapshot coverage identity is absent")
+                covered.add(identity)
+            if len(covered) != expected_count:
+                kind = "node" if snapshot_label == _SNAPSHOT_NODE else "relationship"
+                raise GuardError(f"a pre-existing Graphiti {kind} is missing")
 
         async with self._driver.session() as session:
             await session.execute_write(consume)
@@ -745,15 +767,17 @@ class Neo4jMutationGuard:
         await self._stream_query(
             f"""
             MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
-            OPTIONAL MATCH (n {{uuid: s._newsroom_source_uuid}})
+            MATCH (n {{uuid: s._newsroom_source_uuid}})
             WHERE NOT n:{_SNAPSHOT_NODE}
               AND NOT n:{_SNAPSHOT_RELATIONSHIP}
               AND NOT n:{_MARKER}
-            RETURN properties(s) AS snapshot,
+            RETURN elementId(s) AS snapshot_identity,
+                   properties(s) AS snapshot,
                    properties(n) AS current,
                    labels(n) AS current_labels
             """,
             validate_node,
+            snapshot_label=_SNAPSHOT_NODE,
             snapshot_id=self._snapshot_id,
         )
 
@@ -783,7 +807,7 @@ class Neo4jMutationGuard:
         await self._stream_query(
             f"""
             MATCH (s:{_SNAPSHOT_RELATIONSHIP} {{_newsroom_snapshot_id: $snapshot_id}})
-            OPTIONAL MATCH (a {{uuid: s._newsroom_source_uuid}})
+            MATCH (a {{uuid: s._newsroom_source_uuid}})
                   -[r {{uuid: s._newsroom_relationship_uuid}}]->
                   (b {{uuid: s._newsroom_target_uuid}})
             WHERE type(r) = s._newsroom_relationship_type
@@ -791,13 +815,15 @@ class Neo4jMutationGuard:
               AND NOT a:{_SNAPSHOT_RELATIONSHIP}
               AND NOT b:{_SNAPSHOT_RELATIONSHIP}
               AND NOT a:{_MARKER} AND NOT b:{_MARKER}
-            RETURN properties(s) AS snapshot,
+            RETURN elementId(s) AS snapshot_identity,
+                   properties(s) AS snapshot,
                    properties(r) AS current,
                    a.uuid AS source_uuid,
                    b.uuid AS target_uuid,
                    type(r) AS relationship_type
             """,
             validate_relationship,
+            snapshot_label=_SNAPSHOT_RELATIONSHIP,
             snapshot_id=self._snapshot_id,
         )
 
