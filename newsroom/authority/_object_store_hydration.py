@@ -471,6 +471,28 @@ class _ObjectHydrationStoreMixin:
                     "access decision admission authority is missing"
                 )
             rights_value = self._require_canonical_record(rights)
+            expected_rights = {
+                field: rights[field]
+                for field in (
+                    "rights_decision_id", "authentication_context_id",
+                    "authorization_request_digest", "authorization_decision_id",
+                    "rights_request_digest", "policy_contract_digest",
+                    "admission_definition_digest", "object_class", "allowed_use",
+                    "security_scope", "retention_scope", "reason_code",
+                    "decided_at", "valid_from", "valid_until",
+                )
+            }
+            expected_rights.update({
+                "blob": {
+                    "blob_digest": rights["blob_digest"],
+                    "size_bytes": rights["size_bytes"],
+                },
+                "allowed": bool(rights["allowed"]),
+            })
+            if rights_value != expected_rights:
+                raise AuthorityPersistenceError(
+                    "access decision rights indexed fields differ"
+                )
             definition = self._admission_registry.resolve_exact(
                 str(admission["admission_type"]),
                 str(admission["definition_version"]),
@@ -495,6 +517,14 @@ class _ObjectHydrationStoreMixin:
             })
             retained_semantic = request_value.get(
                 "stable_semantic_request_digest"
+            )
+            accessed_at = UtcTimestamp.parse(str(row["decided_at"]))
+            rights_decided_at = UtcTimestamp.parse(str(rights["decided_at"]))
+            rights_valid_from = UtcTimestamp.parse(str(rights["valid_from"]))
+            rights_valid_until = (
+                None
+                if rights["valid_until"] is None
+                else UtcTimestamp.parse(str(rights["valid_until"]))
             )
             admission_binding_differs = (
                 row["object_class"] != admission["object_class"]
@@ -521,6 +551,15 @@ class _ObjectHydrationStoreMixin:
                 or rights["security_scope"] != admission["security_scope"]
                 or rights["retention_scope"] != admission["retention_scope"]
                 or not bool(rights["allowed"])
+                or int(rights["size_bytes"]) != size
+                or admission["valid_from"] != rights["valid_from"]
+                or admission["valid_until"] != rights["valid_until"]
+                or rights_decided_at.value > accessed_at.value
+                or rights_valid_from.value > accessed_at.value
+                or (
+                    rights_valid_until is not None
+                    and accessed_at.value >= rights_valid_until.value
+                )
                 or definition.object_class != admission["object_class"]
                 or definition.allowed_use != admission["allowed_use"]
                 or definition.security_scope != admission["security_scope"]
@@ -553,7 +592,6 @@ class _ObjectHydrationStoreMixin:
             authenticated_at = UtcTimestamp.parse(context.authenticated_at)
             expires_at = UtcTimestamp.parse(context.expires_at)
             authorised_at = UtcTimestamp.parse(decision.decided_at)
-            accessed_at = UtcTimestamp.parse(str(row["decided_at"]))
             if (
                 decision.authentication_context_id
                 != context.authentication_context_id

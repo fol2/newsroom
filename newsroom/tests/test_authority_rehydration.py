@@ -248,6 +248,52 @@ def test_historical_access_receipt_rejects_post_expiry_access_time(tmp_path):
             )
 
 
+def test_historical_access_receipt_rejects_post_rights_expiry_time(tmp_path):
+    import json
+    from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
+    from newsroom.authority.canonical import digest_bytes
+
+    path = tmp_path / "authority.sqlite3"
+    with open_object_system(path) as system:
+        admission = admit(
+            system, data=b"retained source bytes", admission_type="source.short",
+        ).admission
+        receipt = system.objects.hydrate(
+            HydrationRequest(admission.admission_id, "project.discovery"), proof=proof(),
+        ).decision
+    with sqlite3.connect(path) as connection:
+        trigger, = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_object_access_decisions_update'"
+        ).fetchone()
+        raw, = connection.execute(
+            "SELECT canonical_bytes FROM object_access_decisions "
+            "WHERE access_decision_id=?",
+            (str(receipt.access_decision_id),),
+        ).fetchone()
+        record = json.loads(raw)
+        record["decided_at"] = "2026-07-16T12:01:00.000000Z"
+        raw = canonical_json_bytes(record)
+        connection.execute("DROP TRIGGER immutable_object_access_decisions_update")
+        connection.execute(
+            "UPDATE object_access_decisions SET decided_at=?,canonical_bytes=?,"
+            "canonical_digest=? WHERE access_decision_id=?",
+            (
+                record["decided_at"], raw, digest_bytes(raw),
+                str(receipt.access_decision_id),
+            ),
+        )
+        connection.execute(trigger)
+    with open_object_system(path) as reopened:
+        with pytest.raises(AuthorityPersistenceError, match="admission binding"):
+            reopened.objects.access_decision(
+                receipt.access_decision_id,
+                admission_id=admission.admission_id,
+                purpose="project.discovery",
+                proof=proof(),
+            )
+
+
 def test_historical_access_receipt_rejects_truncated_read_to_end(tmp_path):
     import json
     from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
@@ -357,6 +403,81 @@ def test_historical_access_receipt_rejects_admission_authority_rebind(
         connection.execute(trigger)
     with open_object_system(path) as reopened:
         with pytest.raises(AuthorityPersistenceError, match="admission binding"):
+            reopened.objects.access_decision(
+                receipt.access_decision_id,
+                admission_id=first.admission_id,
+                purpose="project.discovery",
+                proof=proof(),
+            )
+
+
+def test_historical_access_receipt_rejects_rights_canonical_index_split(tmp_path):
+    import json
+    from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
+    from newsroom.authority.canonical import digest_bytes
+
+    path = tmp_path / "authority.sqlite3"
+    with open_object_system(path) as system:
+        first = admit(system, key="first", data=b"same-size-a").admission
+        second = admit(system, key="second", data=b"same-size-b").admission
+        receipt = system.objects.hydrate(
+            HydrationRequest(first.admission_id, "project.discovery"), proof=proof(),
+        ).decision
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        access_trigger, = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_object_access_decisions_update'"
+        ).fetchone()
+        rights_trigger, = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_object_rights_decisions_update'"
+        ).fetchone()
+        access = connection.execute(
+            "SELECT * FROM object_access_decisions WHERE access_decision_id=?",
+            (str(receipt.access_decision_id),),
+        ).fetchone()
+        admission = connection.execute(
+            "SELECT * FROM object_admissions WHERE admission_id=?",
+            (str(first.admission_id),),
+        ).fetchone()
+        other_blob, = connection.execute(
+            "SELECT blob_digest FROM object_admissions WHERE admission_id=?",
+            (str(second.admission_id),),
+        ).fetchone()
+        rights = connection.execute(
+            "SELECT * FROM object_rights_decisions WHERE rights_decision_id=?",
+            (admission["rights_decision_id"],),
+        ).fetchone()
+        rights_value = json.loads(rights["canonical_bytes"])
+        rights_value["blob"]["blob_digest"] = other_blob
+        rights_raw = canonical_json_bytes(rights_value)
+        rights_digest = digest_bytes(rights_raw)
+        access_value = json.loads(access["canonical_bytes"])
+        access_value["state_cutoff"]["rights_decision_digest"] = rights_digest
+        cutoff = canonical_json_bytes(access_value["state_cutoff"])
+        access_value["state_cutoff_digest"] = digest_bytes(cutoff)
+        access_raw = canonical_json_bytes(access_value)
+        connection.execute("DROP TRIGGER immutable_object_access_decisions_update")
+        connection.execute("DROP TRIGGER immutable_object_rights_decisions_update")
+        connection.execute(
+            "UPDATE object_rights_decisions SET canonical_bytes=?,canonical_digest=? "
+            "WHERE rights_decision_id=?",
+            (rights_raw, rights_digest, admission["rights_decision_id"]),
+        )
+        connection.execute(
+            "UPDATE object_access_decisions SET state_cutoff_bytes=?,"
+            "state_cutoff_digest=?,canonical_bytes=?,canonical_digest=? "
+            "WHERE access_decision_id=?",
+            (
+                cutoff, access_value["state_cutoff_digest"], access_raw,
+                digest_bytes(access_raw), str(receipt.access_decision_id),
+            ),
+        )
+        connection.execute(rights_trigger)
+        connection.execute(access_trigger)
+    with open_object_system(path) as reopened:
+        with pytest.raises(AuthorityPersistenceError, match="rights indexed fields"):
             reopened.objects.access_decision(
                 receipt.access_decision_id,
                 admission_id=first.admission_id,
