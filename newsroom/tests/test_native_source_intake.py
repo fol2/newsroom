@@ -45,13 +45,17 @@ def _atom_for(path):
     return ATOM.replace(b"https://www.gov.uk/item-1", ("https://www.gov.uk" + path).encode())
 
 
-def _document(*, body="The complete maintained-page text.", updated="2026-09-08T11:00:00Z", path="/item-1"):
+def _document(
+    *, body="The complete maintained-page text.",
+    published="2026-09-08T10:00:00Z", updated="2026-09-08T11:00:00Z",
+    path="/item-1",
+):
     return json.dumps({
         "base_path": path,
         "locale": "en",
         "document_type": "news_story",
         "withdrawn_notice": None,
-        "first_published_at": "2026-09-08T10:00:00Z",
+        "first_published_at": published,
         "public_updated_at": updated,
         "title": "Visa rules updated",
         "details": {"body": f"<p>{body}</p>"},
@@ -185,7 +189,7 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
     args = _args(tmp_path, monkeypatch)
     args["principal_id"] = OPERATOR_PRINCIPAL_ID
     args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
-    page = [_document()]
+    page = [_document(published="2026-09-08T11:00:12Z")]
     fences = []
     instant = [datetime(2026, 9, 8, 12, tzinfo=UTC)]
 
@@ -207,6 +211,8 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
         assert unit.proving_run_id.startswith("native-source:sha256:")
         assert unit.authority is not None
         assert unit.body == "The complete maintained-page text."
+        assert unit.published_at == "2026-09-08T11:00:12.000000Z"
+        assert unit.updated_at == "2026-09-08T11:00:00.000000Z"
         assert len(first[0].observations) == 2
         evidence_sources = native_evidence_sources(
             units=first[0].units, sources=runtime.authority.sources,

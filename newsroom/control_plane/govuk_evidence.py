@@ -254,7 +254,7 @@ def parse_govuk_content_document(
         raise ValueError("source schema or currentness differs")
     publication = _instant(value.get("first_published_at"))
     updated = _instant(value.get("public_updated_at"))
-    if publication > updated or updated > retrieved_at:
+    if publication > retrieved_at or updated > retrieved_at:
         raise ValueError("source temporal order differs")
     title = value["title"]
     if type(title) is not str or not title.strip():
@@ -294,7 +294,7 @@ def parse_govuk_content_document(
             unsupported_attachments=unsupported,
             exclusion_signals=_exclusion_signals(value, ""),
         )
-    elif document_type in {"correspondence", "corporate_report"}:
+    elif document_type in {"correspondence", "corporate_report", "regulation"}:
         if value.get("schema_name") != "publication":
             raise ValueError("source attachment-bearing schema differs")
         body_text = _document_text(value)
@@ -512,7 +512,7 @@ def parse_govuk_manual_inventory(
         raise ValueError("source manual schema or currentness differs")
     publication = _instant(value.get("first_published_at"))
     updated = _instant(value.get("public_updated_at"))
-    if publication > updated or updated > retrieved_at:
+    if publication > retrieved_at or updated > retrieved_at:
         raise ValueError("source temporal order differs")
     title = value.get("title")
     groups = value.get("details", {}).get("child_section_groups")
