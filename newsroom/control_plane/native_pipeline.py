@@ -192,12 +192,7 @@ class NativePipeline:
             self._drain_between_work()
             self._check()
             previous = self._journal.progress.get(revision_id, {})
-            if (
-                previous.get("stage") not in {
-                    "ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED",
-                }
-                and self._monotonic_clock() >= work_deadline
-            ):
+            if self._monotonic_clock() >= work_deadline:
                 continue
             if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
                 candidate_version_id = previous.get("facts", {}).get(

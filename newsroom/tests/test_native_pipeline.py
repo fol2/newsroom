@@ -781,12 +781,13 @@ def test_three_disjoint_turns_progress_with_revalidation_and_sustained_fresh_wor
 
 
 @pytest.mark.parametrize("stage", ["ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"])
-def test_unknown_or_interrupted_settlement_precedes_ordinary_and_survives_expired_quantum(tmp_path, monkeypatch, stage):
+def test_unknown_settlement_keeps_priority_but_defers_next_unit_after_quantum(tmp_path, monkeypatch, stage):
     pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
     ordinary = _native("ordinary")
     now = [0.0]
     pipeline._monotonic_clock = lambda: now[0]
     dispositions[0] = ()
+    pipeline._intake = NS(poll=lambda: calls.append(("poll", "current")) or ())
     for unit in (ordinary, *units):
         journal.land((unit,))
         journal.advance(unit.revision_id, stage="GRAPHITI_COMPLETE" if unit == ordinary else stage, facts={
@@ -797,13 +798,33 @@ def test_unknown_or_interrupted_settlement_precedes_ordinary_and_survives_expire
     def publish(**kwargs):
         calls.append(("settle", kwargs["revision_id"]))
         now[0] += 301
-        if stage != "ASSESSMENT_INTERRUPTED":
+        if (kwargs["revision_id"] == units[0].revision_id
+                and calls.count(("settle", units[0].revision_id)) == 2):
+            # A later retained settlement result, not permission to redispatch.
+            journal.advance(units[0].revision_id, stage="EVIDENCE_HOLD", facts={
+                **journal.progress[units[0].revision_id]["facts"], "reason": "RETAINED_HOLD",
+            })
+        elif stage != "ASSESSMENT_INTERRUPTED":
             raise OSError("still unresolved; retain exact marker")
 
     pipeline._publish = NS(advance=publish)
     try:
         pipeline.tick(cycle_id="settle-first")
-        assert [call for call in calls if call[0] == "settle"] == [("settle", unit.revision_id) for unit in units]
+        assert [call for call in calls if call[0] == "settle"] == [("settle", units[0].revision_id)]
+        assert now[0] == 301
         assert journal.progress == previous
+        pipeline.tick(cycle_id="settle-continuation")
+        assert now[0] == 602
+        assert journal.progress[units[1].revision_id] == previous[units[1].revision_id]
+        pipeline.tick(cycle_id="next-continuation")
+        assert now[0] == 903
+        assert [call for call in calls if call[0] in {"poll", "settle"}] == [
+            ("poll", "current"), ("settle", units[0].revision_id),
+            ("poll", "current"), ("settle", units[0].revision_id),
+            ("poll", "current"), ("settle", units[1].revision_id),
+        ]
+        assert journal.progress[ordinary.revision_id] == previous[ordinary.revision_id]
+        assert journal.progress[units[1].revision_id] == previous[units[1].revision_id]
+        assert not any(call[0] in {"graphiti", "discovery"} for call in calls)
     finally:
         connection.close()
