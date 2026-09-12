@@ -137,11 +137,14 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v8"
+    assert VERSION == "newsroom.native-evidence-assessor.v9"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
     assert "calendar months as months without converting them" in SYSTEM
+    assert "excerpt-only entities" not in SYSTEM
+    assert "first observation of an old clause" in SYSTEM
+    assert "DELETED" in SYSTEM
     connection.close()
 
 
@@ -157,9 +160,7 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     claim.update({
         "claim": claim_text,
         "supporting_excerpt": excerpt,
-        "rendered_assertion_zh_hant_hk": (
-            "Home Office 已公布 Skilled Worker Visa 的修訂。"
-        ),
+        "rendered_assertion_zh_hant_hk": "Home Office 已公布修訂。",
     })
     package.update({
         "substantive_new_information": [claim_text],
@@ -240,12 +241,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         (acquired,),
     )
 
-    assert result.governed_claims[0].named_entities == (
-        "Home Office", "Skilled Worker Visa",
-    )
-    assert result.governed_claims[0].rendered_named_entities == (
-        "Home Office", "Skilled Worker Visa",
-    )
+    assert result.governed_claims[0].named_entities == ("Home Office",)
+    assert result.governed_claims[0].rendered_named_entities == ("Home Office",)
     governed = replace(
         base,
         substantive_new_information=result.substantive_new_information,
@@ -454,6 +451,76 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         "INVALID_GOVERNED_CLAIM_EVIDENCE"
         not in boundary_decision.stable_reason_codes
     )
+
+    rule_claim = (
+        "An applicant may not apply for an administrative review of an eligible "
+        "decision, as defined in paragraph AR(EU)1.1., where that decision was "
+        "made on or after 5 October 2023."
+    )
+    rule_excerpt = "AR(EU)1.4. " + rule_claim
+    rule_package = json.loads(canonical_json_bytes(package))
+    rule_package["governed_claims"][0].update({
+        "claim": rule_claim,
+        "supporting_excerpt": rule_excerpt,
+        "rendered_assertion_zh_hant_hk": (
+            "申請人不得就AR(EU)1.1所界定、於2023年10月5日或之後作出的"
+            "合資格決定申請行政覆核。"
+        ),
+        "localised_factual_expressions": [
+            ["5 October 2023", "2023年10月5日"]
+        ],
+    })
+    rule_package["substantive_new_information"] = [rule_claim]
+    rule_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": rule_excerpt.encode(),
+    })
+    rule_assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": rule_package}).decode(), {}
+        ),
+        candidate, base, (source,), (rule_acquired,),
+    )
+    assert rule_assessment.governed_claims[0].named_entities == ("AR(EU)1.1",)
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+        rule_assessment, rule_excerpt, rule_claim
+    ).stable_reason_codes
+
+    invented_excerpt_entity = json.loads(canonical_json_bytes({
+        "package": rule_package
+    }))
+    invented_excerpt_entity["package"]["governed_claims"][0][
+        "rendered_assertion_zh_hant_hk"
+    ] += " AR(EU)1.4"
+    with pytest.raises(EvidencePackageError, match="rendered named entities"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes(invented_excerpt_entity).decode(), {}
+            ),
+            candidate, base, (source,), (rule_acquired,),
+        )
+
+    missing_claim_entity = json.loads(canonical_json_bytes({
+        "package": rule_package
+    }))
+    missing_claim_entity["package"]["governed_claims"][0][
+        "supporting_excerpt"
+    ] = rule_excerpt.replace("AR(EU)1.1", "AR(EU)1.2")
+    missing_acquired = SimpleNamespace(**{
+        **vars(acquired),
+        "body": (
+            rule_claim + " "
+            + missing_claim_entity["package"]["governed_claims"][0][
+                "supporting_excerpt"
+            ]
+        ).encode(),
+    })
+    with pytest.raises(EvidencePackageError, match="source evidence"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes(missing_claim_entity).decode(), {}
+            ),
+            candidate, base, (source,), (missing_acquired,),
+        )
     paraphrased = json.loads(canonical_json_bytes({"package": package}))
     paraphrased["package"]["governed_claims"][0]["claim"] = (
         "The Home Office changed the immigration system"
@@ -477,7 +544,7 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     changed = json.loads(canonical_json_bytes({"package": package}))
     changed["package"]["governed_claims"][0][
         "rendered_assertion_zh_hant_hk"
-    ] = "Home Office 已公布修訂。"
+    ] = "已公布修訂。"
     with pytest.raises(EvidencePackageError, match="rendered named entities"):
         AutonomousNativeEvidenceAssessor._validated_execution(
             NativeAssessmentExecution(canonical_json_bytes(changed).decode(), {}),
@@ -1103,7 +1170,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     import newsroom.control_plane.native_assessor as module
 
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v7")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v8")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
@@ -1122,7 +1189,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     first = assessor(candidate, base, (), ())
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v8")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
         _, usage = _usage(tmp_path, monkeypatch)
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
@@ -1144,13 +1211,20 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     connection.close()
 
 
+@pytest.mark.parametrize("prior_contract", (
+    "newsroom.native-evidence-assessor.v6",
+    "newsroom.native-evidence-assessor.v7",
+    "newsroom.native-evidence-assessor.v8",
+))
 @pytest.mark.parametrize("settled", (True, False))
-def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(tmp_path, monkeypatch, settled):
+def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(
+    tmp_path, monkeypatch, settled, prior_contract,
+):
     import newsroom.control_plane.native_assessor as module
 
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v7")
+    monkeypatch.setattr(module, "VERSION", prior_contract)
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     service, old_usage = _usage(tmp_path, monkeypatch)
     execution = NativeAssessmentExecution(
@@ -1166,7 +1240,7 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
             )(candidate, base, (), ())
     else:
         old_usage.begin(candidate, base, "unknown prior attempt")
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v8")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     _, new_usage = _usage(tmp_path, monkeypatch)
     calls = []

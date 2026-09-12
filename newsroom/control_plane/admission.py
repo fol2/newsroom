@@ -833,21 +833,20 @@ class DeterministicWriteAdmission:
             or item.status is not GovernedClaimStatus.CONFIRMED_FACT
             or not _valid_zh_hant_hk_rendering(item)
             or any(
-                entity not in item.claim and entity not in item.supporting_excerpt
+                entity not in item.claim
                 for entity in item.named_entities
             )
-            or (
-                bounded_named_entities(item.claim)
-                | bounded_named_entities(item.supporting_excerpt)
+            or not bounded_named_entities(item.claim) <= bounded_named_entities(
+                item.supporting_excerpt
             )
+            or bounded_named_entities(item.claim)
             != frozenset(
                 (text, entity_type)
                 for text, entity_type, _record_id in item.named_entity_evidence
             )
             or rendered_named_entities(
                 item.rendered_assertion_zh_hant_hk,
-                bounded_named_entities(item.claim)
-                | bounded_named_entities(item.supporting_excerpt),
+                bounded_named_entities(item.claim),
             )
             != frozenset(
                 (text, entity_type)
