@@ -1401,8 +1401,26 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         for state in conn.execute(
             "SELECT * FROM projection_delivery_states ORDER BY generation_id,ledger_seq"
         ):
-            self._require_delivery_source_integrity(conn, state)
+            source = self._require_delivery_source_integrity(conn, state)
             key = (str(state["generation_id"]), int(state["ledger_seq"]))
+            # The source and retained mapping are invariant within this
+            # delivery group. Still bind every attempt to the verified source;
+            # retain no lookup result beyond the current group or validation.
+            generation = self._generation_row(conn, key[0])
+            family = self._registered_family_definition(
+                conn, str(generation["family_id"])
+            )
+            mapping = self._projection_contracts.mappings.resolve_digest(
+                family.mapping_contract_digest
+            ).resolve(source.event_type)
+            complete_required = (
+                family.complete_projection_contract_digest is not None
+            )
+            required = (
+                True
+                if complete_required
+                else False if mapping is None else mapping.required
+            )
             latest = None
             count = 0
             while attempt is not None:
@@ -1413,20 +1431,20 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     )
                 if attempt_key != key:
                     break
-                source = self._require_delivery_source_integrity(conn, attempt)
-                generation = self._generation_row(
-                    conn, str(attempt["generation_id"])
-                )
-                family = self._registered_family_definition(
-                    conn, str(generation["family_id"])
-                )
-                mapping = self._projection_contracts.mappings.resolve_digest(
-                    family.mapping_contract_digest
-                ).resolve(source.event_type)
+                if any(
+                    str(attempt[field]) != str(state[field])
+                    for field in (
+                        "source_event_id", "source_event_type", "source_event_digest"
+                    )
+                ):
+                    raise AuthorityPersistenceError(
+                        "projection delivery source provenance is inconsistent"
+                    )
+                if str(attempt["authority_event_id"]) == str(source.event_id):
+                    raise AuthorityPersistenceError(
+                        "projection delivery targets its own authority event"
+                    )
                 outcome = ProjectionDeliveryOutcome(str(attempt["outcome"]))
-                complete_required = (
-                    family.complete_projection_contract_digest is not None
-                )
                 try:
                     self._validate_delivery_outcome(
                         mapping,
@@ -1437,11 +1455,6 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     raise AuthorityPersistenceError(
                         "projection delivery attempt violates retained mapping"
                     ) from exc
-                required = (
-                    True
-                    if complete_required
-                    else False if mapping is None else mapping.required
-                )
                 if bool(attempt["required"]) is not required:
                     raise AuthorityPersistenceError(
                         "projection delivery required flag differs from retained mapping"
@@ -1471,10 +1484,6 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     raise AuthorityPersistenceError(
                         "projection delivery head differs from latest attempt"
                     )
-            generation = self._generation_row(conn, key[0])
-            family = self._registered_family_definition(
-                conn, str(generation["family_id"])
-            )
             outcome = ProjectionDeliveryOutcome(str(state["current_outcome"]))
             expected_finalized = (
                 outcome in _SUCCESS_OUTCOMES
