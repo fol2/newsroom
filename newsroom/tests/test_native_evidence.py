@@ -498,6 +498,7 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         claim=month_source,
         supporting_excerpt=month_source,
         rendered_assertion_zh_hant_hk="限期安排在30個月後更新。",
+        localised_factual_expressions=(("30 months", "30個月"),),
     )
     month_package = replace(
         evidence.retained.package,
@@ -526,7 +527,17 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         item
         for item in month_validators
         if item.validator == "NUMERIC_AND_DATE_FIDELITY"
-    ).result == "FAIL"
+    ).result == "PASS"
+    for source_fact, rendered_fact in (
+        ("30 months", "31個月"),
+        ("missing months", "30個月"),
+        ("30 months", "1296000 minutes"),
+    ):
+        with pytest.raises(ValueError, match="equivalent exact claim facts"):
+            replace(
+                month_claim,
+                localised_factual_expressions=((source_fact, rendered_fact),),
+            )
 
     published = publisher.advance(
         evidence.retained.package_admission_id,

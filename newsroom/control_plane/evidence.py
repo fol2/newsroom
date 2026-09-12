@@ -729,6 +729,18 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
         "nine": 9,
         "ten": 10,
     }
+    english_calendar_months = re.fullmatch(
+        r"(\d+)\s+months?", value, flags=re.IGNORECASE,
+    )
+    if english_calendar_months:
+        return ("DURATION_CALENDAR_MONTHS", int(english_calendar_months.group(1)))
+    chinese_calendar_months = re.fullmatch(
+        r"([零〇一二三四五六七八九十百千兩两\d]+)(?:個月|个月)", value,
+    )
+    if chinese_calendar_months:
+        number = _chinese_integer(chinese_calendar_months.group(1))
+        if number is not None:
+            return ("DURATION_CALENDAR_MONTHS", number)
     english_duration = re.fullmatch(
         r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
         r"(hours?|minutes?)",

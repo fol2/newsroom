@@ -28,6 +28,34 @@ from .authority_event_helpers import open_test_system
 from .authority_helpers import command, proof
 
 
+def test_authority_connection_uses_bounded_cache_without_changing_durability(
+    tmp_path, monkeypatch,
+) -> None:
+    from newsroom.authority._event_store_base import _EventStoreBase
+
+    original = _EventStoreBase._configure_connection
+    observed = []
+
+    def inspect_configuration(store):
+        original(store)
+        observed.append(tuple(
+            store._connection.execute(f"PRAGMA {setting}").fetchone()[0]
+            for setting in (
+                "cache_size", "foreign_keys", "journal_mode", "synchronous", "busy_timeout",
+            )
+        ))
+
+    monkeypatch.setattr(_EventStoreBase, "_configure_connection", inspect_configuration)
+    database = tmp_path / "authority.sqlite3"
+    for _ in range(2):
+        with open_test_system(database):
+            pass
+    assert observed == [(-16384, 1, "wal", 2, 5000)] * 2
+    # The cache budget belongs to this connection, not the database schema.
+    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
+        assert connection.execute("PRAGMA cache_size").fetchone()[0] == -2000
+
+
 def test_reopen_logs_each_existing_validation_phase(tmp_path, caplog) -> None:
     database = tmp_path / "authority.sqlite3"
     with open_test_system(database) as system:

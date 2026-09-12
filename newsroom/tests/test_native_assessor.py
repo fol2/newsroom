@@ -141,6 +141,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
+    assert "calendar months as months without converting them" in SYSTEM
     connection.close()
 
 
@@ -389,6 +390,36 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     )
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
         combined_assessment, combined_claim, combined_claim
+    ).stable_reason_codes
+
+    month_claim = (
+        "If the applicant meets the ECAA business person requirement, they will be "
+        "granted permission to stay for up to 36 months."
+    )
+    month = json.loads(canonical_json_bytes(package))
+    month["governed_claims"][0].update({
+        "claim": month_claim,
+        "supporting_excerpt": month_claim,
+        "rendered_assertion_zh_hant_hk": (
+            "申請人如符合ECAA商務人士要求，可獲准逗留最多36個月。"
+        ),
+        "localised_factual_expressions": [["36 months", "36個月"]],
+    })
+    month["substantive_new_information"] = [month_claim]
+    month_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": month_claim.encode(),
+    })
+    month_assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": month}).decode(), {}
+        ),
+        candidate, base, (source,), (month_acquired,),
+    )
+    assert month_assessment.governed_claims[0].localised_factual_expressions == (
+        ("36 months", "36個月"),
+    )
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+        month_assessment, month_claim, month_claim
     ).stable_reason_codes
 
     boundary_claim = "Changes were published by the Home Office"
