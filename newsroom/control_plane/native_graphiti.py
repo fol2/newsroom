@@ -118,6 +118,7 @@ class NativeGraphitiProcessor:
 
     def advance(
         self, units: tuple[CorpusIngestUnit, ...], *, cycle_id: str,
+        defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
     ) -> tuple[NativeGraphitiOutcome, ...]:
         if not units:
             return ()
@@ -140,6 +141,8 @@ class NativeGraphitiProcessor:
                     or any(unit.chunk_count != members[0].chunk_count for unit in members)):
                 raise ValueError("native Graphiti revision chunk coverage differs")
         self._stop_check()
+        # Resolve retained accounting before considering another provider call.
+        self._settle_missing_subscription_usage(units)
         terminal_holds = {}
         for unit in units:
             # The authority commits before the private receipt/failure journal.
@@ -166,6 +169,15 @@ class NativeGraphitiProcessor:
                     if head.outcome is GraphitiAdapterOutcome.COMPLETE else
                     f"{head.outcome.value}:{head.failure_code}"
                 )
+        deferred = set()
+
+        def defer(unit: CorpusIngestUnit) -> bool:
+            self._stop_check()
+            if defer_before_unit(unit):
+                deferred.add(unit.ingest_id)
+                return True
+            return False
+
         _ingest(
             self._connection, graphiti=self._runner,
             units=tuple(unit for unit in units if unit.ingest_id not in terminal_holds),
@@ -173,6 +185,7 @@ class NativeGraphitiProcessor:
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
             operator_drain_requested=self._operator_drain_requested,
+            defer_before_unit=defer,
         )
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():
@@ -188,6 +201,11 @@ class NativeGraphitiProcessor:
             if row is not None and row[0] == "COMPLETE":
                 complete.append(unit.ingest_id)
                 outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "EXTRACTION_COMPLETE", str(row[1]), None))
+            elif unit.ingest_id in deferred:
+                outcomes.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_DEFERRED", None,
+                    "WORK_QUANTUM_EXHAUSTED",
+                ))
             else:
                 failures, dead = graphiti_failure_state(self._connection, unit.ingest_id)
                 reason = (
@@ -364,30 +382,33 @@ class NativeGraphitiProcessor:
     ) -> None:
         if self._usage is None:
             return
-        ingest_ids = {unit.ingest_id for unit in units}
-        rows = self._connection.execute(
-            "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
-            "FROM model_invocation_allocations a "
-            "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
-            "JOIN model_work_envelopes e ON e.envelope_id=a.envelope_id "
-            "WHERE a.workload_class='GRAPHITI_CHAT_PRIMARY' "
-            "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
-            "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
-            "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
-            "WHERE d.invocation_id=a.invocation_id)"
-        ).fetchall()
-        for invocation_id, allocation_digest, terminal_digest, envelope_raw in rows:
-            if json.loads(envelope_raw).get("ingest_id") not in ingest_ids:
-                continue
-            # The usage service independently validates the exact native source,
-            # qualified policy and dispatch. This retains ESTIMATED accounting,
-            # never fabricated telemetry, and does not release a route circuit.
-            self._usage.disposition_native_unreported_subscription_usage(
-                invocation_id=invocation_id,
-                expected_terminal_digest=terminal_digest,
-                expected_allocation_digest=allocation_digest,
-                observed_at=self._clock(),
-            )
+        for ingest_id in sorted({unit.ingest_id for unit in units}):
+            rows = self._connection.execute(
+                "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
+                "FROM model_work_envelopes e INDEXED BY model_usage_native_graphiti_ingest "
+                "JOIN model_invocation_allocations a ON a.envelope_id=e.envelope_id "
+                "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+                "WHERE e.workload_class='GRAPHITI_CHAT_PRIMARY' "
+                "AND json_extract(e.record_json, '$.ingest_id')=? "
+                "AND a.workload_class='GRAPHITI_CHAT_PRIMARY' "
+                "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
+                "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+                "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+                "WHERE d.invocation_id=a.invocation_id)",
+                (ingest_id,),
+            ).fetchall()
+            for invocation_id, allocation_digest, terminal_digest, envelope_raw in rows:
+                if json.loads(envelope_raw).get("ingest_id") != ingest_id:
+                    raise ValueError("model work envelope ingest binding mismatch")
+                # The usage service independently validates the exact native source,
+                # qualified policy and dispatch. This retains ESTIMATED accounting,
+                # never fabricated telemetry, and does not release a route circuit.
+                self._usage.disposition_native_unreported_subscription_usage(
+                    invocation_id=invocation_id,
+                    expected_terminal_digest=terminal_digest,
+                    expected_allocation_digest=allocation_digest,
+                    observed_at=self._clock(),
+                )
 
     def _cohort_state(self, exact: tuple[str, ...], state: str) -> None:
         cohort_id = digest_canonical(exact)

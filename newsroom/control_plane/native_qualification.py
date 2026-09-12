@@ -63,6 +63,7 @@ _RETAINED_CONTENT_HOLDS = frozenset({
     "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+    "SOURCE_ITEM_METADATA_HOLD",
 })
 
 
@@ -85,6 +86,33 @@ class RetainedNativeQualification:
 
 def _is_terminal_revision_state(value: object) -> bool:
     return type(value) is str and value in _TERMINAL_REVISION_STATES
+
+
+def qualification_report_ready(states: object, unclassified: object) -> bool:
+    """Defer durable continuations; malformed inventories still fail."""
+
+    # Existing journal checkpoints emitted by native_pipeline, native_retrieval
+    # and native_publication. Unknown effects remain pending, not qualified.
+    pending = {
+        "QUEUED", "GRAPHITI_COMPLETE", "EMBEDDING_STARTED", "EMBEDDING_RETAINED",
+        "DOCUMENT_RETAINED", "RETRIEVAL_COMPLETE", "CANDIDATE_ADMITTED",
+        "ASSESSMENT_CONTRACT_REVALIDATION", "INTAKE_REQUESTED", "INTAKE_ACKNOWLEDGED",
+        "ACQUISITION_STARTED", "ASSESSMENT_STARTED", "ASSESSMENT_INTERRUPTED",
+        "EVIDENCE_RETAINED", "PUBLICATION_PREPARED", "PUBLICATION_STARTED",
+    }
+    if (
+        type(states) is not dict
+        or any(
+            type(name) is not str
+            or (not _is_terminal_revision_state(name) and name not in pending)
+            or type(count) is not int or count <= 0
+            for name, count in states.items()
+        )
+        or type(unclassified) is not int
+        or unclassified != states.get("QUEUED", 0)
+    ):
+        raise NativeQualificationError("native revision terminal inventory differs")
+    return not any(name in pending for name in states)
 
 
 def _document(raw: str, payload_digest: str) -> dict:
@@ -227,26 +255,17 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
     if tuple(item["source_id"] for item in sources) != SOURCE_IDS:
         raise NativeQualificationError("native source disposition order differs")
     states = pipeline["revision_states"]
-    if (
-        type(states) is not dict
-        or any(
-            type(name) is not str
-            or not _is_terminal_revision_state(name)
-            or type(count) is not int
-            or isinstance(count, bool)
-            or count <= 0
-            for name, count in states.items()
-        )
-        or pipeline["unclassified_revisions"] != 0
-        or states.get("QUEUED", 0) != 0
-    ):
+    if not qualification_report_ready(states, pipeline["unclassified_revisions"]):
         raise NativeQualificationError("native revision terminal inventory differs")
     return tuple(sources), states
 
 
 def _source_item_holds(item: dict) -> None:
     """Keep evidenced content holds local; never relabel them as ready revisions."""
-    holds = item["item_holds"]
+    # Feed and child inventories can reach the same retained item twice. Only
+    # exact repeats are equivalent; conflicting reasons or receipts still fail.
+    # The original portfolio/ledger bytes remain unchanged and authenticated.
+    holds = tuple(dict.fromkeys(tuple(value) for value in item["item_holds"]))
     if item["reason_code"] != "SOURCE_ITEMS_HELD":
         if holds:
             raise NativeQualificationError("native source item hold disposition differs")
@@ -263,7 +282,9 @@ def _source_item_holds(item: dict) -> None:
             if reason not in _RETAINED_CONTENT_HOLDS:
                 raise ValueError("unclassified content hold")
             endpoint = _api_url(url)
-            observations = [value for value in item["observations"] if value[0] == endpoint]
+            observations = tuple(dict.fromkeys(
+                tuple(value) for value in item["observations"] if value[0] == endpoint
+            ))
             if len(observations) != 1:
                 raise ValueError("exact source observation is absent")
             _, digest, admission, access = observations[0]

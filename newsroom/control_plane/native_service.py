@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
+from newsroom.control_plane.native_qualification import qualification_report_ready
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.control_plane.store import append_ledger, connect
 from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
@@ -176,6 +177,10 @@ class NativeService:
                             and last.outcome == "COMPLETE"
                             and not self._shutdown.is_set()
                             and self._qualify_once is not None
+                            and qualification_report_ready(
+                                last.pipeline.revision_states,
+                                last.pipeline.unclassified_revisions,
+                            )
                         ):
                             if identity is None:
                                 raise ValueError("native qualification requires a runtime identity")

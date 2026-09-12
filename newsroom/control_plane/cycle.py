@@ -1178,6 +1178,7 @@ def _ingest(
     model_usage: ModelUsageService | None = None,
     cycle_id: str | None = None,
     operator_drain_requested: Callable[[], bool] = lambda: False,
+    defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1246,6 +1247,8 @@ def _ingest(
             break
         if attempted >= max_graphiti:
             break
+        if defer_before_unit(unit):
+            continue
         if isinstance(graphiti, GovernedRealGraphitiPort) and (
             holds := graphiti_required_route_holds(model_usage)
         ):

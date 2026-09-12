@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from newsroom.authority import AuthorityPersistenceError
+from newsroom.authority import _projection_store as projection_store
 from newsroom.authority._projection_store import _ProjectionAuthorityStore
 from newsroom.projection import (
     ProjectionDeliveryOutcome, ProjectionDeliveryRequest,
@@ -66,9 +67,17 @@ class _StreamingConnection:
     def __init__(self, connection):
         self.connection = connection
         self.yielded = {"attempt": 0, "state": 0}
+        self.lookups = {"source": 0, "generation": 0, "family": 0}
 
     def execute(self, sql, parameters=()):
         cursor = self.connection.execute(sql, parameters)
+        for prefix, kind in (
+            ("SELECT * FROM ledger_events WHERE ledger_seq=", "source"),
+            ("SELECT * FROM projection_generations WHERE generation_id=", "generation"),
+            ("SELECT definition_digest FROM projection_families WHERE family_id=", "family"),
+        ):
+            if " ".join(sql.split()).startswith(prefix):
+                self.lookups[kind] += 1
         for table, kind in (("projection_delivery_attempts", "attempt"), ("projection_delivery_states", "state")):
             if " ".join(sql.split()).startswith(f"SELECT * FROM {table}"):
                 return _StreamingCursor(cursor, self, kind)
@@ -81,7 +90,7 @@ def _probe():
     return probe
 
 
-def test_projection_delivery_open_streams_attempts_and_heads_together(tmp_path):
+def test_projection_delivery_open_streams_attempts_and_heads_together(tmp_path, monkeypatch):
     path = tmp_path / "authority.sqlite3"
     _seed(path)
     with sqlite3.connect(path) as connection:
@@ -89,6 +98,15 @@ def test_projection_delivery_open_streams_attempts_and_heads_together(tmp_path):
         streaming = _StreamingConnection(connection)
         probe = _probe()
         verified = []
+        hashes = 0
+        original_digest = projection_store.digest_canonical
+
+        def hash_source(value):
+            nonlocal hashes
+            hashes += 1
+            return original_digest(value)
+
+        monkeypatch.setattr(projection_store, "digest_canonical", hash_source)
 
         def verify_source(conn, row):
             verified.append(("attempt" if "attempt_number" in row.keys() else "state",
@@ -98,8 +116,11 @@ def test_projection_delivery_open_streams_attempts_and_heads_together(tmp_path):
         probe._require_delivery_source_integrity = verify_source
         probe._validate_projection_delivery_rows(streaming)
         assert streaming.yielded == {"attempt": 12, "state": 6}
-        assert len(verified) == 18
-        assert len(set(verified)) == 12
+        # Every attempt is checked, but its source and mapping are invariant
+        # within the already ordered delivery group.
+        assert streaming.lookups == {"source": 6, "generation": 6, "family": 6}
+        assert hashes == 6
+        assert len(verified) == len(set(verified)) == 6
     with open_projection_system(path):
         pass
 
@@ -146,3 +167,77 @@ def test_streamed_delivery_validation_preserves_corruption_guards(tmp_path, faul
         connection.execute(changes[fault] + " WHERE generation_id=? AND ledger_seq=?", key)
         with pytest.raises(AuthorityPersistenceError, match=reason):
             _probe()._validate_projection_delivery_rows(connection)
+
+
+@pytest.mark.parametrize("change,reason", (
+    ("source_event_id='00000000-0000-4000-8000-000000000099'", "source provenance"),
+    ("source_event_type='different.source'", "source provenance"),
+    ("source_event_digest='sha256:' || printf('%064d',0)", "source provenance"),
+    ("authority_event_id=source_event_id", "own authority event"),
+    ("outcome='IGNORED_OPTIONAL'", "retained mapping"),
+    ("required=0", "required flag"),
+))
+@pytest.mark.parametrize("position", (0, 3, 5))
+def test_earlier_attempt_corruption_is_not_hidden_by_valid_head(
+    tmp_path, change, reason, position,
+):
+    path = tmp_path / "authority.sqlite3"
+    _seed(path)
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        keys = connection.execute(
+            "SELECT generation_id,ledger_seq FROM projection_delivery_states "
+            "ORDER BY generation_id,ledger_seq"
+        ).fetchall()
+        key = tuple(keys[position])
+        head = tuple(connection.execute(
+            "SELECT * FROM projection_delivery_states WHERE generation_id=? AND ledger_seq=?",
+            key,
+        ).fetchone())
+        latest = tuple(connection.execute(
+            "SELECT * FROM projection_delivery_attempts "
+            "WHERE generation_id=? AND ledger_seq=? AND attempt_number=2",
+            key,
+        ).fetchone())
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name='projection_delivery_attempts'"
+        ).fetchall():
+            connection.execute(f'DROP TRIGGER "{row[0]}"')
+        changed = connection.execute(
+            f"UPDATE projection_delivery_attempts SET {change} "
+            "WHERE generation_id=? AND ledger_seq=? AND attempt_number=1",
+            key,
+        )
+        assert changed.rowcount == 1
+        assert tuple(connection.execute(
+            "SELECT * FROM projection_delivery_states WHERE generation_id=? AND ledger_seq=?",
+            key,
+        ).fetchone()) == head
+        assert tuple(connection.execute(
+            "SELECT * FROM projection_delivery_attempts "
+            "WHERE generation_id=? AND ledger_seq=? AND attempt_number=2",
+            key,
+        ).fetchone()) == latest
+        with pytest.raises(AuthorityPersistenceError, match=reason):
+            _probe()._validate_projection_delivery_rows(connection)
+
+
+def test_delivery_source_is_verified_again_in_later_validation(tmp_path):
+    path = tmp_path / "authority.sqlite3"
+    _seed(path)
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        probe = _probe()
+        probe._validate_projection_delivery_rows(connection)
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='ledger_events'"
+        ).fetchall():
+            connection.execute(f'DROP TRIGGER "{row[0]}"')
+        connection.execute(
+            "UPDATE ledger_events SET producer_version='changed' WHERE ledger_seq=("
+            "SELECT ledger_seq FROM projection_delivery_states "
+            "ORDER BY generation_id,ledger_seq LIMIT 1)"
+        )
+        with pytest.raises(AuthorityPersistenceError, match="source provenance"):
+            probe._validate_projection_delivery_rows(connection)

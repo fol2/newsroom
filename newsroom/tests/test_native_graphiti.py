@@ -64,6 +64,30 @@ def _complete(connection, **kw):
     connection.commit()
 
 
+def test_quantum_defers_only_queued_units_before_rights_spend_or_claim(tmp_path):
+    connection = connect(str(tmp_path / "deferred.sqlite3"))
+    first = replace(_native("chunks"), chunk_count=2)
+    second = replace(first, chunk_ordinal=2, predecessor_ingest_id=first.ingest_id)
+    units = (first, second, _native("independent"))
+    deferred = []
+    before = connection.total_changes
+    try:
+        attempted = cycle._ingest(
+            connection, graphiti=SimpleNamespace(ingest=lambda _: pytest.fail("provider")),
+            units=units, max_graphiti=len(units),
+            rights_check=lambda _: pytest.fail("rights"),
+            rights_fence=lambda _: pytest.fail("fence"),
+            clock=lambda: datetime(2026, 9, 12, tzinfo=UTC),
+            defer_before_unit=lambda unit: deferred.append(unit.ingest_id) or True,
+        )
+        assert attempted == 0
+        assert deferred == [entry[-1].ingest_id for entry in cycle._queue(connection, units)]
+        assert set(deferred) == {first.ingest_id, units[2].ingest_id}
+        assert connection.total_changes == before
+    finally:
+        connection.close()
+
+
 def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, monkeypatch):
     processor, connection, calls = _open(tmp_path, monkeypatch, ingest=_complete)
     units = (_native("one"), _native("two"))
@@ -454,8 +478,9 @@ def test_native_required_route_hold_is_not_reported_as_a_rights_failure(tmp_path
         connection.close()
 
 
-def test_native_advance_settles_only_its_missing_subscription_usage_after_dispatch(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize("retained", [True, False])
+def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
+    tmp_path, monkeypatch, retained,
 ):
     from newsroom.control_plane.model_usage import ModelUsageService
 
@@ -492,17 +517,64 @@ def test_native_advance_settles_only_its_missing_subscription_usage_after_dispat
             "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
             ("terminal-" + identity, identity, status, "FAILED", failure, "now", "{}"),
         )
+    # Settled and unrelated history must not enter the current-ingest selector.
+    for number in range(5, 55):
+        identity = str(number)
+        connection.execute(
+            "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
+            (identity, "old-cycle", "GRAPHITI_CHAT_PRIMARY", "now", identity,
+             json.dumps({"ingest_id": f"old-ingest-{number}"})),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_allocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (identity, identity, "old-cycle", 1, "GRAPHITI_CHAT_PRIMARY",
+             policy.canonical_digest, "cursor-agent-cli", "route", "model", identity,
+             None, "now", identity, "{}"),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
+            ("terminal-" + identity, identity, "UNREPORTED", "FAILED",
+             "MISSING_PROVIDER_TELEMETRY", "now", "{}"),
+        )
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("disposition-" + identity, identity, "terminal-" + identity,
+             identity, policy.canonical_digest, "plan-" + identity,
+             "authority", "owner", "reference", "now", "now", "ESTIMATED", "{}"),
+        )
     connection.commit()
+    if not retained:
+        terminal = connection.execute(
+            "SELECT * FROM model_invocation_terminals WHERE invocation_id='1'"
+        ).fetchone()
+        connection.execute("DELETE FROM model_invocation_terminals WHERE invocation_id='1'")
+        connection.commit()
+
+        def ingest(*args, **kwargs):
+            order.append("ingest")
+            connection.execute("INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)", terminal)
+            connection.commit()
+
+        monkeypatch.setattr(n, "_ingest", ingest)
 
     def settle(**kwargs):
         order.append("settle")
         settled.append(kwargs)
+        # Match the public method's retained disposition so the post-dispatch
+        # reconciliation does not rediscover this already settled invocation.
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("disposition", "1", "terminal-1", "1", policy.canonical_digest,
+             "plan", "authority", "owner", "reference", "now", "now", "ESTIMATED", "{}"),
+        )
+        connection.commit()
 
     monkeypatch.setattr(usage, "disposition_native_unreported_subscription_usage", settle, raising=False)
     monkeypatch.setattr(n, "graphiti_required_route_holds", lambda _: ())
     processor._usage = usage
     outcomes = processor.advance((unit,), cycle_id="native-settlement")
-    assert order == ["ingest", "settle"]
+    assert order == (["settle", "ingest"] if retained else ["ingest", "settle"])
     assert settled == [{
         "invocation_id": "1", "expected_allocation_digest": "1",
         "expected_terminal_digest": "terminal-1",
@@ -513,6 +585,38 @@ def test_native_advance_settles_only_its_missing_subscription_usage_after_dispat
         "SELECT usage_status FROM model_invocation_terminals WHERE invocation_id='1'"
     ).fetchone()[0] == "UNREPORTED"
     connection.close()
+
+
+def test_missing_subscription_usage_selector_scans_only_relevant_liabilities(
+    tmp_path,
+):
+    from newsroom.control_plane.model_usage import ModelUsageService
+
+    path = str(tmp_path / "private.sqlite3")
+    ModelUsageService(path)
+    connection = connect(path)
+    try:
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
+            "FROM model_work_envelopes e INDEXED BY model_usage_native_graphiti_ingest "
+            "JOIN model_invocation_allocations a ON a.envelope_id=e.envelope_id "
+            "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+            "WHERE e.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "AND json_extract(e.record_json, '$.ingest_id')=? "
+            "AND a.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
+            "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+            "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+            "WHERE d.invocation_id=a.invocation_id)",
+            ("selected-ingest",),
+        ).fetchall()
+    finally:
+        connection.close()
+    details = tuple(str(row[3]) for row in plan)
+    assert any("SEARCH e USING INDEX model_usage_native_graphiti_ingest" in detail
+               for detail in details), details
+    assert not any("SCAN" in detail or "TEMP" in detail for detail in details), details
 
 
 @pytest.mark.parametrize('outcome', ('MALFORMED_OUTPUT', 'AMBIGUOUS_EFFECT', 'COMPLETE'))
@@ -547,5 +651,64 @@ def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(
             else outcome + ':ORIGINAL_FAILURE'
         )
         assert connection.execute('SELECT count(*) FROM ledger').fetchone()[0] == before
+    finally:
+        connection.close()
+
+
+def test_native_quantum_reports_exact_deferred_ids_and_never_projects_chunk_prefix(tmp_path, monkeypatch):
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete as completed_result
+    from newsroom.control_plane.corpus import MAX_EPISODE_BYTES
+
+    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    first = replace(_native("chunks"), body="x" * MAX_EPISODE_BYTES, chunk_count=2)
+    second = replace(first, chunk_ordinal=2, predecessor_ingest_id=first.ingest_id)
+    independent = _native("independent")
+    units = (first, second, independent)
+    dispatched = []
+    processor._runner = SimpleNamespace(ingest=lambda unit: (
+        dispatched.append(unit.ingest_id) or completed_result(unit, proposal_count=0, entity_count=0)
+    ))
+    try:
+        before = connection.total_changes
+        deferred = processor.advance(units, cycle_id="expired", defer_before_unit=lambda _: True)
+        assert [(item.ingest_id, item.state, item.reason) for item in deferred] == [
+            (first.ingest_id, "GRAPHITI_DEFERRED", "WORK_QUANTUM_EXHAUSTED"),
+            (second.ingest_id, "GRAPHITI_HOLD", "RIGHTS_OR_PREDECESSOR_HOLD"),
+            (independent.ingest_id, "GRAPHITI_DEFERRED", "WORK_QUANTUM_EXHAUSTED"),
+        ]
+        assert not dispatched and not calls
+        assert connection.total_changes == before
+        prefix = processor.advance(units, cycle_id="prefix")
+        assert [item.state for item in prefix] == ["EXTRACTION_COMPLETE", "GRAPHITI_HOLD", "GRAPHITI_COMPLETE"]
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 1
+        complete = processor.advance(units, cycle_id="remainder")
+        assert all(item.state == "GRAPHITI_COMPLETE" for item in complete)
+        assert set(dispatched) == {unit.ingest_id for unit in units}
+        assert len(dispatched) == 3
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 2
+        processor.advance(units, cycle_id="unchanged")
+        assert len(dispatched) == 3
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 2
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stop", ["veto", "drain"])
+def test_native_stop_outranks_quantum_deferral(tmp_path, monkeypatch, stop):
+    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    checks = []
+
+    def check():
+        checks.append(True)
+        if stop == "veto" and len(checks) == 2:
+            raise VetoError("owner stop before deferral")
+
+    processor._stop_check = check
+    processor._operator_drain_requested = lambda: stop == "drain"
+    try:
+        before = connection.total_changes
+        with pytest.raises(VetoError if stop == "veto" else OperatorDrainRequested):
+            processor.advance((_native(),), cycle_id="stopped", defer_before_unit=lambda _: pytest.fail("deferral before stop"))
+        assert connection.total_changes == before and not calls
     finally:
         connection.close()

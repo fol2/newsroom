@@ -394,16 +394,25 @@ def _content_hold(reason="SOURCE_ITEM_NOT_YET_PUBLISHED"):
     "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+    "SOURCE_ITEM_METADATA_HOLD",
 ])
-def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason):
+@pytest.mark.parametrize("repeated", [False, True])
+def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason, repeated):
     path = tmp_path / "content-hold.sqlite3"
     connection = _open(path)
     try:
-        journal = _cycle(connection, source_override=_content_hold(reason))
+        held = _content_hold(reason)
+        if repeated:
+            # A feed item and its direct-child inventory can reach the same
+            # retained observation and local HOLD; keep the original evidence.
+            held["observations"] *= 2
+            held["item_holds"] *= 2
+        journal = _cycle(connection, source_override=held)
         retained = record_qualification(connection, IDENTITY)
         source = journal.portfolio[0]
         assert source["status"] == "HOLD"
-        assert source["item_holds"] == [["https://www.gov.uk/held-item", reason]]
+        assert source["item_holds"] == [list(value) for value in held["item_holds"]]
+        assert source["observations"] == [list(value) for value in held["observations"]]
         assert source["revision_ids"] == sorted(journal.units)
         assert validate_qualification(connection, IDENTITY) == retained
     finally:
@@ -416,15 +425,17 @@ def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_pat
 
 
 @pytest.mark.parametrize("case", [
-    "metadata", "transport", "invented", "missing_observation", "wrong_url",
-    "duplicate_observation", "bad_digest", "bad_admission", "bad_access",
-    "no_items", "duplicate_items", "ready", "rights_reason", "other_route",
+    "unsupported", "transport", "invented", "missing_observation", "wrong_url",
+    "conflicting_digest", "conflicting_admission", "conflicting_access",
+    "bad_digest", "bad_admission", "bad_access", "bad_extra_observation",
+    "no_items", "conflicting_items", "ready", "rights_reason", "other_route",
 ])
-def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case):
-    value = _content_hold()
-    if case in {"metadata", "transport", "invented"}:
+@pytest.mark.parametrize("held_reason", ["SOURCE_ITEM_NOT_YET_PUBLISHED", "SOURCE_ITEM_METADATA_HOLD"])
+def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case, held_reason):
+    value = _content_hold(held_reason)
+    if case in {"unsupported", "transport", "invented"}:
         reason = {
-            "metadata": "SOURCE_ITEM_METADATA_HOLD",
+            "unsupported": "SOURCE_ITEM_DOCUMENT_TYPE_UNKNOWN",
             "transport": "SOURCE_ITEM_FETCH_INCOMPLETE",
             "invented": "INVENTED_HOLD",
         }[case]
@@ -436,12 +447,20 @@ def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case):
         index = {"wrong_url": 0, "bad_digest": 1, "bad_admission": 2, "bad_access": 3}[case]
         parts[index] = "https://www.gov.uk/api/content/unrelated" if index == 0 else "invalid"
         value["observations"] = (tuple(parts),)
-    elif case == "duplicate_observation":
-        value["observations"] *= 2
+    elif case in {"conflicting_digest", "conflicting_admission", "conflicting_access", "bad_extra_observation"}:
+        parts = list(value["observations"][0])
+        index = {"conflicting_digest": 1, "conflicting_admission": 2, "conflicting_access": 3,
+                 "bad_extra_observation": 1}[case]
+        parts[index] = (
+            "invalid" if case == "bad_extra_observation" else
+            digest_canonical({"different": "source capture"}) if index == 1 else
+            "00000000-0000-4000-8000-000000000103"
+        )
+        value["observations"] += (tuple(parts),)
     elif case == "no_items":
         value["item_holds"] = ()
-    elif case == "duplicate_items":
-        value["item_holds"] *= 2
+    elif case == "conflicting_items":
+        value["item_holds"] += ((value["item_holds"][0][0], "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD"),)
     elif case == "ready":
         value.update(status="READY", reason_code="GOVERNED_REVISIONS_RETAINED")
     elif case == "rights_reason":
@@ -580,3 +599,55 @@ def test_native_invocation_must_have_resolved_retained_usage(tmp_path):
         )
     finally:
         reconciled.close()
+
+
+@pytest.mark.parametrize("states,unclassified,ready", [
+    ({}, 0, True),
+    ({"ACKNOWLEDGED": 1, "EVIDENCE_HOLD": 2}, 0, True),
+    ({"QUEUED": 1}, 1, False),
+    ({"GRAPHITI_COMPLETE": 1}, 0, False),
+    ({"QUEUED": 2, "GRAPHITI_COMPLETE": 1, "EVIDENCE_HOLD": 3}, 2, False),
+])
+def test_qualification_readiness_defers_only_valid_pending_reports(states, unclassified, ready):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    assert qualification_report_ready(states, unclassified) is ready
+
+
+@pytest.mark.parametrize("states,unclassified", [
+    ({"UNKNOWN": 1}, 0), ({"ASSESSMENT_START": 1}, 0),
+    ({"QUEUED": 0}, 0), ({"QUEUED": -1}, -1), ({"QUEUED": True}, 1),
+    ({"GRAPHITI_COMPLETE": "1"}, 0), ({"QUEUED": 1}, 0),
+    ({"ACKNOWLEDGED": 1}, 1), ({"ACKNOWLEDGED": 1}, False),
+    ({1: 1}, 0), ([], 0),
+])
+def test_qualification_readiness_rejects_malformed_or_unknown_reports(states, unclassified):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
+        qualification_report_ready(states, unclassified)
+
+
+# Exact checkpoints emitted by native_pipeline, native_retrieval and
+# native_publication; these are continuation states, never qualification PASS.
+_PENDING_CHECKPOINTS = (
+    "QUEUED", "GRAPHITI_COMPLETE", "EMBEDDING_STARTED", "EMBEDDING_RETAINED",
+    "DOCUMENT_RETAINED", "RETRIEVAL_COMPLETE", "CANDIDATE_ADMITTED",
+    "ASSESSMENT_CONTRACT_REVALIDATION", "INTAKE_REQUESTED", "INTAKE_ACKNOWLEDGED",
+    "ACQUISITION_STARTED", "ASSESSMENT_STARTED", "ASSESSMENT_INTERRUPTED",
+    "EVIDENCE_RETAINED", "PUBLICATION_PREPARED", "PUBLICATION_STARTED",
+)
+
+
+@pytest.mark.parametrize("stage", _PENDING_CHECKPOINTS)
+def test_durable_continuation_defers_readiness_but_never_qualifies(tmp_path, stage):
+    from newsroom.control_plane.native_qualification import qualification_report_ready
+
+    assert qualification_report_ready({stage: 1}, int(stage == "QUEUED")) is False
+    connection = _open(tmp_path / "pending.sqlite3")
+    try:
+        _cycle(connection, revision_state=stage)
+        with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
+            record_qualification(connection, IDENTITY)
+    finally:
+        connection.close()
