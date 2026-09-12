@@ -40,6 +40,9 @@ _PURPOSES = {
     "RETRIEVAL_ACCOUNTING": (
         "retrieval.native-embedding-receipt", "NATIVE_RETRIEVAL_EMBEDDING_RECEIPT",
     ),
+    "TRIAGE_RETRIEVAL": (
+        "retrieval.native-context", "NATIVE_RETRIEVAL_CONTEXT",
+    ),
 }
 _VERSION = "hermes-private-native-v1"
 _PRINCIPAL = "newsroom.control-plane"

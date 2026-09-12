@@ -14,6 +14,23 @@ from newsroom.tests.test_native_runtime import _args
 from scripts.prune_native_diagnostic_audit import main
 
 
+_EXPECTED_PURPOSES = {
+    "RETRIEVAL_PROJECTION": (
+        "retrieval.native-document", "NATIVE_RETRIEVAL_DOCUMENT",
+    ),
+    "RETRIEVAL_VECTOR": (
+        "retrieval.native-vector", "NATIVE_RETRIEVAL_EMBEDDING_VECTOR",
+    ),
+    "RETRIEVAL_ACCOUNTING": (
+        "retrieval.native-embedding-receipt",
+        "NATIVE_RETRIEVAL_EMBEDDING_RECEIPT",
+    ),
+    "TRIAGE_RETRIEVAL": (
+        "retrieval.native-context", "NATIVE_RETRIEVAL_CONTEXT",
+    ),
+}
+
+
 @pytest.fixture
 def audit_fixture(tmp_path, monkeypatch):
     root = tmp_path / "newsroom"
@@ -31,7 +48,7 @@ def audit_fixture(tmp_path, monkeypatch):
         conn.execute("CREATE TABLE retained_receipts(payload BLOB)")
     accesses = {}
     with open_native_runtime(**args) as runtime:
-        for purpose, (admission_type, _) in retention._PURPOSES.items():
+        for purpose, (admission_type, _) in _EXPECTED_PURPOSES.items():
             admission = runtime.authority.objects.admit(
                 ObjectAdmissionRequest(admission_type, purpose), b"retained bytes",
                 proof=runtime.proof,
@@ -65,14 +82,14 @@ def test_prunes_real_native_diagnostics_preserves_latest_and_reopens(audit_fixtu
         before_schema = retention._schema(conn)
         before_business = retention._scan_business(conn, exclude_audit=True)
         # Each read's scope digest is random-context-bound: it is not a reuse key.
-        assert conn.execute("SELECT count(DISTINCT effective_scope_digest) FROM authorization_decisions").fetchone()[0] > 12
+        assert conn.execute("SELECT count(DISTINCT effective_scope_digest) FROM authorization_decisions").fetchone()[0] > 16
     report = retention.prune_native_diagnostic_audit(root, apply=True)
     assert report["committed"] and report["compacted"] and report["inode_preserved"]
-    assert report["counts"]["eligible_access"] == 12
-    assert report["counts"]["newest_access_retained"] == 3
-    assert report["deleted"] == {name: 9 for name in retention._AUDIT_KEYS}
+    assert report["counts"]["eligible_access"] == 16
+    assert report["counts"]["newest_access_retained"] == 4
+    assert report["deleted"] == {name: 12 for name in retention._AUDIT_KEYS}
     remaining = _ids(root)
-    assert len(remaining) == 6  # Three latest native reads and all source reads.
+    assert len(remaining) == 7  # Four latest native reads and all source reads.
     for decisions in accesses.values():
         assert str(decisions[-1].access_decision_id) in remaining
         assert all(str(d.access_decision_id) not in remaining for d in decisions[:-1])
@@ -87,10 +104,11 @@ def test_prunes_real_native_diagnostics_preserves_latest_and_reopens(audit_fixtu
                 key = retention._AUDIT_KEYS[table]
                 conn.execute(f'UPDATE "{table}" SET "{key}"="{key}"')
     with open_native_runtime(**args) as runtime:
-        decision = accesses["RETRIEVAL_PROJECTION"][-1]
-        assert runtime.authority.objects.rehydrate(
-            HydrationRequest(decision.admission_id, "RETRIEVAL_PROJECTION"), proof=runtime.proof,
-        ).data == b"retained bytes"
+        for purpose, decisions in accesses.items():
+            assert runtime.authority.objects.rehydrate(
+                HydrationRequest(decisions[-1].admission_id, purpose),
+                proof=runtime.proof,
+            ).data == b"retained bytes"
     second = retention.prune_native_diagnostic_audit(root, apply=True)
     assert second["deleted"] == {name: 0 for name in retention._AUDIT_KEYS}
 
@@ -102,14 +120,17 @@ def test_dry_run_and_cli_default_do_not_change_database(audit_fixture, capsys):
     assert main(["--data-root", str(root)]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["mode"] == "dry-run" and not report["committed"]
-    assert report["counts"]["superseded_access_candidates"] == 9
+    assert report["counts"]["superseded_access_candidates"] == 12
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("purpose", ("RETRIEVAL_PROJECTION", "TRIAGE_RETRIEVAL"))
 @pytest.mark.parametrize("table", tuple(retention._AUDIT_KEYS))
-def test_external_receipt_preserves_each_security_reference(audit_fixture, table):
+def test_external_receipt_preserves_each_security_reference(
+    audit_fixture, table, purpose,
+):
     root, _, accesses = audit_fixture
-    access = accesses["RETRIEVAL_PROJECTION"][0]
+    access = accesses[purpose][0]
     with _connect(root) as conn:
         row = conn.execute("SELECT access_decision_id,authorization_decision_id,authorization_request_digest,authentication_context_id FROM object_access_decisions WHERE access_decision_id=?", (str(access.access_decision_id),)).fetchone()
     token = dict(zip(retention._AUDIT_KEYS, row))[table]
@@ -140,7 +161,7 @@ def test_cas_reference_and_foreign_key_root_preserve_older_reads(audit_fixture, 
     # exact current native schema and does not permit arbitrary added tables.
     monkeypatch.setattr(retention, "_require_schema", lambda conn: None)
     report = retention.prune_native_diagnostic_audit(root, apply=True)
-    assert report["deleted"]["object_access_decisions"] == 7
+    assert report["deleted"]["object_access_decisions"] == 10
     assert {cas_token, fk_token} <= _ids(root)
     with _connect(root) as conn:
         assert retention._schema(conn) == before
@@ -236,7 +257,7 @@ def test_distinct_byte_range_retains_its_own_latest_receipt(audit_fixture):
             proof=runtime.proof,
         ).decision for _ in range(2)]
     report = retention.prune_native_diagnostic_audit(root, apply=True)
-    assert report["counts"]["newest_access_retained"] == 4
+    assert report["counts"]["newest_access_retained"] == 5
     assert str(ranges[-1].access_decision_id) in _ids(root)
     assert str(ranges[0].access_decision_id) not in _ids(root)
 
@@ -255,4 +276,4 @@ def test_compaction_failure_reports_committed_prune(audit_fixture, monkeypatch):
     report = retention.prune_native_diagnostic_audit(root, apply=True)
     assert report["committed"] and not report["compacted"]
     assert "Pruning committed" in report["compaction_error"]
-    assert len(_ids(root)) == 6
+    assert len(_ids(root)) == 7
