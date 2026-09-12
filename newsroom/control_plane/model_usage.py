@@ -390,6 +390,8 @@ CREATE INDEX IF NOT EXISTS model_usage_allocated_at
 ON model_invocation_allocations(allocated_at, invocation_id);
 CREATE INDEX IF NOT EXISTS model_usage_completed_at
 ON model_invocation_terminals(completed_at, invocation_id);
+CREATE INDEX IF NOT EXISTS model_usage_transport_invocation
+ON model_transport_observations(invocation_id, observed_at, observation_digest);
 CREATE INDEX IF NOT EXISTS model_usage_route_state
 ON model_usage_route_circuit_events(route, recorded_at);
 """

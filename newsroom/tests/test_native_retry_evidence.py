@@ -9,7 +9,7 @@ import pytest
 from newsroom.control_plane import model_usage as usage_module
 from newsroom.control_plane.cycle import _graphiti_usage_cycle_id, _queue
 from newsroom.control_plane.model_usage import (
-    InvocationTerminal, ModelUsageIntegrityError, UsageComponents, UsageStatus,
+    InvocationTerminal, ModelUsageIntegrityError, ModelUsageService, UsageComponents, UsageStatus,
     WorkEnvelope, WorkloadClass,
 )
 from newsroom.control_plane.store import connect, record_graphiti_failure
@@ -89,6 +89,8 @@ def test_unchanged_native_queue_decodes_only_selected_attempts_as_history_grows(
         record = original_object(raw)
         if "outcome_record_id" in record:
             decoded.append("outcome")
+        if "observation_digest" in record and "state" in record:
+            decoded.append("transport")
         return record
 
     monkeypatch.setattr(usage_module, "_object", decode_object)
@@ -103,7 +105,9 @@ def test_unchanged_native_queue_decodes_only_selected_attempts_as_history_grows(
             ), zero=False)
         decoded.clear()
         assert _queue(connection, (unit,), model_usage=service) == []
-        assert decoded.count("envelope") == decoded.count("allocation") == decoded.count("outcome") == 3
+        assert all(decoded.count(kind) == 3 for kind in (
+            "envelope", "allocation", "outcome", "transport",
+        ))
     connection.close()
 
 
@@ -213,7 +217,7 @@ def test_native_outcome_index_retarget_is_unresolved_not_zero_credit(tmp_path):
 def test_native_retry_queries_use_existing_selected_identity_indexes(tmp_path, monkeypatch):
     service, _, policy, shape = _service_fixture(tmp_path)
     unit = _native("indexed-proof")
-    _settle(service, *_attempt(service, policy, shape, unit, 1), zero=True)
+    _settle(service, *_attempt(service, policy, shape, unit, 1), zero=False)
     statements = []
     original_connection = service._connection
 
@@ -227,9 +231,29 @@ def test_native_retry_queries_use_existing_selected_identity_indexes(tmp_path, m
     selected = [statement for statement in statements if statement.startswith((
         "SELECT envelope_id,", "SELECT outcome_digest,", "SELECT a.invocation_id,",
         "SELECT canonical_digest,invocation_id,",
+        "SELECT observation_digest,observed_at,state,evidence_digest,record_json ",
     ))]
-    assert len(selected) == 4
+    assert len(selected) == 5
     with sqlite3.connect(service.path) as connection:
         for statement in selected:
             plan = tuple(row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + statement))
             assert not any(detail.startswith("SCAN ") for detail in plan), plan
+            assert not any("TEMP B-TREE" in detail for detail in plan
+                           if "model_transport_observations" in statement), plan
+
+
+def test_transport_index_installs_on_existing_store_without_changing_evidence(tmp_path):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("existing-store-index")
+    _settle(service, *_attempt(service, policy, shape, unit, 1), zero=False)
+    before = _proof(service, unit)
+    with sqlite3.connect(service.path) as connection:
+        connection.execute("DROP INDEX model_usage_transport_invocation")
+        observations = tuple(connection.execute("SELECT * FROM model_transport_observations"))
+    reopened = ModelUsageService(service.path)
+    assert _proof(reopened, unit) == before
+    with sqlite3.connect(service.path) as connection:
+        assert tuple(connection.execute("SELECT * FROM model_transport_observations")) == observations
+        assert tuple(row[2] for row in connection.execute(
+            "PRAGMA index_info(model_usage_transport_invocation)"
+        )) == ("invocation_id", "observed_at", "observation_digest")
