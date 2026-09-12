@@ -576,3 +576,61 @@ def test_manual_network_fetches_are_bounded_parallel_and_writes_stay_serial(tmp_
             'https://www.gov.uk/guidance/immigration-rules/part-1',
             'https://www.gov.uk/guidance/immigration-rules/part-2',
         ]
+
+
+@pytest.mark.parametrize('failure', ('submit', 'wait'))
+def test_manual_fetch_failure_settles_workers_before_releasing_owner_fence(monkeypatch, failure):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from newsroom.control_plane import native_source_intake as module
+
+    started, release = threading.Event(), threading.Event()
+    fenced, shutdown_depths, completion_depths = [], [], []
+
+    @contextmanager
+    def fence(*args):
+        fenced.append(args)
+        try:
+            yield
+        finally:
+            fenced.pop()
+
+    def fetch(_url):
+        started.set()
+        assert release.wait(timeout=5)
+        completion_depths.append(len(fenced))
+        return 200, b'{}'
+
+    class InterruptedPool(ThreadPoolExecutor):
+        submitted = 0
+
+        def submit(self, fn, *args, **kwargs):
+            self.submitted += 1
+            if failure == 'submit' and self.submitted == 2:
+                raise RuntimeError('submit interrupted')
+            future = super().submit(fn, *args, **kwargs)
+            assert started.wait(timeout=5)
+            return future
+
+        def shutdown(self, *args, **kwargs):
+            shutdown_depths.append(len(fenced))
+            release.set()
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'ThreadPoolExecutor', InterruptedPool)
+    if failure == 'wait':
+        def interrupt(_futures):
+            raise KeyboardInterrupt('wait interrupted')
+        monkeypatch.setattr(module, 'wait', interrupt)
+    intake = NativeSourceIntake(
+        sources=None, objects=None, proof=None, definition_ids={}, licence=None,
+        dispatch_fence=fence, fetch=fetch,
+    )
+    with pytest.raises(RuntimeError if failure == 'submit' else KeyboardInterrupt):
+        list(intake._fetch_manual_sections('UK-03', 'sha256:' + '0' * 64, (
+            ('/guidance/immigration-rules/part-1', 'Part 1'),
+            ('/guidance/immigration-rules/part-2', 'Part 2'),
+        )))
+    assert shutdown_depths[0] == 2
+    assert completion_depths and set(completion_depths) == {2}
+    assert not fenced

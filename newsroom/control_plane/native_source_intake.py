@@ -350,8 +350,14 @@ class NativeSourceIntake:
                 with ExitStack() as fences:
                     for item in items:
                         fences.enter_context(self._fence(source_id, _api_url(item.canonical_url)))
-                    pending = tuple((item, pool.submit(self._fetch_item_response, item)) for item in items)
-                    wait(tuple(future for _, future in pending))
+                    try:
+                        pending = tuple((item, pool.submit(self._fetch_item_response, item)) for item in items)
+                        wait(tuple(future for _, future in pending))
+                    except BaseException:
+                        # Settle even partially submitted work before the owner
+                        # fence exits; the outer pool context unwinds too late.
+                        pool.shutdown(wait=True, cancel_futures=True)
+                        raise
                 yield from pending
 
     def _fetch_complete_item(self, source_id, item):
