@@ -53,12 +53,27 @@ and [memory configuration](https://neo4j.com/docs/operations-manual/current/perf
 
 ## Background lifecycle
 
-The native engine and its existing Neo4j service need the user's Background
-launchd domain, not a GUI login session. Their user-owned LaunchAgent plists use
-`LimitLoadToSessionType=Background`; bootstrap into `user/$(id -u)` and retain the
-existing labels, paths, stop/drain behaviour and singleton lock. Do not resurrect
-legacy Control Plane/Graphiti-worker/OpenClaw jobs or create a second daemon.
+The native engine uses the existing login Keychain. Its user-owned LaunchAgent
+therefore runs in the logged-in user's `gui/$(id -u)` (Aqua) domain, with
+`LimitLoadToSessionType=Aqua`. It remains a background engine; background work
+does not require launchd's distinct Background security session. On the observed
+macOS 26.6.2 host, all three credential classes read successfully from Aqua while
+the same reads in Background returned interaction-not-allowed. Do not move the
+native service to Background or add a credential bridge merely to avoid login.
 
-Observe the target domain, clean exact deployment and actual process before
-claiming operation. Configuration is not proof of a future host reboot; retain
-separate process restart and continued scheduled-work evidence.
+The existing Neo4j server can remain in `user/$(id -u)` Background: it does not
+read the engine's login-Keychain credentials. Retain the existing labels, paths,
+stop/drain behaviour and singleton lock. Do not bootstrap the native engine
+until offline authority maintenance has released its writer lock.
+
+Disable the retired `com.jamesto.newsroom-control-plane` and
+`com.jamesto.newsroom-graphiti-worker` LaunchAgents before a desktop login can
+autoload them; boot out either if it is already loaded. Do not stop the separate
+newsroom-hub UI or create a second native daemon.
+
+Observe exact deployment, credential availability in the actual service domain,
+process restart and continued scheduled work before claiming operation. A
+successful `security unlock-keychain` command or desktop login alone is not a
+credential-read test. This arrangement requires a user login after host reboot;
+unattended pre-login operation is not proved and would require a separately
+justified credential/lifecycle design, not silently weakened access controls.
