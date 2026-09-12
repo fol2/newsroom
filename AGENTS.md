@@ -2,10 +2,9 @@
 
 ## 0. Development DNA
 
-Optimise for **maximum relevant evidence with minimum wall time, model context
-and compute**. This is not permission to do less. Every demonstrated failure
-mode and affected boundary must remain covered; irrelevant work must not enter
-the critical path.
+Obtain sufficient evidence to establish the acceptance contract and cover
+demonstrated failure modes and affected boundaries, with minimum wall time,
+model context and compute. Irrelevant work must not enter the critical path.
 
 Use one coherent issue, one branch and one ordinary pull request by default. A
 sub-agent may investigate or implement inside that delivery context. Create
@@ -16,6 +15,9 @@ decomposition reason.
 The normal AI-native loop is:
 
 `issue intent -> implementation and tests -> focus manifest -> focused evidence -> one feature-complete review -> agent merge -> independent main health`
+
+Independent main health is a separate lane, not a prerequisite for ordinary
+task completion unless explicitly required by the issue.
 
 Agents own that loop. Human input is an exception for unresolved ambiguity,
 credentials, regulated or irreversible effects, and explicit owner decisions.
@@ -68,16 +70,19 @@ risk. Do not broaden merely because a larger suite exists.
 - Prepare the locked environment once after checkout or a dependency change,
   not before each command.
 - Run a check once per unchanged code, configuration and environment state.
-- Do not poll remote workflows, increase a timeout merely to keep a run alive,
-  or repeat review after all current findings are addressed.
+- Observe only the required exact-head Focus Gate within a bounded wait. Prefer
+  completion notifications; otherwise use low-frequency status checks. Do not
+  wait for unrelated workflows or extend the deadline without new evidence.
+- Do not repeat review after all current findings are addressed, except for the
+  material-change and unresolved-risk conditions below.
 - One feature-complete review is the default. Review again only after a
   material follow-up change or unresolved high-risk finding.
 - Report the exact selected checks, outcomes, omissions and remaining
   uncertainty. Never convert an unobserved workflow into a claimed pass.
 - Keep touched code slim: delete duplication, reuse existing contracts and
   avoid speculative abstractions, runners, caches and compatibility layers.
-- Keep the existing `ponytail` coding skill active where available; use it to
-  find the simplest complete solution, not to add ceremony.
+- Use `ponytail` for the current coding task where available; its simplicity
+  guidance does not change the repository evidence or reporting requirements.
 - Conditional future machinery stays dormant until its trigger is observed or
   owner-authorised.
 
@@ -92,6 +97,11 @@ Full Repository Health: that lane remains independent main inventory and
 must not enter the live-canary wall-time critical path. Full Health may
 remain an accepted fallback check name only when Focus Gates cannot be
 observed on the tip.
+
+Generic skills supply techniques, not additional delivery gates. Use the
+repository Focus Gate and review contracts without duplicating checks,
+artefacts or approvals. Higher-priority instructions and F4 boundaries remain
+unchanged. A request for inspection or advice alone does not start delivery.
 
 ## 4. Research isolation
 
