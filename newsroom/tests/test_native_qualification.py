@@ -393,6 +393,7 @@ def _content_hold(reason="SOURCE_ITEM_NOT_YET_PUBLISHED"):
     "SOURCE_ITEM_NOT_YET_PUBLISHED",
     "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+    "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
 ])
 def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason):
     path = tmp_path / "content-hold.sqlite3"

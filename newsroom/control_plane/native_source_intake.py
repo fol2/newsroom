@@ -63,8 +63,18 @@ SUPPORTED = frozenset({"UK-01", "UK-02", "UK-03", "UK-05"})
 
 
 class NativeSourceIntakeHold(ValueError):
-    def __init__(self, reason_code: str) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        child_items: tuple[tuple[str, str], ...] = (),
+        unsupported_attachments: tuple[tuple[str, str], ...] = (),
+        exclusion_signals: tuple[str, ...] = (),
+    ) -> None:
         self.reason_code = reason_code
+        self.child_items = child_items
+        self.unsupported_attachments = unsupported_attachments
+        self.exclusion_signals = exclusion_signals
         super().__init__(reason_code)
 
 
@@ -227,17 +237,13 @@ class NativeSourceIntake:
         for item in items:
             try:
                 item_url, item_raw, retrieved = self._fetch_complete_item(source_id, item)
-                item_admission, item_access = self._admit_observation(source_id, item_raw)
-                observations.append((
-                    item_url, digest_bytes(item_raw), str(item_admission.admission_id),
-                    str(item_access.access_decision_id),
-                ))
-                item = self._parse_complete_item(item, item_raw, retrieved)
-                units.extend(self._retain_item(
+                settled_units, settled_observations, settled_holds = self._settle_item(
                     source_id, definition_id, summary.version_id, version, item,
-                    digest_bytes(item_raw),
-                    retrieved.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), rights.record_id,
-                ))
+                    item_url, item_raw, retrieved, rights.record_id,
+                )
+                units.extend(settled_units)
+                observations.extend(settled_observations)
+                item_holds.extend(settled_holds)
             except VetoError:
                 raise
             except Exception as exc:
@@ -254,6 +260,63 @@ class NativeSourceIntake:
             tuple(observations),
             tuple(item_holds),
         )
+
+    def _settle_item(
+        self, source_id, definition_id, version_id, version, item,
+        item_url, raw, observed, rights_id,
+    ):
+        admission, access = self._admit_observation(source_id, raw)
+        observation_digest = digest_bytes(raw)
+        observations = [(
+            item_url, observation_digest, str(admission.admission_id),
+            str(access.access_decision_id),
+        )]
+        try:
+            complete = self._parse_complete_item(item, raw, observed)
+        except NativeSourceIntakeHold as exc:
+            if exc.exclusion_signals:
+                return (), tuple(observations), ((
+                    item.canonical_url, "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+                ),)
+            if not exc.child_items:
+                return (), tuple(observations), ((item.canonical_url, exc.reason_code),)
+            units, holds = [], []
+            for child, fetched in self._fetch_manual_sections(
+                source_id, observation_digest, exc.child_items,
+            ):
+                try:
+                    child_url, child_raw, child_observed = fetched.result()
+                    child_admission, child_access = self._admit_observation(
+                        source_id, child_raw,
+                    )
+                    child_digest = digest_bytes(child_raw)
+                    observations.append((
+                        child_url, child_digest,
+                        str(child_admission.admission_id),
+                        str(child_access.access_decision_id),
+                    ))
+                    complete_child = self._parse_complete_item(
+                        child, child_raw, child_observed,
+                    )
+                    units.extend(self._retain_item(
+                        source_id, definition_id, version_id, version,
+                        complete_child, child_digest, _utc(child_observed), rights_id,
+                    ))
+                except VetoError:
+                    raise
+                except Exception as child_exc:
+                    holds.append((
+                        child.canonical_url,
+                        getattr(child_exc, "reason_code", "SOURCE_ITEM_RETAIN_FAILED"),
+                    ))
+            if exc.unsupported_attachments:
+                holds.append((item.canonical_url, exc.reason_code))
+            return tuple(units), tuple(observations), tuple(holds)
+        units = self._retain_item(
+            source_id, definition_id, version_id, version, complete,
+            observation_digest, _utc(observed), rights_id,
+        )
+        return units, tuple(observations), ()
 
     def _poll_direct_govuk(self, source_id, definition_id, version_id, version, rights):
         endpoint = SOURCE_URLS[source_id]
@@ -384,9 +447,19 @@ class NativeSourceIntake:
                 item.canonical_url, raw, retrieved_at=observed
             )
         except GovUkContentHold as exc:
-            raise NativeSourceIntakeHold(exc.reason_code) from None
+            raise NativeSourceIntakeHold(
+                exc.reason_code,
+                child_items=exc.child_items,
+                unsupported_attachments=exc.unsupported_attachments,
+                exclusion_signals=exc.exclusion_signals,
+            ) from None
         except (ValueError, TypeError, KeyError, UnicodeError):
             raise NativeSourceIntakeHold("SOURCE_ITEM_METADATA_HOLD") from None
+        if document.exclusion_signals:
+            raise NativeSourceIntakeHold(
+                "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD",
+                exclusion_signals=document.exclusion_signals,
+            )
         return replace(
             item,
             headline=document.title,
@@ -599,11 +672,11 @@ def native_evidence_sources(
                 or observation[1] != unit.observation_digest
             ):
                 raise ValueError("raw observation reference differs")
-            ObjectAccessDecisionId.parse(observation[3])
-            if unit.source_id == "UK-03":
-                _require_manual_inventory_binding(
+            root_digest, separator, _child_path = unit.item_key.partition("|")
+            if separator == "|" and root_digest.startswith("sha256:"):
+                _require_parent_inventory_binding(
                     unit=unit, observations=observations, objects=objects,
-                    proof=proof, root_api_url=unit.source_definition_url,
+                    proof=proof,
                 )
             version = sources.version_details(
                 SourceDefinitionVersionId.parse(authority.definition_version_id),
@@ -619,7 +692,7 @@ def native_evidence_sources(
             current = sources.current_summary(
                 SourceDefinitionId.parse(authority.definition_id), proof=proof,
             )
-        except (TypeError, ValueError, LookupError, KeyError):
+        except (TypeError, ValueError, LookupError, KeyError, PermissionError):
             raise hold("NATIVE_SOURCE_AUTHORITY_HOLD") from None
         request = version.request
         roles = tuple(
@@ -653,13 +726,9 @@ def native_evidence_sources(
             if hydrated.data != expected:
                 raise hold("NATIVE_SOURCE_CANONICAL_PAGE_HOLD")
         try:
-            raw_admission_id = ObjectAdmissionId.parse(observation[2])
-            raw_access = objects.latest_access_decision(
-                raw_admission_id,
-                purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+            raw_admission_id, raw_access = _require_observation_access(
+                observation=observation, objects=objects, proof=proof,
             )
-            if raw_access.admission_id != raw_admission_id:
-                raise ValueError("raw observation access differs")
             raw = objects.hydrate(HydrationRequest(
                 raw_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
                 0, raw_access.allowed_bytes,
@@ -687,7 +756,7 @@ def native_evidence_sources(
                     and _utc(document.publication) == unit.published_at
                     and _utc(document.updated) == unit.updated_at
                 )
-        except (TypeError, ValueError, KeyError, UnicodeError):
+        except (TypeError, ValueError, KeyError, UnicodeError, PermissionError):
             raise hold("NATIVE_SOURCE_RAW_OBSERVATION_HOLD") from None
         if (
             digest_bytes(raw) != unit.observation_digest
@@ -717,34 +786,94 @@ def native_evidence_sources(
     return tuple(result)
 
 
-def _require_manual_inventory_binding(
+def _require_parent_inventory_binding(
     *, unit: CorpusIngestUnit,
     observations: Mapping[str, tuple[str, str, str, str]], objects,
-    proof: AuthenticationProof, root_api_url: str,
+    proof: AuthenticationProof,
 ) -> None:
     root_digest, separator, section_path = unit.item_key.partition("|")
     validate_sha256_digest(root_digest)
     root = observations[root_digest]
-    if separator != "|" or root[0] != root_api_url or root[1] != root_digest:
-        raise ValueError("manual inventory reference differs")
-    admission_id = ObjectAdmissionId.parse(root[2])
-    ObjectAccessDecisionId.parse(root[3])
-    access = objects.latest_access_decision(
-        admission_id, purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+    if separator != "|" or root[1] != root_digest:
+        raise ValueError("parent inventory reference differs")
+    admission_id, access = _require_observation_access(
+        observation=root, objects=objects, proof=proof,
     )
-    if access.admission_id != admission_id:
-        raise ValueError("manual inventory access differs")
     raw = objects.hydrate(HydrationRequest(
         admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE, 0, access.allowed_bytes,
     ), proof=proof).data
     if digest_bytes(raw) != root_digest:
-        raise ValueError("manual inventory bytes differ")
-    inventory = parse_govuk_manual_inventory(
-        _canonical_url_from_api(root_api_url), raw,
-        retrieved_at=datetime.fromisoformat(unit.observed_at.replace("Z", "+00:00")),
+        raise ValueError("parent inventory bytes differ")
+    if unit.source_id == "UK-03":
+        if root[0] != unit.source_definition_url:
+            raise ValueError("manual root inventory reference differs")
+    else:
+        feed_observations = tuple(
+            value for value in observations.values()
+            if value[0] == unit.source_definition_url
+        )
+        if not feed_observations:
+            raise ValueError("parent feed observation differs")
+        parent_url = _canonical_url_from_api(root[0])
+        parent_found = False
+        for feed in feed_observations:
+            try:
+                feed_admission_id, feed_access = _require_observation_access(
+                    observation=feed, objects=objects, proof=proof,
+                )
+                feed_raw = objects.hydrate(HydrationRequest(
+                    feed_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
+                    0, feed_access.allowed_bytes,
+                ), proof=proof).data
+                if digest_bytes(feed_raw) != feed[1]:
+                    continue
+                parent_found = any(
+                    item.canonical_url == parent_url
+                    for item in parse_observation(
+                        source_id=unit.source_id,
+                        url=unit.source_definition_url,
+                        body=feed_raw,
+                    )
+                )
+                if parent_found:
+                    break
+            except (TypeError, ValueError, LookupError, KeyError, PermissionError):
+                continue
+        if not parent_found:
+            raise ValueError("parent is outside its retained feed inventory")
+    try:
+        parse_govuk_content_document(
+            _canonical_url_from_api(root[0]), raw,
+            retrieved_at=datetime.fromisoformat(unit.observed_at.replace("Z", "+00:00")),
+        )
+    except GovUkContentHold as exc:
+        child_paths = {path for path, _title in exc.child_items}
+    else:
+        raise ValueError("parent inventory is absent")
+    if section_path not in child_paths:
+        raise ValueError("child is outside its retained parent inventory")
+
+
+def _require_observation_access(*, observation, objects, proof):
+    admission_id = ObjectAdmissionId.parse(observation[2])
+    retained = objects.access_decision(
+        ObjectAccessDecisionId.parse(observation[3]),
+        admission_id=admission_id,
+        purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE,
+        proof=proof,
     )
-    if section_path not in {path for path, _ in inventory.sections}:
-        raise ValueError("manual section is outside its retained inventory")
+    current = objects.latest_access_decision(
+        admission_id, purpose=NATIVE_SOURCE_OBSERVATION_PURPOSE, proof=proof,
+    )
+    if (
+        retained.admission_id != admission_id
+        or retained.purpose != NATIVE_SOURCE_OBSERVATION_PURPOSE
+        or retained.offset != 0
+        or retained.allowed_bytes != current.allowed_bytes
+        or current.admission_id != admission_id
+    ):
+        raise ValueError("observation access differs")
+    return admission_id, current
 
 
 __all__ = [

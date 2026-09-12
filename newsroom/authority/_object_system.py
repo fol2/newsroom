@@ -35,6 +35,7 @@ from .objects import (
     GovernedDeletionId,
     GovernedDeletionView,
     HydrationRequest,
+    ObjectAccessDecisionId,
     ObjectAccessDecisionView,
     ObjectAdmissionDenied,
     ObjectAdmissionId,
@@ -81,6 +82,7 @@ class GovernedObjects:
         "__admit",
         "__hydrate",
         "__rehydrate",
+        "__access_decision",
         "__latest_access_decision",
         "__revoke",
         "__request_deletion",
@@ -97,6 +99,10 @@ class GovernedObjects:
         admit: Callable[[ObjectAdmissionRequest, _Source, AuthenticationProof], ObjectAdmissionResult],
         hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
         rehydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
+        access_decision: Callable[
+            [ObjectAccessDecisionId, ObjectAdmissionId, str, AuthenticationProof],
+            ObjectAccessDecisionView,
+        ],
         latest_access_decision: Callable[
             [ObjectAdmissionId, str, AuthenticationProof],
             ObjectAccessDecisionView,
@@ -112,6 +118,7 @@ class GovernedObjects:
         self.__admit = admit
         self.__hydrate = hydrate
         self.__rehydrate = rehydrate
+        self.__access_decision = access_decision
         self.__latest_access_decision = latest_access_decision
         self.__revoke = revoke
         self.__request_deletion = request_deletion
@@ -167,6 +174,20 @@ class GovernedObjects:
         proof: AuthenticationProof,
     ) -> ObjectAccessDecisionView:
         return self.__latest_access_decision(admission_id, purpose, proof)
+
+    def access_decision(
+        self,
+        access_decision_id: ObjectAccessDecisionId,
+        *,
+        admission_id: ObjectAdmissionId,
+        purpose: str,
+        proof: AuthenticationProof,
+    ) -> ObjectAccessDecisionView:
+        """Authenticate an exact retained historical access receipt."""
+
+        return self.__access_decision(
+            access_decision_id, admission_id, purpose, proof,
+        )
 
     def revoke(
         self,
@@ -763,6 +784,53 @@ class _ObjectBoundary:
             purpose=purpose,
         )
 
+    def access_decision(
+        self,
+        access_decision_id: ObjectAccessDecisionId,
+        admission_id: ObjectAdmissionId,
+        purpose: str,
+        proof: AuthenticationProof,
+    ) -> ObjectAccessDecisionView:
+        """Authenticate a read-only lookup of one retained access receipt."""
+
+        if (
+            not isinstance(access_decision_id, ObjectAccessDecisionId)
+            or not isinstance(admission_id, ObjectAdmissionId)
+        ):
+            raise TypeError("access and admission identities are required")
+        authentication, now = self._authenticate(proof)
+        policy = self._hydration_policies.resolve_for_purpose(purpose)
+        semantic = digest_canonical({
+            "access_decision_id": str(access_decision_id),
+            "admission_id": str(admission_id),
+            "policy_contract_digest": policy.contract_digest,
+            "purpose": purpose,
+        })
+        self._authorize(
+            authentication=authentication,
+            now=now,
+            operation_type=f"object:access-decision:read:{purpose}",
+            required_scope=policy.required_scope,
+            stable_digest=semantic,
+            definition_digest=policy.contract_digest,
+            aggregate_type="governed_object_hydration",
+            aggregate_id=str(admission_id),
+            object_class=None,
+            allowed_use=None,
+            security_scope="authority.object_hydration",
+            retention_scope="authority.audit",
+        )
+        view = self._store.access_decision_view(access_decision_id)
+        if (
+            view.admission_id != admission_id
+            or view.policy_contract_digest != policy.contract_digest
+            or view.principal_id != authentication.principal_id
+            or view.authority_domain != authentication.authority_domain
+            or view.purpose != purpose
+        ):
+            raise PermissionError("retained access decision binding differs")
+        return view
+
     def _maintenance(
         self,
         *,
@@ -1099,6 +1167,7 @@ def open_governed_object_authority_system(
                 admit=boundary.admit,
                 hydrate=boundary.hydrate,
                 rehydrate=boundary.rehydrate,
+                access_decision=boundary.access_decision,
                 latest_access_decision=boundary.latest_access_decision,
                 revoke=boundary.revoke,
                 request_deletion=boundary.request_deletion,

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.authority import ObjectAdmissionId
+from newsroom.authority.canonical import digest_bytes
 from newsroom.control_plane.govuk_rights import GovUkLicenceEvidence, POLICY_DIGEST
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
 from newsroom.control_plane.graphiti_operational_readiness import (
@@ -27,6 +28,10 @@ from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
 from newsroom.tests.test_native_runtime import _args
 
 ATOM = b'''<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><id>item-1</id><title>Visa rules updated</title><summary>The official deadline changed.</summary><link href="https://www.gov.uk/item-1"/><published>2026-09-08T10:00:00Z</published><updated>2026-09-08T11:00:00Z</updated></entry></feed>'''
+
+
+def _atom_for(path):
+    return ATOM.replace(b"https://www.gov.uk/item-1", ("https://www.gov.uk" + path).encode())
 
 
 def _document(*, body="The complete maintained-page text.", updated="2026-09-08T11:00:00Z", path="/item-1"):
@@ -132,6 +137,35 @@ def _manual_section(number):
                     "manual": {"organisations": [{"title": "Home Office"}]}},
         "links": {},
     }).encode()
+
+
+def _parent_with_children(document_type, path, children, *, binary=False):
+    value = json.loads(_document(path=path))
+    value.update(document_type=document_type, schema_name=(
+        "document_collection" if document_type == "document_collection" else "publication"
+    ))
+    declared = [{"base_path": child, "title": title} for child, title in children]
+    if document_type == "manual":
+        value["details"] = {"child_section_groups": [{
+            "title": "Sections", "child_sections": declared,
+        }]}
+    elif document_type == "document_collection":
+        value["links"]["documents"] = declared
+    else:
+        attachments = [{
+            "attachment_type": "html", "url": child, "title": title,
+        } for child, title in children]
+        if binary:
+            attachments.append({
+                "attachment_type": "file",
+                "url": "https://assets.publishing.service.gov.uk/media/report.pdf",
+                "title": "Signed circular",
+            })
+        value["details"]["attachments"] = attachments
+        # The observed circular/corporate-report shape declares the same HTML
+        # child in both inventories. Its exact path is still one child.
+        value["links"]["children"] = declared
+    return json.dumps(value, separators=(",", ":")).encode()
 
 
 def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
@@ -467,6 +501,271 @@ def test_native_manual_retains_every_section_and_root_inventory(tmp_path, monkey
                 sources=runtime.authority.sources, objects=runtime.authority.objects,
                 observations=tampered, licence=_licence(), proof=runtime.proof,
             )
+        unrelated_root = dict(observations)
+        unrelated_root[root] = (
+            "https://www.gov.uk/api/content/guidance/unrelated-manual",
+            *unrelated_root[root][1:],
+        )
+        with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_AUTHORITY_HOLD"):
+            native_evidence_sources(
+                units=tuple(next(iter(revision_units.values()))),
+                sources=runtime.authority.sources, objects=runtime.authority.objects,
+                observations=unrelated_root, licence=_licence(), proof=runtime.proof,
+            )
+
+
+@pytest.mark.parametrize(("document_type", "parent_path", "child_path", "binary"), [
+    (
+        "correspondence",
+        "/government/publications/circular-0122026-cpi-and-the-police-pension-scheme-2015",
+        "/government/publications/circular-0122026-cpi-and-the-police-pension-scheme-2015/circular-0122026",
+        True,
+    ),
+    (
+        "document_collection", "/government/collections/visa-guidance",
+        "/government/publications/visa-guidance", False,
+    ),
+    (
+        "manual", "/guidance/visa-manual",
+        "/guidance/visa-manual/section-one", False,
+    ),
+    (
+        "corporate_report", "/government/publications/annual-report",
+        "/government/publications/annual-report/accounts", False,
+    ),
+])
+def test_feed_parent_settles_each_exact_declared_html_child(
+    tmp_path, monkeypatch, document_type, parent_path, child_path, binary,
+):
+    args = _args(tmp_path, monkeypatch)
+    args.update(principal_id=OPERATOR_PRINCIPAL_ID, authority_domain=OPERATOR_AUTHORITY_DOMAIN)
+    parent = _parent_with_children(
+        document_type, parent_path, ((child_path, "Declared child"),), binary=binary,
+    )
+    bodies = {
+        SOURCE_URLS["UK-01"]: _atom_for(parent_path),
+        "https://www.gov.uk/api/content" + parent_path: parent,
+        "https://www.gov.uk/api/content" + child_path: _document(path=child_path),
+    }
+    fetched = []
+    with open_native_runtime(**args) as runtime:
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources, objects=runtime.authority.objects,
+            proof=runtime.proof, definition_ids={"UK-01": _seed_uk01(runtime)},
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
+            fetch=lambda url: (fetched.append(url), (200, bodies[url]))[1],
+            clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
+        )
+        disposition = intake.poll()[0]
+        assert len(disposition.units) == 1
+        unit = disposition.units[0]
+        assert unit.canonical_url == "https://www.gov.uk" + child_path
+        assert unit.item_key.endswith("|" + child_path)
+        assert all(item.canonical_url != "https://www.gov.uk" + parent_path
+                   for item in disposition.units)
+        assert len(disposition.observations) == 3
+        assert native_evidence_sources(
+            units=disposition.units, sources=runtime.authority.sources,
+            objects=runtime.authority.objects,
+            observations={item[1]: item for item in disposition.observations},
+            licence=_licence(), proof=runtime.proof,
+        )
+        if binary:
+            assert disposition.status == "HOLD"
+            assert disposition.item_holds == ((
+                "https://www.gov.uk" + parent_path,
+                "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+            ),)
+            assert all("assets.publishing.service.gov.uk" not in url for url in fetched)
+        else:
+            assert disposition.status == "READY"
+            assert disposition.item_holds == ()
+
+
+def test_feed_parent_keeps_failed_and_excluded_children_visible(tmp_path, monkeypatch):
+    args = _args(tmp_path, monkeypatch)
+    args.update(principal_id=OPERATOR_PRINCIPAL_ID, authority_domain=OPERATOR_AUTHORITY_DOMAIN)
+    parent_path = "/government/collections/visa-guidance"
+    missing_path = "/government/publications/missing-guidance"
+    excluded_path = "/government/publications/excluded-guidance"
+    parent = _parent_with_children(
+        "document_collection", parent_path,
+        ((missing_path, "Missing"), (excluded_path, "Excluded")),
+    )
+    excluded = json.loads(_document(path=excluded_path))
+    excluded["details"]["copyright_notice"] = "This is not covered by the Open Government Licence."
+    bodies = {
+        SOURCE_URLS["UK-01"]: (200, _atom_for(parent_path)),
+        "https://www.gov.uk/api/content" + parent_path: (200, parent),
+        "https://www.gov.uk/api/content" + missing_path: (503, b""),
+        "https://www.gov.uk/api/content" + excluded_path: (
+            200, json.dumps(excluded, separators=(",", ":")).encode(),
+        ),
+    }
+    with open_native_runtime(**args) as runtime:
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources, objects=runtime.authority.objects,
+            proof=runtime.proof, definition_ids={"UK-01": _seed_uk01(runtime)},
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
+            fetch=lambda url: bodies[url],
+            clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
+        )
+        disposition = intake.poll()[0]
+    assert disposition.status == "HOLD"
+    assert disposition.units == ()
+    assert disposition.item_holds == (
+        ("https://www.gov.uk" + missing_path, "SOURCE_ITEM_FETCH_INCOMPLETE"),
+        ("https://www.gov.uk" + excluded_path, "SOURCE_ITEM_RIGHTS_EXCLUSION_HOLD"),
+    )
+    assert len(disposition.observations) == 3
+
+
+def test_feed_parent_does_not_recurse_beyond_its_direct_inventory(tmp_path, monkeypatch):
+    args = _args(tmp_path, monkeypatch)
+    args.update(principal_id=OPERATOR_PRINCIPAL_ID, authority_domain=OPERATOR_AUTHORITY_DOMAIN)
+    parent_path = "/government/collections/visa-guidance"
+    child_path = "/government/collections/nested-guidance"
+    grandchild_path = "/government/publications/nested-guidance"
+    bodies = {
+        SOURCE_URLS["UK-01"]: _atom_for(parent_path),
+        "https://www.gov.uk/api/content" + parent_path: _parent_with_children(
+            "document_collection", parent_path, ((child_path, "Direct child"),),
+        ),
+        "https://www.gov.uk/api/content" + child_path: _parent_with_children(
+            "document_collection", child_path, ((grandchild_path, "Grandchild"),),
+        ),
+    }
+    fetched = []
+    with open_native_runtime(**args) as runtime:
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources, objects=runtime.authority.objects,
+            proof=runtime.proof, definition_ids={"UK-01": _seed_uk01(runtime)},
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
+            fetch=lambda url: (fetched.append(url), (200, bodies[url]))[1],
+            clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
+        )
+        disposition = intake.poll()[0]
+    assert disposition.units == ()
+    assert disposition.item_holds == ((
+        "https://www.gov.uk" + child_path,
+        "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
+    ),)
+    assert "https://www.gov.uk/api/content" + grandchild_path not in fetched
+
+
+def test_feed_child_replay_and_parent_lineage_fail_closed(tmp_path, monkeypatch):
+    args = _args(tmp_path, monkeypatch)
+    args.update(principal_id=OPERATOR_PRINCIPAL_ID, authority_domain=OPERATOR_AUTHORITY_DOMAIN)
+    parent_path = "/government/collections/visa-guidance"
+    child_path = "/government/publications/visa-guidance"
+    parent = _parent_with_children(
+        "document_collection", parent_path, ((child_path, "Declared child"),),
+    )
+    bodies = {
+        SOURCE_URLS["UK-01"]: _atom_for(parent_path),
+        "https://www.gov.uk/api/content" + parent_path: parent,
+        "https://www.gov.uk/api/content" + child_path: _document(path=child_path),
+    }
+    retained = {}
+    with open_native_runtime(**args) as runtime:
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources, objects=runtime.authority.objects,
+            proof=runtime.proof, definition_ids={"UK-01": _seed_uk01(runtime)},
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
+            fetch=lambda url: (200, bodies[url]), retained_units=retained,
+            clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
+        )
+        first = intake.poll()[0]
+        unit = first.units[0]
+        observations = {item[1]: item for item in first.observations}
+        root_digest = unit.item_key.split("|", 1)[0]
+        feed_digest = next(
+            digest for digest, value in observations.items()
+            if value[0] == SOURCE_URLS["UK-01"]
+        )
+
+        for target_digest, replacement_digest, reason in (
+            (unit.observation_digest, root_digest, "NATIVE_SOURCE_RAW_OBSERVATION_HOLD"),
+            (root_digest, feed_digest, "NATIVE_SOURCE_AUTHORITY_HOLD"),
+            (feed_digest, unit.observation_digest, "NATIVE_SOURCE_AUTHORITY_HOLD"),
+        ):
+            wrong_access = dict(observations)
+            wrong_access[target_digest] = (
+                *wrong_access[target_digest][:3], observations[replacement_digest][3],
+            )
+            with pytest.raises(NativeEvidenceHold, match=reason):
+                native_evidence_sources(
+                    units=first.units, sources=runtime.authority.sources,
+                    objects=runtime.authority.objects, observations=wrong_access,
+                    licence=_licence(), proof=runtime.proof,
+                )
+
+        changed_feed = _atom_for(parent_path).replace(
+            b"The official deadline changed.", b"A later feed summary.",
+        )
+        bodies[SOURCE_URLS["UK-01"]] = changed_feed
+        changed = intake.poll()[0]
+        assert changed.status == "READY"
+        feed_history = dict(observations)
+        feed_history.update({item[1]: item for item in changed.observations})
+        assert native_evidence_sources(
+            units=first.units, sources=runtime.authority.sources,
+            objects=runtime.authority.objects, observations=feed_history,
+            licence=_licence(), proof=runtime.proof,
+        )
+
+        with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_AUTHORITY_HOLD"):
+            native_evidence_sources(
+                units=(replace(unit, item_key=root_digest + "|/government/unexpected"),),
+                sources=runtime.authority.sources, objects=runtime.authority.objects,
+                observations=observations, licence=_licence(), proof=runtime.proof,
+            )
+        wrong_origin = dict(observations)
+        wrong_origin[root_digest] = (
+            "https://example.test/api/content" + parent_path,
+            *wrong_origin[root_digest][1:],
+        )
+        with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_AUTHORITY_HOLD"):
+            native_evidence_sources(
+                units=first.units, sources=runtime.authority.sources,
+                objects=runtime.authority.objects, observations=wrong_origin,
+                licence=_licence(), proof=runtime.proof,
+            )
+        unrelated_parent_path = "/government/collections/unrelated-guidance"
+        unrelated_parent = _parent_with_children(
+            "document_collection", unrelated_parent_path,
+            ((child_path, "Declared child"),),
+        )
+        unrelated_admission, unrelated_access = intake._admit_observation(
+            "UK-01", unrelated_parent,
+        )
+        unrelated_digest = digest_bytes(unrelated_parent)
+        wrong_parent = dict(observations)
+        wrong_parent[unrelated_digest] = (
+            "https://www.gov.uk/api/content" + unrelated_parent_path,
+            unrelated_digest, str(unrelated_admission.admission_id),
+            str(unrelated_access.access_decision_id),
+        )
+        with pytest.raises(NativeEvidenceHold, match="NATIVE_SOURCE_AUTHORITY_HOLD"):
+            native_evidence_sources(
+                units=(replace(
+                    unit, item_key=unrelated_digest + "|" + child_path,
+                ),),
+                sources=runtime.authority.sources, objects=runtime.authority.objects,
+                observations=wrong_parent, licence=_licence(), proof=runtime.proof,
+            )
+
+        retained[unit.revision_id] = tuple(
+            replace(item, authority=replace(
+                item.authority, definition_version_id="different-version",
+            )) for item in first.units
+        )
+        replay = intake.poll()[0]
+        assert replay.status == "HOLD"
+        assert replay.item_holds == ((
+            "https://www.gov.uk" + child_path,
+            "SOURCE_RETAINED_REVISION_BINDING_HOLD",
+        ),)
 
 
 def test_native_manual_keeps_successful_sections_when_one_child_holds(tmp_path, monkeypatch):

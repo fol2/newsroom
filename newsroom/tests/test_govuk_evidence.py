@@ -287,6 +287,14 @@ def test_content_parser_retains_specific_known_coverage_holds(
             retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
         )
     assert caught.value.reason_code == reason_code
+    if document_type == "manual":
+        assert caught.value.child_items == ((
+            "/government/example/section-one", "Section one",
+        ),)
+    elif document_type == "document_collection":
+        assert caught.value.child_items == ((
+            "/government/publications/child", "Child document",
+        ),)
 
 
 def test_correspondence_with_declared_html_children_retains_coverage_hold():
@@ -298,6 +306,49 @@ def test_correspondence_with_declared_html_children_retains_coverage_hold():
             retrieved_at=datetime(2026, 9, 9, 12, tzinfo=UTC),
         )
     assert caught.value.reason_code == "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"
+    assert caught.value.child_items == tuple(
+        (item["url"], item["title"])
+        for item in value["details"]["attachments"]
+    )
+    assert caught.value.unsupported_attachments == ()
+
+
+def test_attachment_inventory_deduplicates_children_and_retains_binary_hold():
+    value = _content_shape("transparency")
+    child = value["links"]["children"][0]
+    value["details"]["attachments"].append({
+        "attachment_type": "html",
+        "url": child["base_path"],
+        "title": "Attachment label for the same child",
+    })
+    value["details"]["attachments"][0]["attachment_type"] = "file"
+    with pytest.raises(GovUkContentHold) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example",
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    assert caught.value.child_items == ((
+        child["base_path"], "Attachment label for the same child",
+    ),)
+    assert caught.value.unsupported_attachments == ((
+        value["details"]["attachments"][0]["url"],
+        value["details"]["attachments"][0]["title"],
+    ),)
+
+
+def test_observed_corporate_report_exposes_its_html_child_inventory():
+    value = _dfe_correspondence_shape()
+    value["document_type"] = "corporate_report"
+    child = value["details"]["attachments"][0]
+    with pytest.raises(GovUkContentHold) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk" + value["base_path"],
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, 12, 50, tzinfo=UTC),
+        )
+    assert caught.value.reason_code == "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"
+    assert caught.value.child_items[0] == (child["url"], child["title"])
 
 
 @pytest.mark.parametrize("mutation", ["schema", "body", "attachments", "duplicate"])

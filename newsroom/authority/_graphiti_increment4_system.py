@@ -530,6 +530,7 @@ def _open_with_adapter(
                 admit=object_boundary.admit,
                 hydrate=object_boundary.hydrate,
                 rehydrate=object_boundary.rehydrate,
+                access_decision=object_boundary.access_decision,
                 latest_access_decision=(
                     object_boundary.latest_access_decision
                 ),
