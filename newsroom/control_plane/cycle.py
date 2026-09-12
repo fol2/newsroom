@@ -80,6 +80,7 @@ from newsroom.control_plane.model_usage import (
     InvocationTerminal,
     ModelUsageAdmissionError,
     ModelUsageService,
+    native_graphiti_usage_cycle_id,
     UsageComponents,
     UsageStatus,
     WorkEnvelope,
@@ -814,10 +815,12 @@ def _queue(
         ):
             continue
         pending.append((unit, ingest_id, retries, dead))
-    dead_ingests = tuple(ingest_id for _, ingest_id, _, dead in pending if dead)
+    failed_attempts = {ingest_id: retries for _, ingest_id, retries, dead in pending if dead}
     retry_evidence = (
-        model_usage.graphiti_ingest_retry_evidence_many(ingest_ids=dead_ingests)
-        if model_usage is not None and dead_ingests else {}
+        model_usage.native_graphiti_ingest_retry_evidence_many(
+            failed_attempts=failed_attempts, max_attempts=2 * GRAPHITI_MAX_FAILURES,
+        )
+        if model_usage is not None and failed_attempts else {}
     )
     for unit, ingest_id, retries, dead in pending:
         if dead:
@@ -1154,12 +1157,8 @@ def _graphiti_usage_cycle_id(
     unit: CorpusIngestUnit, *, attempt_number: int, requested_cycle_id: str | None
 ) -> str:
     if unit.proving_run_id == f"native-source:{unit.observation_digest}":
-        return digest_canonical(
-            {
-                "namespace": "native-graphiti-model-usage-attempt-v1",
-                "ingest_id": unit.ingest_id,
-                "attempt_number": attempt_number,
-            }
+        return native_graphiti_usage_cycle_id(
+            ingest_id=unit.ingest_id, attempt_number=attempt_number,
         )
     return requested_cycle_id or unit.proving_run_id
 

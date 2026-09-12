@@ -17,8 +17,8 @@ def test_native_retry_queue_checks_dead_ingests_in_one_batch(tmp_path):
     connection.commit()
     calls = []
 
-    def evidence_many(*, ingest_ids):
-        calls.append(ingest_ids)
+    def evidence_many(*, failed_attempts, max_attempts):
+        calls.append((failed_attempts, max_attempts))
         return {
             unit.ingest_id: SimpleNamespace(
                 zero_dispatch_attempts=(1,), settled_provider_attempts=(),
@@ -29,8 +29,8 @@ def test_native_retry_queue_checks_dead_ingests_in_one_batch(tmp_path):
 
     queued = _queue(
         connection, (retry, held, fresh),
-        model_usage=SimpleNamespace(graphiti_ingest_retry_evidence_many=evidence_many),
+        model_usage=SimpleNamespace(native_graphiti_ingest_retry_evidence_many=evidence_many),
     )
-    assert calls == [(retry.ingest_id, held.ingest_id)]
+    assert calls == [({retry.ingest_id: 3, held.ingest_id: 3}, 6)]
     assert {row[-1].ingest_id for row in queued} == {retry.ingest_id, fresh.ingest_id}
     connection.close()

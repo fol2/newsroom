@@ -7226,11 +7226,12 @@ def test_native_retry_credits_only_original_proved_local_refusals(
     )
     requested = []
 
-    def prove(*, ingest_ids):
-        requested.extend(ingest_ids)
-        return {ingest_id: evidence for ingest_id in ingest_ids}
+    def prove(*, failed_attempts, max_attempts):
+        assert max_attempts == 6
+        requested.extend(failed_attempts)
+        return {ingest_id: evidence for ingest_id in failed_attempts}
 
-    usage = SimpleNamespace(graphiti_ingest_retry_evidence_many=prove)
+    usage = SimpleNamespace(native_graphiti_ingest_retry_evidence_many=prove)
     monkeypatch.setattr(cycle, "next_graphiti_attempt_number", lambda *_: failures + 1)
     before = tuple(connection.execute("SELECT * FROM unpublished_graphiti_failures"))
     assert bool(cycle._queue(connection, (unit,), model_usage=usage)) is eligible
