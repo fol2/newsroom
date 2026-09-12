@@ -71,8 +71,18 @@ class GovUkManualInventory:
 class GovUkContentHold(ValueError):
     """A valid known GOV.UK content shape needing a different coverage path."""
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        child_items: tuple[tuple[str, str], ...] = (),
+        unsupported_attachments: tuple[tuple[str, str], ...] = (),
+        exclusion_signals: tuple[str, ...] = (),
+    ) -> None:
         self.reason_code = reason_code
+        self.child_items = child_items
+        self.unsupported_attachments = unsupported_attachments
+        self.exclusion_signals = exclusion_signals
         super().__init__(reason_code)
 
 
@@ -262,28 +272,50 @@ def parse_govuk_content_document(
         _require_future_statistics_announcement(value, retrieved_at=retrieved_at)
         raise GovUkContentHold("SOURCE_ITEM_NOT_YET_PUBLISHED")
     elif document_type == "manual":
-        parse_govuk_manual_inventory(
+        inventory = parse_govuk_manual_inventory(
             canonical_url, raw, retrieved_at=retrieved_at,
         )
-        raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
+        raise GovUkContentHold(
+            "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
+            child_items=inventory.sections,
+            exclusion_signals=_exclusion_signals(value, ""),
+        )
     elif document_type == "document_collection":
-        _require_collection_inventory(value)
-        raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
+        children = _require_collection_inventory(value)
+        raise GovUkContentHold(
+            "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE", child_items=children,
+            exclusion_signals=_exclusion_signals(value, ""),
+        )
     elif document_type == "transparency":
-        _require_attachment_inventory(value)
-        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
-    elif document_type == "correspondence":
+        children, unsupported = _require_attachment_inventory(value)
+        raise GovUkContentHold(
+            "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+            child_items=children,
+            unsupported_attachments=unsupported,
+            exclusion_signals=_exclusion_signals(value, ""),
+        )
+    elif document_type in {"correspondence", "corporate_report"}:
         if value.get("schema_name") != "publication":
-            raise ValueError("source correspondence schema differs")
-        _document_text(value)
-        _require_attachment_inventory(value)
-        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+            raise ValueError("source attachment-bearing schema differs")
+        body_text = _document_text(value)
+        children, unsupported = _require_attachment_inventory(value)
+        raise GovUkContentHold(
+            "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+            child_items=children,
+            unsupported_attachments=unsupported,
+            exclusion_signals=_exclusion_signals(value, body_text),
+        )
     elif document_type == "statutory_guidance":
         if value.get("schema_name") != "publication":
             raise ValueError("source statutory guidance schema differs")
         _document_text(value)
-        _require_attachment_inventory(value)
-        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+        children, unsupported = _require_attachment_inventory(value)
+        raise GovUkContentHold(
+            "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+            child_items=children,
+            unsupported_attachments=unsupported,
+            exclusion_signals=_exclusion_signals(value, ""),
+        )
     elif document_type == "consultation_outcome":
         details = value.get("details")
         if value.get("schema_name") != "consultation" or type(details) is not dict:
@@ -298,7 +330,7 @@ def parse_govuk_content_document(
             or len(set(outcome_attachments)) != len(outcome_attachments)
         ):
             raise ValueError("source consultation outcome inventory differs")
-        _require_attachment_inventory(value)
+        children, unsupported = _require_attachment_inventory(value)
         attachments = details["attachments"]
         attachment_ids = [item.get("id") for item in attachments]
         if (
@@ -307,7 +339,12 @@ def parse_govuk_content_document(
             or any(item not in attachment_ids for item in outcome_attachments)
         ):
             raise ValueError("source consultation outcome inventory differs")
-        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+        raise GovUkContentHold(
+            "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+            child_items=children,
+            unsupported_attachments=unsupported,
+            exclusion_signals=_exclusion_signals(value, ""),
+        )
     else:
         raise ValueError("source document type is unsupported")
     return GovUkContentDocument(
@@ -332,12 +369,14 @@ def _require_future_statistics_announcement(
         raise ValueError("source announcement is not a future release")
 
 
-def _require_link_inventory(value: dict, *, key: str) -> None:
+def _require_link_inventory(
+    value: dict, *, key: str,
+) -> tuple[tuple[str, str], ...]:
     links = value.get("links")
     entries = links.get(key) if type(links) is dict else None
     if type(entries) is not list or not entries:
         raise ValueError("source child inventory is absent")
-    paths = []
+    items = []
     for entry in entries:
         if type(entry) is not dict:
             raise ValueError("source child inventory differs")
@@ -353,17 +392,17 @@ def _require_link_inventory(value: dict, *, key: str) -> None:
             _api_url("https://www.gov.uk" + path)
         except ValueError:
             raise ValueError("source child identity differs") from None
-        paths.append(path)
-    if len(set(paths)) != len(paths):
+        items.append((path, title.strip()))
+    if len({path for path, _title in items}) != len(items):
         raise ValueError("source child inventory is incomplete")
+    return tuple(items)
 
 
-def _require_collection_inventory(value: dict) -> None:
+def _require_collection_inventory(value: dict) -> tuple[tuple[str, str], ...]:
     """Validate either structured children or an observed body-backed collection."""
     links = value.get("links")
     if type(links) is dict and links.get("documents"):
-        _require_link_inventory(value, key="documents")
-        return
+        return _require_link_inventory(value, key="documents")
     details = value.get("details")
     groups = details.get("collection_groups") if type(details) is dict else None
     if (
@@ -383,9 +422,12 @@ def _require_collection_inventory(value: dict) -> None:
             or group["documents"]
         ):
             raise ValueError("source child inventory differs")
+    return ()
 
 
-def _require_attachment_inventory(value: dict) -> None:
+def _require_attachment_inventory(
+    value: dict,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
     details = value.get("details")
     links = value.get("links")
     attachments = details.get("attachments") if type(details) is dict else None
@@ -397,6 +439,7 @@ def _require_attachment_inventory(value: dict) -> None:
         inventories.append(children)
     if not inventories:
         raise ValueError("source attachment inventory is absent")
+    items: dict[str, str] = {}
     for entries in inventories:
         paths = []
         for entry in entries:
@@ -412,8 +455,16 @@ def _require_attachment_inventory(value: dict) -> None:
             ):
                 raise ValueError("source attachment identity differs")
             paths.append(path)
+            items.setdefault(path, title.strip())
         if len(set(paths)) != len(paths):
             raise ValueError("source attachment inventory is incomplete")
+    children = tuple(
+        (path, title) for path, title in items.items() if path.startswith("/")
+    )
+    unsupported = tuple(
+        (path, title) for path, title in items.items() if not path.startswith("/")
+    )
+    return children, unsupported
 
 
 def _safe_attachment_location(value: str) -> bool:
