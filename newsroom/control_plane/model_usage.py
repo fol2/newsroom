@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
@@ -38,6 +38,9 @@ from newsroom.control_plane.issue_790_step16_activation import (
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
+
+if TYPE_CHECKING:
+    from newsroom.control_plane.corpus import CorpusIngestUnit
 
 MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v3"
 MODEL_USAGE_INTERFACE_SCHEMA_VERSION = "newsroom.model-usage.v4"
@@ -947,28 +950,95 @@ def _native_envelope(
     ):
         raise ModelUsageIntegrityError("native conservative attempt binding differs")
 
-    # The native journal reconstructs canonical LANDED units and their exact
-    # source-observation authority before this controller-scoped disposition.
-    from newsroom.control_plane.native_progress import NativeRevisionJournal
-
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
     ).fetchone() is None:
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
-    journal = NativeRevisionJournal(connection)
-    if not any(
-        unit.ingest_id == envelope.ingest_id
-        and unit.proving_run_id.startswith("native-source:")
-        and unit.authority is not None
-        for units in journal.units.values()
-        for unit in units
-    ):
+    if _native_landed_source_unit(connection, ingest_id=envelope.ingest_id) is None:
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
     return envelope
+
+
+def _native_landed_source_unit(
+    connection: sqlite3.Connection, *, ingest_id: str
+) -> CorpusIngestUnit | None:
+    """Prove one governed unit without replaying unrelated native progress."""
+
+    from newsroom.control_plane.native_progress import (
+        LAND,
+        NativeRevisionJournal,
+        _unit,
+    )
+
+    def decode_landing(
+        row: tuple[object, object],
+    ) -> tuple[str, tuple[CorpusIngestUnit, ...]]:
+        payload_digest, raw_value = row
+        raw = str(raw_value)
+        payload = _object(raw)
+        try:
+            bodies: dict[str, str] = {}
+            units = tuple(_unit(value, bodies) for value in payload.get("units", ()))
+            NativeRevisionJournal._validate_units(units)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            ) from exc
+        if (
+            raw != canonical_json_bytes(payload).decode("utf-8")
+            or payload_digest != digest_bytes(raw.encode("utf-8"))
+            or payload.get("revision_id") != units[0].revision_id
+        ):
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            )
+        return units[0].revision_id, units
+
+    candidate_revisions: set[str] = set()
+    for (raw_value,) in connection.execute(
+        "SELECT payload_json FROM ledger WHERE kind=?", (LAND,)
+    ):
+        try:
+            payload = json.loads(str(raw_value))
+            bodies: dict[str, str] = {}
+            units = tuple(
+                _unit(value, bodies) for value in payload.get("units", ())
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        for unit in units:
+            if unit.ingest_id == ingest_id:
+                candidate_revisions.add(str(payload.get("revision_id")))
+    if len(candidate_revisions) != 1:
+        return None
+    revision_id = next(iter(candidate_revisions))
+
+    retained_units: tuple[CorpusIngestUnit, ...] | None = None
+    for row in connection.execute(
+        "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
+        "AND json_extract(payload_json,'$.revision_id')=?",
+        (LAND, revision_id),
+    ):
+        landed_revision_id, units = decode_landing(row)
+        if landed_revision_id != revision_id:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            )
+        if retained_units is not None and retained_units != units:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing changed"
+            )
+        retained_units = units
+    matches = tuple(
+        unit for unit in retained_units or () if unit.ingest_id == ingest_id
+    )
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _native_disposition_authority(
