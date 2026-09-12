@@ -137,7 +137,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v9"
+    assert VERSION == "newsroom.native-evidence-assessor.v10"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
@@ -145,6 +145,10 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     assert "excerpt-only entities" not in SYSTEM
     assert "first observation of an old clause" in SYSTEM
     assert "DELETED" in SYSTEM
+    assert "Only rendered_assertion_zh_hant_hk is translated" in SYSTEM
+    assert "must exactly equal the named-entity set in claim" in SYSTEM
+    assert "only in the excerpt, source body or inventory" in SYSTEM
+    assert "must not be copied unchanged" in SYSTEM
     connection.close()
 
 
@@ -558,6 +562,78 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         AutonomousNativeEvidenceAssessor._validated_execution(
             NativeAssessmentExecution(canonical_json_bytes(invented).decode(), {}),
             candidate, base, (source,), (acquired,),
+        )
+
+    for exact_claim, rendered, error, message in (
+        (
+            "All other qualifications 18 months if the applicant has successfully "
+            "completed a course at UK bachelor’s degree or master’s degree level, or "
+            "another relevant qualification that meets the requirement of ST8.1/2/3 "
+            "of the Rules, and the application is made on or after 1 January 2027.",
+            "其他所有學歷如申請人已成功完成英國學士或碩士學位程度課程，則獲准"
+            "逗留18個月。",
+            EvidencePackageError,
+            "rendered named entities",
+        ),
+        (
+            "1232 Residential, day and domiciliary care managers and proprietors – "
+            "all jobs Yes Yes Yes Yes 31 December 2026",
+            "職業代碼1232的所有職位列入Appendix Immigration Salary List，剔除"
+            "日期為2026年12月31日。",
+            NativeEvidenceHold,
+            "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        ),
+        (
+            "An occupation is only included on the list where an application has "
+            "been made using a certificate of sponsorship issued by a sponsor to an "
+            "applicant before the removal date stated in the table.",
+            "An occupation is only included on the list where an application has "
+            "been made using a certificate of sponsorship issued by a sponsor to an "
+            "applicant before the removal date stated in the table.",
+            EvidencePackageError,
+            "package value is invalid",
+        ),
+    ):
+        retained_failure = json.loads(canonical_json_bytes({"package": package}))
+        retained_claim = retained_failure["package"]["governed_claims"][0]
+        retained_claim.update({
+            "claim": exact_claim,
+            "supporting_excerpt": exact_claim,
+            "rendered_assertion_zh_hant_hk": rendered,
+        })
+        retained_failure["package"]["substantive_new_information"] = [exact_claim]
+        retained_acquired = SimpleNamespace(**{
+            **vars(acquired), "body": exact_claim.encode(),
+        })
+        with pytest.raises(error, match=message):
+            AutonomousNativeEvidenceAssessor._validated_execution(
+                NativeAssessmentExecution(
+                    canonical_json_bytes(retained_failure).decode(), {}
+                ),
+                candidate, base, (source,), (retained_acquired,),
+            )
+
+    source_claim = "T2 Minister of Religion is a route to settlement."
+    translated_claim = "T2 Minister of Religion是通往settlement的途徑。"
+    retained_binding_failure = json.loads(canonical_json_bytes({"package": package}))
+    retained_binding_claim = retained_binding_failure["package"]["governed_claims"][0]
+    retained_binding_claim.update({
+        "claim": translated_claim,
+        "supporting_excerpt": source_claim,
+        "rendered_assertion_zh_hant_hk": translated_claim,
+    })
+    retained_binding_failure["package"]["substantive_new_information"] = [
+        translated_claim
+    ]
+    retained_binding_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": source_claim.encode(),
+    })
+    with pytest.raises(EvidencePackageError, match="package value is invalid"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes(retained_binding_failure).decode(), {}
+            ),
+            candidate, base, (source,), (retained_binding_acquired,),
         )
 
     for source_claim, altered_span in (
@@ -1170,7 +1246,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     import newsroom.control_plane.native_assessor as module
 
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v8")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
@@ -1189,7 +1265,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     first = assessor(candidate, base, (), ())
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v10")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
         _, usage = _usage(tmp_path, monkeypatch)
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
@@ -1215,6 +1291,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     "newsroom.native-evidence-assessor.v6",
     "newsroom.native-evidence-assessor.v7",
     "newsroom.native-evidence-assessor.v8",
+    "newsroom.native-evidence-assessor.v9",
 ))
 @pytest.mark.parametrize("settled", (True, False))
 def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(
@@ -1240,7 +1317,7 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
             )(candidate, base, (), ())
     else:
         old_usage.begin(candidate, base, "unknown prior attempt")
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v10")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     _, new_usage = _usage(tmp_path, monkeypatch)
     calls = []

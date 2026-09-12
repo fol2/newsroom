@@ -80,7 +80,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v9"
+VERSION = "newsroom.native-evidence-assessor.v10"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -107,12 +107,13 @@ CONTEXT_MANIFEST_SCHEMA_VERSION = (
 )
 SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
-    "candidate and exact source bytes. Return JSON matching the schema. Translate "
-    "or localise only facts present in an exact source excerpt; never add facts or "
-    "authority absent from that evidence. Every claim and supporting excerpt must "
-    "each be copied byte-for-byte as an exact contiguous span of the same UTF-8 "
-    "source body. Preserve its whitespace, newlines and country labels exactly; "
-    "never normalise or elide them. Choose the shortest "
+    "candidate and exact source bytes. Return JSON matching the schema. The claim "
+    "and supporting_excerpt fields must each be copied byte-for-byte as an exact "
+    "contiguous source-language span of the same UTF-8 source body. Every "
+    "substantive_new_information item must exactly equal one of those source-language "
+    "claims. Only rendered_assertion_zh_hant_hk is translated or localised. Never add "
+    "facts or authority absent from the selected evidence. Preserve source whitespace, "
+    "newlines and country labels exactly; never normalise or elide them. Choose the shortest "
     "supporting excerpt that preserves the evidence. Return exactly "
     "one HEADLINE claim when substantive_new_information is non-empty. When no "
     "supported new information exists, governed_claims and qualification_evidence "
@@ -122,19 +123,23 @@ SYSTEM = (
     "evidence supported "
     "by the exact source facts. Return no substantive new information only when the "
     "source genuinely contains no supported new information, and invent no "
-    "qualification. Preserve every named entity in the claim, and require each one "
-    "to occur in its supporting excerpt, with its source spelling unchanged in the "
-    "rendered claim; do not annotate or translate named entities. The rendered claim "
-    "must otherwise contain Hong Kong Traditional Chinese only. "
+    "qualification. The named-entity set in rendered_assertion_zh_hant_hk must exactly "
+    "equal the named-entity set in claim. Require every claim entity to occur in its "
+    "supporting excerpt and preserve its source spelling unchanged in the rendered "
+    "claim; do not annotate or translate named entities. Do not add an entity found "
+    "only in the excerpt, source body or inventory. The rendered claim must otherwise "
+    "contain Hong Kong Traditional Chinese only and must not be copied unchanged from "
+    "claim. "
     "The source recognised_named_entities inventory identifies supported exact "
     "name and official-term spellings, not additional facts. Preserve inventory "
-    "items only where they occur in the selected claim or excerpt. For an unfamiliar "
+    "items only where they occur in the selected claim. For an unfamiliar "
     "official English institution, law, policy or technical term without a supplied "
     "approved Chinese rendering, retain its exact English name or abbreviation and "
     "do not invent a translation. A sparse inventory is not a publication gate. "
-    "Translate ordinary English prose outside these source-bound items. General "
-    "guidance text, status or layout labels, generic roles, and a deletion marker "
-    "such as DELETED are not automatically official names. A first observation of "
+    "Translate ordinary English prose outside these source-bound items. Being official "
+    "rule text does not make a whole sentence or generic legal wording an official "
+    "name. General guidance text, status or layout labels, generic roles, and a "
+    "deletion marker such as DELETED are not automatically official names. A first observation of "
     "an old clause or deletion marker does not by itself establish a newly confirmed "
     "development; do not invent a recent change or effective date. "
     "Localised factual "
@@ -753,12 +758,13 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v7"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v8"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v9"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
