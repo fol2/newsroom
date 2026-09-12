@@ -19,6 +19,9 @@ from .persistence import (
 )
 
 
+_UNSELECTED_SCOPE_CONTENT = object()
+
+
 class _EventStoreReadMixin:
     """Policy-filtered metadata reads and exact provenance reconstruction."""
 
@@ -399,7 +402,11 @@ class _EventStoreReadMixin:
         )
 
     def _decision_record_from_row(
-        self, row: sqlite3.Row, *, connection: sqlite3.Connection | None = None,
+        self,
+        row: sqlite3.Row,
+        *,
+        connection: sqlite3.Connection | None = None,
+        selected_scope_bytes: object = _UNSELECTED_SCOPE_CONTENT,
     ) -> AuthorizationDecisionRecord:
         digest = str(row["canonical_digest"])
         if (
@@ -408,12 +415,21 @@ class _EventStoreReadMixin:
         ):
             raise AuthorityPersistenceError("stored authorization decision format differs")
         scope_digest = str(row["scope_content_digest"])
-        scope_row = (connection or self._connection).execute(
-            "SELECT scope_content_digest,canonical_bytes FROM authorization_scope_contents "
-            "WHERE scope_content_digest=?", (scope_digest,),
-        ).fetchone()
-        if scope_row is None:
-            raise AuthorityPersistenceError("stored effective scopes are missing")
+        if selected_scope_bytes is _UNSELECTED_SCOPE_CONTENT:
+            scope_row = (connection or self._connection).execute(
+                "SELECT scope_content_digest,canonical_bytes "
+                "FROM authorization_scope_contents WHERE scope_content_digest=?",
+                (scope_digest,),
+            ).fetchone()
+            if scope_row is None:
+                raise AuthorityPersistenceError("stored effective scopes are missing")
+        else:
+            if selected_scope_bytes is None:
+                raise AuthorityPersistenceError("stored effective scopes are missing")
+            scope_row = {
+                "scope_content_digest": scope_digest,
+                "canonical_bytes": selected_scope_bytes,
+            }
         scopes_value = self._scope_content_from_row(scope_row)
         expected = {
             "authorization_decision_id": str(row["authorization_decision_id"]),
