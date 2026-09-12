@@ -240,14 +240,15 @@ def test_continuous_qualification_failure_closes_without_second_cycle(
         assert terminal == ("COMPLETE",)
 
 
-@pytest.mark.parametrize("settle_after_first_tick,once", [
-    (False, False), (True, False), (False, True),
+@pytest.mark.parametrize("settle_after_first_tick,once,corrupt_total", [
+    (False, False, False), (True, False, False), (False, True, False),
+    (False, False, True), (False, True, True),
 ])
 def test_unreported_usage_defers_qualification_without_reopening_pipeline(
-    tmp_path, monkeypatch, settle_after_first_tick, once,
+    tmp_path, monkeypatch, settle_after_first_tick, once, corrupt_total,
 ):
     from newsroom.control_plane.native_qualification import (
-        NativeQualificationPending, record_qualification,
+        NativeQualificationError, NativeQualificationPending, record_qualification,
     )
     from newsroom.tests.test_native_qualification import (
         IDENTITY, _allocation, _conservative_disposition, _cycle, _open,
@@ -256,6 +257,21 @@ def test_unreported_usage_defers_qualification_without_reopening_pipeline(
     connection = _open(tmp_path / "unpublished.sqlite3")
     journal = _cycle(connection)
     invocation = _allocation(connection, usage_status="UNREPORTED")
+    if corrupt_total:
+        from newsroom.authority.canonical import canonical_json_bytes
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (invocation,),
+        ).fetchone()[0])
+        record["components"]["total_tokens"] = 1
+        record["terminal_digest"] = ""
+        record["terminal_digest"] = digest_canonical(record)
+        connection.execute(
+            "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? "
+            "WHERE invocation_id=?",
+            (record["terminal_digest"], canonical_json_bytes(record).decode(), invocation),
+        )
+        connection.commit()
     original_terminal = connection.execute(
         "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
         (invocation,),
@@ -285,7 +301,12 @@ def test_unreported_usage_defers_qualification_without_reopening_pipeline(
         service = _service(
             tmp_path, bound, qualify_once=record_qualification, wait=wait,
         )
-        if once:
+        if corrupt_total:
+            with pytest.raises(NativeQualificationError, match="semantics") as failure:
+                service.run(once=once)
+            assert not isinstance(failure.value, NativeQualificationPending)
+            assert waits == []
+        elif once:
             with pytest.raises(NativeQualificationPending, match="unresolved"):
                 service.run(once=True)
             assert waits == []

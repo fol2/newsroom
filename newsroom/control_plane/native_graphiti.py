@@ -420,8 +420,11 @@ class NativeGraphitiProcessor:
                 "AND a.workload_class='GRAPHITI_EMBEDDING' AND a.provider='openrouter' "
                 "AND t.outcome='CANCELLED' AND t.usage_status='UNREPORTED' "
                 "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
-                "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
-                "WHERE d.invocation_id=a.invocation_id)",
+                "AND (NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+                "WHERE d.invocation_id=a.invocation_id) OR a.invocation_id=("
+                "SELECT CASE WHEN state='OPEN' AND reason='MISSING_PROVIDER_TELEMETRY' "
+                "THEN invocation_id END FROM model_usage_route_circuit_events "
+                "WHERE route=a.route ORDER BY recorded_at DESC,rowid DESC LIMIT 1))",
                 (ingest_id,),
             ).fetchall()
             for (invocation_id,) in cancelled:

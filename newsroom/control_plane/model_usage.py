@@ -3732,8 +3732,8 @@ class ModelUsageService:
             raise ModelUsageIntegrityError("invocation terminal record differs")
         return terminal
 
+    @staticmethod
     def _validate_terminal(
-        self,
         terminal: InvocationTerminal,
         workload: WorkloadClass,
         policy: InvocationEfficiencyPolicy,

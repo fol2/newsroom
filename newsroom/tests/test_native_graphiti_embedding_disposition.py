@@ -20,6 +20,7 @@ from newsroom.control_plane.model_usage import (
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.native_qualification import (
     NativeQualificationError,
+    NativeQualificationPending,
     _invocations,
 )
 from newsroom.control_plane.store import (
@@ -120,6 +121,7 @@ def _cancelled(tmp_path, monkeypatch, *, connection=None, unit=None,
         usage=usage, connection=connection, unit=unit, journal=journal,
         envelope=envelope, allocation=allocation, terminal=terminal,
         policy=observer._policies[allocation.invocation_id],
+        observer=observer, other=other,
     )
 
 
@@ -434,5 +436,79 @@ def test_native_advance_settles_embedding_cancellation_without_provider_replay(
         assert connection.execute(
             "SELECT count(*) FROM model_usage_conservative_dispositions"
         ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("corrupt_total", [False, True])
+def test_qualification_only_defers_semantically_valid_unknown_terminal(
+    tmp_path, monkeypatch, corrupt_total,
+):
+    case = _cancelled(tmp_path, monkeypatch)
+    try:
+        if corrupt_total:
+            record = case.terminal.as_record()
+            record["components"]["total_tokens"] = 1
+            record["terminal_digest"] = ""
+            record["terminal_digest"] = digest_canonical(record)
+            case.connection.execute(
+                "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? "
+                "WHERE invocation_id=?",
+                (record["terminal_digest"], canonical_json_bytes(record).decode(),
+                 case.allocation.invocation_id),
+            )
+            case.connection.commit()
+        with pytest.raises(NativeQualificationError) as failure:
+            _invocations(case.connection, case.journal)
+        assert isinstance(failure.value, NativeQualificationPending) is not corrupt_total
+    finally:
+        case.connection.close()
+
+
+@pytest.mark.parametrize("later_circuit", [None, "AUTHENTICATION", "POLICY_BREACH"])
+def test_native_settlement_revisits_only_own_pending_circuit(
+    tmp_path, monkeypatch, later_circuit,
+):
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=lambda *_a, **_k: None)
+    try:
+        case = _cancelled(tmp_path, monkeypatch, connection=connection, other_inflight=True)
+        processor._usage = case.usage
+        processor._clock = lambda: NOW + timedelta(seconds=1)
+        calls = []
+        original = case.usage.disposition_native_graphiti_embedding_cancellation
+
+        def dispose(**kwargs):
+            calls.append(kwargs["invocation_id"])
+            return original(**kwargs)
+
+        monkeypatch.setattr(case.usage, "disposition_native_graphiti_embedding_cancellation", dispose)
+        processor._settle_missing_subscription_usage((case.unit,))
+        assert case.usage.route_state(ROUTE)["state"] == "OPEN"
+        assert calls == [case.allocation.invocation_id]
+        case.observer.after_embedding_invocation(
+            case.other, outcome="COMPLETE", usage={
+                "usage_basis": "PROVIDER_REPORTED", "input_tokens": 1,
+                "output_tokens": 0, "total_tokens": 1,
+                "provider_telemetry": {"request_id": "other-completed", "total_tokens": 1},
+            },
+        )
+        if later_circuit:
+            case.usage.open_route_circuit(
+                route=ROUTE, reason=later_circuit, invocation_id=None,
+                recorded_at=NOW + timedelta(microseconds=1),
+            )
+        processor._settle_missing_subscription_usage((case.unit,))
+        assert case.usage.route_state(ROUTE)["state"] == ("OPEN" if later_circuit else "CLOSED")
+        assert calls == [case.allocation.invocation_id] * (1 if later_circuit else 2)
+        processor._settle_missing_subscription_usage((case.unit,))
+        assert calls == [case.allocation.invocation_id] * (1 if later_circuit else 2)
+        assert case.usage.terminal(case.allocation.invocation_id) == case.terminal
+        assert connection.execute(
+            "SELECT count(*) FROM model_usage_conservative_dispositions"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT status,reserved_gbp_microunits,actual_gbp_microunits "
+            "FROM unpublished_graphiti_spend"
+        ).fetchone() == ("UNRECONCILED", 500_000, None)
     finally:
         connection.close()

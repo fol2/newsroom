@@ -19,8 +19,11 @@ from newsroom.increment9.proving import SOURCE_IDS
 from .govuk_evidence import _api_url
 from .model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    ModelUsageService,
     NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
     WorkloadClass,
+    _policy_for_allocation,
+    _retained_terminal_allocation,
     _valid_native_embedding_timeout_disposition_record,
     _valid_native_graphiti_embedding_cancellation_disposition_record,
 )
@@ -419,6 +422,22 @@ def _invocations(
             or digest_canonical(unsigned) != retained_digest
         ):
             raise NativeQualificationError("native model terminal binding differs")
+        if terminal.get("usage_status") == "UNREPORTED":
+            # Unknown usage is pending only after the same retained semantics
+            # used by accounting; a rehashed but impossible total is corruption.
+            try:
+                allocation, typed_terminal = _retained_terminal_allocation(
+                    connection, invocation_id,
+                )
+                breach = ModelUsageService._validate_terminal(
+                    typed_terminal, allocation.workload_class,
+                    _policy_for_allocation(connection, allocation),
+                    requested_max_output_tokens=allocation.max_output_tokens,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise NativeQualificationError("native model terminal semantics differ") from exc
+            if breach is not None:
+                raise NativeQualificationError("native model usage is unresolved")
         reconciliation_rows = tuple(connection.execute(
             "SELECT reconciliation_digest,record_json FROM model_usage_reconciliations "
             "WHERE invocation_id=? ORDER BY observed_at,reconciliation_digest",
