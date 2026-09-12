@@ -561,6 +561,36 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
     connection.close()
 
 
+def test_missing_subscription_usage_selector_scans_only_relevant_liabilities(
+    tmp_path,
+):
+    from newsroom.control_plane.model_usage import ModelUsageService
+
+    path = str(tmp_path / "private.sqlite3")
+    ModelUsageService(path)
+    connection = connect(path)
+    try:
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
+            "FROM model_invocation_allocations a "
+            "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+            "JOIN model_work_envelopes e ON e.envelope_id=a.envelope_id "
+            "WHERE a.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
+            "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+            "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+            "WHERE d.invocation_id=a.invocation_id)"
+        ).fetchall()
+    finally:
+        connection.close()
+    details = tuple(str(row[3]) for row in plan)
+    assert any(
+        "model_usage_unreported_missing_telemetry" in detail
+        for detail in details
+    ), details
+
+
 @pytest.mark.parametrize('outcome', ('MALFORMED_OUTPUT', 'AMBIGUOUS_EFFECT', 'COMPLETE'))
 @pytest.mark.parametrize('local_failure_recorded', (False, True))
 def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(
