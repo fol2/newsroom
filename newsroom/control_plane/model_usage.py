@@ -1062,7 +1062,8 @@ def _native_embedding_progress_binding(
         (LAND, result["revision_id"]),
     ):
         payload = _object(raw)
-        units = tuple(_unit(value) for value in payload.get("units", ()))
+        bodies: dict[str, str] = {}
+        units = tuple(_unit(value, bodies) for value in payload.get("units", ()))
         NativeRevisionJournal._validate_units(units)
         if (
             raw != canonical_json_bytes(payload).decode("utf-8")
