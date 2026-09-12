@@ -802,6 +802,7 @@ def _queue(
     units: tuple[CorpusIngestUnit, ...],
     *,
     model_usage: ModelUsageService | None = None,
+    preserve_unit_order: bool = False,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
     pending = []
@@ -857,7 +858,8 @@ def _queue(
                 unit,
             )
         )
-    queued.sort()
+    if not preserve_unit_order:
+        queued.sort()
     return queued
 
 
@@ -1180,6 +1182,7 @@ def _ingest(
     cycle_id: str | None = None,
     operator_drain_requested: Callable[[], bool] = lambda: False,
     defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
+    preserve_unit_order: bool = False,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1240,7 +1243,10 @@ def _ingest(
         _retries,
         _ingest_id,
         unit,
-    ) in _queue(unpublished, units, model_usage=model_usage):
+    ) in _queue(
+        unpublished, units, model_usage=model_usage,
+        preserve_unit_order=preserve_unit_order,
+    ):
         # A routine operator drain is distinct from the signed owner stop.  It
         # is observed only here, between fully settled ingest attempts, so it
         # cannot turn an in-flight provider effect into an ambiguous attempt.

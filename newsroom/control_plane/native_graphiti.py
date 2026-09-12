@@ -186,6 +186,7 @@ class NativeGraphitiProcessor:
             model_usage=self._usage, cycle_id=cycle_id,
             operator_drain_requested=self._operator_drain_requested,
             defer_before_unit=defer,
+            preserve_unit_order=True,
         )
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():
