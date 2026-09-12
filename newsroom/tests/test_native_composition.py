@@ -172,10 +172,12 @@ def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
     monkeypatch.setattr(broker, "neo4j_projector_config", lambda: object())
     monkeypatch.setattr(broker, "openrouter_api_key", lambda: "fixture-key")
     opens = []
+    opened_arguments = []
 
     @contextmanager
     def opened_pipeline(**arguments):
         opens.append("open")
+        opened_arguments.append(arguments)
         for name in ("intake_path", "serving_path", "retrieval_path"):
             Path(arguments[name]).touch()
         if replace_existing:
@@ -219,6 +221,7 @@ def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
         assert len(qualified) == 1
         assert qualified[0].startswith("sha256:")
     assert opens == ["open", "close"]
+    assert opened_arguments[0]["reassessment_quantum_seconds"] == 300
 
 
 def test_native_deployment_identity_binds_store_instance_not_changing_contents(tmp_path):

@@ -280,6 +280,7 @@ def deployed_native_service(args):
             embedding_policy=embedding, assessment_policy=assessment, source_definition_ids=bindings,
             licence=None, stop_check=check, stop_fence=fence, implementation_worktree_clean=clean,
             service_event=service_event,
+            reassessment_quantum_seconds=args.interval,
         ) as composed:
             if identity(opening_paths) != opening_identity:
                 raise ValueError("native deployment identity changed during open")
@@ -309,6 +310,7 @@ def open_native_pipeline(
     implementation_worktree_clean: bool,
     service_event: threading.Event | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    reassessment_quantum_seconds: float = 300,
 ):
     """Open one real runtime after its invocation policies are qualified.
 
@@ -669,4 +671,5 @@ def open_native_pipeline(
             operator_drain_requested=operator_drain_requested,
             refresh_rights=refresh_rights,
             assessment_contract_version=ASSESSMENT_CONTRACT_VERSION,
+            reassessment_quantum_seconds=reassessment_quantum_seconds,
         )
