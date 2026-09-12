@@ -285,6 +285,105 @@ def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> Non
     asyncio.run(exercise())
 
 
+
+@pytest.mark.parametrize("case", [
+    "empty", "unchanged", "duplicate-node", "duplicate-relationship",
+    "missing-node-duplicate-survivor", "missing-relationship-duplicate-survivor",
+    "corrupt-duplicate-node", "corrupt-duplicate-relationship", "wrong-endpoint", "wrong-type",
+])
+def test_actual_service_guard_matches_preserve_exact_snapshot_coverage(case: str) -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    async def exercise() -> None:
+        config = _service_config()
+        suffix = str(uuid.uuid4())
+        group_id = f"newsroom-guard-coverage-{suffix}"
+        episode_uuid = f"episode-{suffix}"
+        snapshot_id = f"{episode_uuid}:1"
+        driver = _DatabaseBoundAsyncDriver(
+            AsyncGraphDatabase.driver(config.uri, auth=(config.username, config.password)),
+            database=config.database,
+        )
+
+        async def query(cypher: str, **parameters: object) -> EagerResult:
+            return await driver.execute_query(cypher, params=parameters, routing_="w")
+
+        identities = {
+            "a": f"a-{suffix}", "b": f"b-{suffix}", "c": f"c-{suffix}",
+            "first": f"first-{suffix}", "second": f"second-{suffix}",
+            "group_id": group_id,
+        }
+        try:
+            if case != "empty":
+                await query(
+                    """
+                    CREATE (a:Entity {uuid:$a, group_id:$group_id, name:'a'}),
+                           (b:Entity {uuid:$b, group_id:$group_id, name:'b'}),
+                           (c:Entity {uuid:$c, group_id:$group_id, name:'c'}),
+                           (a)-[:REL {uuid:$first, fact:'first'}]->(b),
+                           (b)-[:REL {uuid:$second, fact:'second'}]->(c)
+                    """, **identities,
+                )
+            guard = Neo4jMutationGuard(
+                driver, group_id=group_id, episode_uuid=episode_uuid,
+                attempt_number=1, input_digest="sha256:" + "1" * 64,
+            )
+            await guard.begin()
+            if "duplicate" in case:
+                if "relationship" in case:
+                    await query(
+                        """
+                        MATCH (b:Entity {uuid:$b})-[r:REL {uuid:$second}]->(c:Entity {uuid:$c})
+                        CREATE (b)-[duplicate:REL]->(c)
+                        SET duplicate=properties(r)
+                        """ + (" SET duplicate.fact='changed'" if case.startswith("corrupt") else ""),
+                        **identities,
+                    )
+                else:
+                    await query(
+                        """
+                        MATCH (b:Entity {uuid:$b})
+                        CREATE (duplicate:Entity) SET duplicate=properties(b)
+                        """ + (" SET duplicate.name='changed'" if case.startswith("corrupt") else ""),
+                        **identities,
+                    )
+            if case == "missing-node-duplicate-survivor":
+                await query("MATCH (a:Entity {uuid:$a}) DETACH DELETE a", **identities)
+            elif case == "missing-relationship-duplicate-survivor":
+                await query("MATCH ()-[r:REL {uuid:$first}]->() DELETE r", **identities)
+            elif case in {"wrong-endpoint", "wrong-type"}:
+                endpoint = "(b)-[replacement:REL]->(c)" if case == "wrong-endpoint" else "(a)-[replacement:OTHER]->(b)"
+                await query(
+                    """
+                    MATCH (a:Entity {uuid:$a})-[r:REL {uuid:$first}]->(b:Entity {uuid:$b}),
+                          (c:Entity {uuid:$c})
+                    """ + f"CREATE {endpoint} SET replacement=properties(r) DELETE r",
+                    **identities,
+                )
+            if case.startswith(("missing", "corrupt", "wrong")):
+                with pytest.raises(GuardError, match="pre-existing Graphiti"):
+                    await guard.assert_preexisting_unchanged()
+            else:
+                await guard.assert_preexisting_unchanged()
+            marker = await query(
+                "MATCH (m:NewsroomIngestMarker {episode_uuid:$episode_uuid}) RETURN m.state AS state",
+                episode_uuid=episode_uuid,
+            )
+            assert marker.records[0]["state"] == "PENDING"
+        finally:
+            try:
+                await query(
+                    """
+                    MATCH (n) WHERE n.group_id=$group_id OR n.episode_uuid=$episode_uuid
+                                 OR n._newsroom_snapshot_id=$snapshot_id
+                    DETACH DELETE n
+                    """, group_id=group_id, episode_uuid=episode_uuid, snapshot_id=snapshot_id,
+                )
+            finally:
+                await driver.close()
+
+    asyncio.run(exercise())
+
 def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
     tmp_path: Path,
 ) -> None:
