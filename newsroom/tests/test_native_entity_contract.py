@@ -95,6 +95,21 @@ def test_preserved_names_do_not_exempt_unrecognised_english_prose():
     ))
 
 
+@pytest.mark.parametrize(
+    "ordinary",
+    (
+        "獲immigration bail的人。",
+        "Au pair職位DELETED Working holidaymakers DELETED。",
+    ),
+)
+def test_source_layout_and_ordinary_english_are_not_rendered_entities(ordinary):
+    assert evidence.bounded_named_entities(ordinary) == frozenset()
+    assert not _valid_zh_hant_hk_rendering(SimpleNamespace(
+        claim=ordinary, supporting_excerpt=ordinary,
+        named_entities=(), rendered_assertion_zh_hant_hk=ordinary,
+    ))
+
+
 def test_no_claims_is_not_a_source_authority_failure():
     package = SimpleNamespace(
         candidate_id="candidate", governed_claims=(),

@@ -80,7 +80,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v8"
+VERSION = "newsroom.native-evidence-assessor.v9"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -122,9 +122,8 @@ SYSTEM = (
     "evidence supported "
     "by the exact source facts. Return no substantive new information only when the "
     "source genuinely contains no supported new information, and invent no "
-    "qualification. Preserve every named entity in both "
-    "the claim and that excerpt, "
-    "including excerpt-only entities, with its source spelling unchanged in the "
+    "qualification. Preserve every named entity in the claim, and require each one "
+    "to occur in its supporting excerpt, with its source spelling unchanged in the "
     "rendered claim; do not annotate or translate named entities. The rendered claim "
     "must otherwise contain Hong Kong Traditional Chinese only. "
     "The source recognised_named_entities inventory identifies supported exact "
@@ -133,7 +132,11 @@ SYSTEM = (
     "official English institution, law, policy or technical term without a supplied "
     "approved Chinese rendering, retain its exact English name or abbreviation and "
     "do not invent a translation. A sparse inventory is not a publication gate. "
-    "Translate ordinary English prose outside these source-bound items. "
+    "Translate ordinary English prose outside these source-bound items. General "
+    "guidance text, status or layout labels, generic roles, and a deletion marker "
+    "such as DELETED are not automatically official names. A first observation of "
+    "an old clause or deletion marker does not by itself establish a newly confirmed "
+    "development; do not invent a recent change or effective date. "
     "Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
@@ -750,11 +753,12 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v7"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v8"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
@@ -1490,7 +1494,7 @@ class AutonomousNativeEvidenceAssessor:
                 raise EvidencePackageError(
                     "assessment named entities differ from source evidence"
                 )
-            named_entities = tuple(sorted(claim_entities | excerpt_entities))
+            named_entities = tuple(sorted(claim_entities))
             if rendered_named_entities(
                 rendered, frozenset(named_entities)
             ) != set(named_entities):

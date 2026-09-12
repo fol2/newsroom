@@ -34,8 +34,15 @@ from newsroom.control_plane.zh_hant import (
     contains_simplified_variant,
 )
 
+_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION = (
+    "newsroom.write-admission.v3+newsroom.evid-012.v7+"
+    "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+    "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+    "newsroom.named-entity.v8+newsroom.cont-originality.v3+"
+    "newsroom.zh-hant-hk-shape.v13"
+)
 WRITE_ADMISSION_POLICY_VERSION = (
-    "newsroom.write-admission.v3+"
+    "newsroom.write-admission.v4+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -476,7 +483,10 @@ class WriteAdmissionDecision:
     def __post_init__(self) -> None:
         if self.decision not in {"WRITE_READY", "HOLD", "REJECT"}:
             raise ValueError("invalid write-admission result")
-        if self.policy_version != WRITE_ADMISSION_POLICY_VERSION:
+        if self.policy_version not in {
+            WRITE_ADMISSION_POLICY_VERSION,
+            _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
+        }:
             raise ValueError("unsupported write-admission policy version")
         expected = _decision_id(
             candidate_id=self.candidate_id,
@@ -833,21 +843,20 @@ class DeterministicWriteAdmission:
             or item.status is not GovernedClaimStatus.CONFIRMED_FACT
             or not _valid_zh_hant_hk_rendering(item)
             or any(
-                entity not in item.claim and entity not in item.supporting_excerpt
+                entity not in item.claim
                 for entity in item.named_entities
             )
-            or (
-                bounded_named_entities(item.claim)
-                | bounded_named_entities(item.supporting_excerpt)
+            or not bounded_named_entities(item.claim) <= bounded_named_entities(
+                item.supporting_excerpt
             )
+            or bounded_named_entities(item.claim)
             != frozenset(
                 (text, entity_type)
                 for text, entity_type, _record_id in item.named_entity_evidence
             )
             or rendered_named_entities(
                 item.rendered_assertion_zh_hant_hk,
-                bounded_named_entities(item.claim)
-                | bounded_named_entities(item.supporting_excerpt),
+                bounded_named_entities(item.claim),
             )
             != frozenset(
                 (text, entity_type)
@@ -1049,6 +1058,11 @@ def select_write_ready(
 
     if limit < 0:
         raise ValueError("write-ready selection limit must be non-negative")
+    if any(
+        decision.policy_version != WRITE_ADMISSION_POLICY_VERSION
+        for _candidate, _package, decision in admitted
+    ):
+        raise ValueError("write admission policy is not current")
 
     def quality(
         item: tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision],
