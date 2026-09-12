@@ -150,7 +150,7 @@ def test_historical_access_receipt_rejects_rebound_security_chain(tmp_path):
         )
         connection.execute(trigger)
     with open_object_system(path) as reopened:
-        with pytest.raises(AuthorityPersistenceError, match="security binding"):
+        with pytest.raises(AuthorityPersistenceError, match="binding differs"):
             reopened.objects.access_decision(
                 first_read.access_decision_id,
                 admission_id=first.admission_id,
@@ -243,6 +243,123 @@ def test_historical_access_receipt_rejects_post_expiry_access_time(tmp_path):
             reopened.objects.access_decision(
                 receipt.access_decision_id,
                 admission_id=admission.admission_id,
+                purpose="project.discovery",
+                proof=proof(),
+            )
+
+
+def test_historical_access_receipt_rejects_truncated_read_to_end(tmp_path):
+    import json
+    from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
+    from newsroom.authority.canonical import digest_bytes
+
+    path = tmp_path / "authority.sqlite3"
+    with open_object_system(path) as system:
+        admission = admit(system, data=b"0123456789").admission
+        receipt = system.objects.hydrate(
+            HydrationRequest(admission.admission_id, "project.discovery"), proof=proof(),
+        ).decision
+    with sqlite3.connect(path) as connection:
+        trigger, = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_object_access_decisions_update'"
+        ).fetchone()
+        raw, = connection.execute(
+            "SELECT canonical_bytes FROM object_access_decisions "
+            "WHERE access_decision_id=?",
+            (str(receipt.access_decision_id),),
+        ).fetchone()
+        record = json.loads(raw)
+        record["allowed_bytes"] = 4
+        record["state_cutoff"]["length"] = 4
+        cutoff = canonical_json_bytes(record["state_cutoff"])
+        record["state_cutoff_digest"] = digest_bytes(cutoff)
+        raw = canonical_json_bytes(record)
+        connection.execute("DROP TRIGGER immutable_object_access_decisions_update")
+        connection.execute(
+            "UPDATE object_access_decisions SET allowed_bytes=4,"
+            "state_cutoff_bytes=?,state_cutoff_digest=?,canonical_bytes=?,"
+            "canonical_digest=? WHERE access_decision_id=?",
+            (
+                cutoff, record["state_cutoff_digest"], raw, digest_bytes(raw),
+                str(receipt.access_decision_id),
+            ),
+        )
+        connection.execute(trigger)
+    with open_object_system(path) as reopened:
+        with pytest.raises(AuthorityPersistenceError, match="admission binding"):
+            reopened.objects.access_decision(
+                receipt.access_decision_id,
+                admission_id=admission.admission_id,
+                purpose="project.discovery",
+                proof=proof(),
+            )
+
+
+@pytest.mark.parametrize("case", ["cross_admission_use", "rebound_rights_cutoff"])
+def test_historical_access_receipt_rejects_admission_authority_rebind(
+    tmp_path, case,
+):
+    import json
+    from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
+    from newsroom.authority.canonical import digest_bytes
+
+    path = tmp_path / "authority.sqlite3"
+    with open_object_system(path) as system:
+        first = admit(system, key="first", data=b"same-size-a").admission
+        second = admit(system, key="second", data=b"same-size-b").admission
+        receipt = system.objects.hydrate(
+            HydrationRequest(first.admission_id, "project.discovery"), proof=proof(),
+        ).decision
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        trigger, = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_object_access_decisions_update'"
+        ).fetchone()
+        row = connection.execute(
+            "SELECT * FROM object_access_decisions WHERE access_decision_id=?",
+            (str(receipt.access_decision_id),),
+        ).fetchone()
+        record = json.loads(row["canonical_bytes"])
+        updates = {}
+        if case == "cross_admission_use":
+            record["allowed_use"] = "publish.article"
+            updates["allowed_use"] = record["allowed_use"]
+        else:
+            other = connection.execute(
+                "SELECT a.rights_decision_id,r.canonical_digest "
+                "FROM object_admissions a JOIN object_rights_decisions r "
+                "ON r.rights_decision_id=a.rights_decision_id "
+                "WHERE a.admission_id=?",
+                (str(second.admission_id),),
+            ).fetchone()
+            record["state_cutoff"].update({
+                "rights_decision_id": other["rights_decision_id"],
+                "rights_decision_digest": other["canonical_digest"],
+            })
+        cutoff = canonical_json_bytes(record["state_cutoff"])
+        record["state_cutoff_digest"] = digest_bytes(cutoff)
+        raw = canonical_json_bytes(record)
+        updates.update({
+            "state_cutoff_bytes": cutoff,
+            "state_cutoff_digest": record["state_cutoff_digest"],
+            "canonical_bytes": raw,
+            "canonical_digest": digest_bytes(raw),
+        })
+        connection.execute("DROP TRIGGER immutable_object_access_decisions_update")
+        connection.execute(
+            "UPDATE object_access_decisions SET "
+            + ",".join(f"{field}=?" for field in updates)
+            + " WHERE access_decision_id=?",
+            (*updates.values(), str(receipt.access_decision_id)),
+        )
+        connection.execute(trigger)
+    with open_object_system(path) as reopened:
+        with pytest.raises(AuthorityPersistenceError, match="admission binding"):
+            reopened.objects.access_decision(
+                receipt.access_decision_id,
+                admission_id=first.admission_id,
                 purpose="project.discovery",
                 proof=proof(),
             )
