@@ -1193,10 +1193,10 @@ class NativeRetrievalDocuments:
             text = hydrated_passage.data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise NativeRetrievalHold("PASSAGE_NOT_UTF8") from exc
-        vector_object = self._objects.hydrate(HydrationRequest(request.embedding.vector_admission_id, NATIVE_VECTOR_USE), proof=proof)
+        vector_object = self._objects.rehydrate(HydrationRequest(request.embedding.vector_admission_id, NATIVE_VECTOR_USE), proof=proof)
         self._access(vector_object.decision, self._vector_policy, NATIVE_VECTOR_CLASS, NATIVE_VECTOR_USE)
         vector = _vector(vector_object.data)
-        receipt_object = self._objects.hydrate(HydrationRequest(request.embedding.receipt_admission_id, NATIVE_EMBEDDING_RECEIPT_USE), proof=proof)
+        receipt_object = self._objects.rehydrate(HydrationRequest(request.embedding.receipt_admission_id, NATIVE_EMBEDDING_RECEIPT_USE), proof=proof)
         self._access(receipt_object.decision, self._receipt_policy, NATIVE_EMBEDDING_RECEIPT_CLASS, NATIVE_EMBEDDING_RECEIPT_USE)
         embedding = NativeEmbeddingReceipt.from_bytes(receipt_object.data)
         if embedding.input_text_digest != passage.text_digest or embedding.vector_digest != digest_bytes(vector_object.data):
@@ -1468,7 +1468,7 @@ class NativeRetrievalDocuments:
         event = provenance.event
         if provenance.command_definition.command_type != NATIVE_CONTEXT_COMMAND or provenance.command_definition.definition_digest != self._context_command_definition or event.command_definition_digest != self._context_command_definition or event.event_type != NATIVE_CONTEXT_EVENT or event.object_admission_id != str(receipt.admission_id) or event.payload_digest != receipt.context_object_digest or event.command_id != receipt.command_id or event.aggregate_id != str(receipt.aggregate_id) or event.aggregate_version != receipt.aggregate_version or event.principal_id != self._controller or provenance.authentication.principal_id != self._controller or provenance.authentication.authority_domain != self._domain or event.trust_scope != TrustScope.ADMITTED.value or event.security_scope != NATIVE_SECURITY_SCOPE or event.retention_scope != NATIVE_RETENTION_SCOPE:
             raise NativeRetrievalError("native context authority event differs")
-        hydrated = self._objects.hydrate(HydrationRequest(receipt.admission_id, NATIVE_CONTEXT_USE), proof=proof)
+        hydrated = self._objects.rehydrate(HydrationRequest(receipt.admission_id, NATIVE_CONTEXT_USE), proof=proof)
         self._access(hydrated.decision, self._context_policy, NATIVE_CONTEXT_CLASS, NATIVE_CONTEXT_USE)
         context = NativeRetrievalContext.from_bytes(hydrated.data)
         if digest_bytes(hydrated.data) != receipt.context_object_digest or context.context_id != receipt.context_id or context.request_id != receipt.request_id or context.request_digest != receipt.request_digest or context.authority_scope_id != receipt.authority_scope_id or context.rights_inventory_digest != receipt.rights_inventory_digest or context.generation_id != receipt.generation_id or context.graph_generation_id != receipt.graph_generation_id or context.query_valid_time != receipt.query_valid_time or context.serving_time != receipt.serving_time or context.branch_digests != tuple(digest_bytes(raw) for raw in (receipt.exact_receipt_bytes, receipt.fulltext_receipt_bytes, receipt.vector_receipt_bytes, receipt.graph_receipt_bytes)) or context.outcome != receipt.outcome or context.no_match != receipt.no_match:
@@ -1489,17 +1489,17 @@ class NativeRetrievalDocuments:
 
     def _read(self, receipt: NativeDocumentReceipt, proof: AuthenticationProof) -> tuple[NativePassageDocument, tuple[float, ...]]:
         self._verify_event(receipt, proof)
-        hydrated = self._objects.hydrate(HydrationRequest(receipt.admission_id, NATIVE_DOCUMENT_USE), proof=proof)
+        hydrated = self._objects.rehydrate(HydrationRequest(receipt.admission_id, NATIVE_DOCUMENT_USE), proof=proof)
         self._access(hydrated.decision, self._document_policy, NATIVE_DOCUMENT_CLASS, NATIVE_DOCUMENT_USE)
         document = NativePassageDocument.from_bytes(hydrated.data)
         if document.digest != receipt.document_digest or document.vector_admission_id != str(receipt.vector_admission_id) or document.embedding_receipt_admission_id != str(receipt.embedding_receipt_admission_id):
             raise NativeRetrievalError("native document receipt differs")
-        vector_object = self._objects.hydrate(HydrationRequest(receipt.vector_admission_id, NATIVE_VECTOR_USE), proof=proof)
+        vector_object = self._objects.rehydrate(HydrationRequest(receipt.vector_admission_id, NATIVE_VECTOR_USE), proof=proof)
         self._access(vector_object.decision, self._vector_policy, NATIVE_VECTOR_CLASS, NATIVE_VECTOR_USE)
         vector = _vector(vector_object.data)
         if digest_bytes(vector_object.data) != document.vector_digest:
             raise NativeRetrievalError("native document vector differs")
-        receipt_object = self._objects.hydrate(HydrationRequest(receipt.embedding_receipt_admission_id, NATIVE_EMBEDDING_RECEIPT_USE), proof=proof)
+        receipt_object = self._objects.rehydrate(HydrationRequest(receipt.embedding_receipt_admission_id, NATIVE_EMBEDDING_RECEIPT_USE), proof=proof)
         self._access(receipt_object.decision, self._receipt_policy, NATIVE_EMBEDDING_RECEIPT_CLASS, NATIVE_EMBEDDING_RECEIPT_USE)
         embedding = NativeEmbeddingReceipt.from_bytes(receipt_object.data)
         if digest_bytes(receipt_object.data) != document.embedding_receipt_digest or embedding.vector_digest != document.vector_digest or embedding.input_text_digest != document.text_digest:
@@ -1518,7 +1518,7 @@ class NativeRetrievalDocuments:
         if event.object_admission_id is None:
             raise NativeRetrievalError("native vector query event lacks an object")
         admission_id = ObjectAdmissionId.parse(event.object_admission_id)
-        hydrated = self._objects.hydrate(
+        hydrated = self._objects.rehydrate(
             HydrationRequest(admission_id, NATIVE_DOCUMENT_USE), proof=proof
         )
         self._access(hydrated.decision, self._document_policy, NATIVE_DOCUMENT_CLASS, NATIVE_DOCUMENT_USE)

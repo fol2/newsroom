@@ -320,8 +320,15 @@ def open_hermes_native_authority_system(
                 )
                 return with_native_rows(operation, request, proof)
 
+            def composed_rehydrate(request, proof):
+                return with_native_rows(
+                    object_boundary.rehydrate, request, proof,
+                    in_transaction=connection.in_transaction,
+                )
+
             base.objects._bind_composed_hydrate(
-                composed_hydrate, _token=_OBJECT_COMPOSITION_TOKEN
+                composed_hydrate, rehydrate=composed_rehydrate,
+                _token=_OBJECT_COMPOSITION_TOKEN
             )
             dependencies = native_dependency_factory(
                 objects=base.objects,

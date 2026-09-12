@@ -25,6 +25,7 @@ from newsroom.control_plane.evidence import (
     Evid012QualificationTest,
     bounded_named_entities,
     evidence_package_value,
+    rendered_named_entities,
 )
 from newsroom.increment10.editorial import SourceCurrentness
 from newsroom.increment10.evidence import (
@@ -36,6 +37,7 @@ from newsroom.increment10.evidence import (
 from .admission import (
     _APPROVED_CATEGORIES,
     _APPROVED_GEOGRAPHIES,
+    _valid_zh_hant_hk_rendering,
 )
 
 from .model_usage import (
@@ -78,7 +80,24 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v6"
+VERSION = "newsroom.native-evidence-assessor.v7"
+REASSESSABLE_HOLDS = frozenset({
+    "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD", "INVALID_GOVERNED_CLAIM_EVIDENCE",
+    "ASSESSOR_OUTPUT_CONTRACT_HOLD", "ASSESSOR_RENDERING_CONTRACT_HOLD",
+    "SOURCE_AUTHORITY_HOLD",
+})
+
+
+def assessment_revalidation_due(facts: dict, contract_version: str | None) -> bool:
+    return (
+        contract_version is not None
+        and facts.get("assessment_contract_version") != contract_version
+        and any(reason in REASSESSABLE_HOLDS for reason in (
+            facts.get("reason"), *facts.get("editorial_hold_reason_codes", ()),
+        ))
+    )
+
+
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -92,7 +111,9 @@ SYSTEM = (
     "authority absent from that evidence. Every claim and supporting excerpt must "
     "each be an exact contiguous part of the source passage; choose the shortest "
     "supporting excerpt that preserves the evidence. Return exactly "
-    "one HEADLINE claim. When substantive_new_information is non-empty, every item "
+    "one HEADLINE claim when substantive_new_information is non-empty. When no "
+    "supported new information exists, governed_claims and qualification_evidence "
+    "may both be empty. When substantive_new_information is non-empty, every item "
     "must exactly equal a HEADLINE or SUBSTANTIVE claim; include the exact HEADLINE "
     "claim and at least one SUBSTANTIVE claim. The HEADLINE must have qualification "
     "evidence supported "
@@ -102,7 +123,12 @@ SYSTEM = (
     "the claim and that excerpt, "
     "including excerpt-only entities, with its source spelling unchanged in the "
     "rendered claim; do not annotate or translate named entities. The rendered claim "
-    "must otherwise contain Hong Kong Traditional Chinese only. Localised factual "
+    "must otherwise contain Hong Kong Traditional Chinese only. "
+    "The source recognised_named_entities inventory identifies supported exact "
+    "name spellings, not additional facts. Preserve inventory names only where "
+    "they occur in the selected claim or excerpt. Ordinary English prose outside "
+    "these names must be translated, not retained as an invented name. "
+    "Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
     "or one-to-ten word durations in hours/minutes and equivalent Chinese durations "
@@ -118,7 +144,9 @@ SYSTEM = (
     "rendering or localisation in selection_rationale. Use only geography and "
     "category values allowed by the schema. "
     "Return no qualification_evidence when no supported qualification test applies; "
-    "never invent an AFFIRMED qualification merely to populate that array."
+    "never invent an AFFIRMED qualification merely to populate that array. "
+    "Use explicit_exclusions only for material evidence exclusions, not for "
+    "ordinary editorial selection notes; those belong in selection_rationale."
 )
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
@@ -335,6 +363,23 @@ class RetainedAssessorContractFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class RetainedAssessorResult:
+    proof: RetainedAssessorContractFailure
+    contract_version: str
+    base_digest: str
+    outcome: str
+    completed_at: datetime
+    execution: NativeAssessmentExecution | None
+
+
+def _assessment_cycle_id(candidate_version_id: str, base_digest: str, contract: str) -> str:
+    parts = [candidate_version_id, base_digest]
+    if contract not in {f"newsroom.native-evidence-assessor.v{version}" for version in range(1, 7)}:
+        parts.append(contract)
+    return digest_bytes(canonical_json_bytes(parts))
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedAssessorPreDispatchFailure:
     candidate_id: str
     candidate_version_id: str
@@ -452,9 +497,7 @@ class NativeAssessmentUsage:
             }
         )
         manifest["context_manifest_digest"] = digest_canonical(manifest)
-        cycle_id = digest_bytes(
-            canonical_json_bytes([candidate.version_id, base.digest])
-        )
+        cycle_id = _assessment_cycle_id(candidate.version_id, base.digest, VERSION)
         envelope = WorkEnvelope.create(
             cycle_id=cycle_id,
             workload_class=WorkloadClass.NATIVE_EVIDENCE_ASSESSOR,
@@ -667,6 +710,17 @@ class NativeAssessmentUsage:
     ) -> RetainedAssessorContractFailure | None:
         """Prove one settled, candidate-bound assessor contract failure."""
 
+        results = self.retained_assessments(candidate)
+        if not results:
+            return None
+        latest = max(results, key=lambda item: (item.completed_at, item.contract_version == VERSION))
+        return latest.proof if latest.outcome == "ASSESSOR_VALIDATION_FAILED" else None
+
+    def retained_assessments(
+        self, candidate: object, base: EvidencePackage | None = None,
+    ) -> tuple[RetainedAssessorResult, ...] | None:
+        """Read exact settled results; ambiguity never grants a new provider call."""
+
         candidate_id = getattr(candidate, "candidate_id", None)
         version_id = getattr(candidate, "version_id", None)
         manifest = getattr(candidate, "governing_manifest", None)
@@ -677,13 +731,26 @@ class NativeAssessmentUsage:
             return None
         connection = sqlite3.connect(f"file:{self._service.path}?mode=ro", uri=True)
         try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            cycle_clause = ""
+            parameters = [WorkloadClass.NATIVE_EVIDENCE_ASSESSOR.value, candidate_id]
+            if base is not None:
+                # An altered JSON candidate binding must not hide an unsettled
+                # invocation from the independently derived cycle identity.
+                cycle_clause = " OR cycle_id IN (?,?)"
+                parameters.extend((
+                    _assessment_cycle_id(version_id, base.digest, VERSION),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
+                ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
-                "WHERE workload_class=?",
-                (WorkloadClass.NATIVE_EVIDENCE_ASSESSOR.value,),
+                "WHERE (workload_class=? AND json_extract(record_json,'$.candidate_id')=?)"
+                + cycle_clause,
+                parameters,
             ).fetchall()
-            matches: list[RetainedAssessorContractFailure] = []
+            matches: list[RetainedAssessorResult] = []
             for row in rows:
                 try:
                     envelope_record = json.loads(row[5])
@@ -703,10 +770,8 @@ class NativeAssessmentUsage:
                     or envelope.hypothesis_digest != hypothesis_digest
                 ):
                     continue
-                if envelope.evidence_package_digest is None or envelope.cycle_id != digest_bytes(
-                    canonical_json_bytes([version_id, envelope.evidence_package_digest])
-                ):
-                    continue
+                if envelope.evidence_package_digest is None:
+                    return None
                 allocation_rows = connection.execute(
                     "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,"
                     "workload_class,policy_digest,provider,route,model,request_digest,"
@@ -744,6 +809,11 @@ class NativeAssessmentUsage:
                     is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
                 ):
                     return None
+                if envelope.cycle_id != _assessment_cycle_id(
+                    version_id, envelope.evidence_package_digest,
+                    allocation.prompt_contract_version,
+                ):
+                    continue
                 context_row = connection.execute(
                     "SELECT context_manifest_digest,provider,route,"
                     "evidence_package_digest,record_json "
@@ -902,8 +972,10 @@ class NativeAssessmentUsage:
                     or terminal.as_record() != terminal_record
                     or terminal.invocation_id != allocation.invocation_id
                     or terminal.usage_status is not UsageStatus.REPORTED
-                    or terminal.outcome != "ASSESSOR_VALIDATION_FAILED"
-                    or terminal.failure_class != "ASSESSMENT_VALIDATION_FAILED"
+                    or (terminal.outcome, terminal.failure_class) not in {
+                        ("ASSESSOR_VALIDATION_FAILED", "ASSESSMENT_VALIDATION_FAILED"),
+                        ("ASSESSOR_ACCEPTED", None),
+                    }
                     or terminal.dispatch_at is None
                     or terminal.pre_dispatch_zero_proved
                     or terminal.policy_breach is not None
@@ -944,14 +1016,54 @@ class NativeAssessmentUsage:
                     _require_reported_telemetry(connection, terminal)
                 except ModelUsageIntegrityError:
                     return None
-                matches.append(RetainedAssessorContractFailure(
-                    envelope.envelope_id,
-                    allocation.invocation_id,
-                    allocation.canonical_digest,
-                    terminal.terminal_digest,
-                    allocation.context_manifest_digest,
+                result_rows = connection.execute(
+                    "SELECT payload_json,payload_digest FROM ledger WHERE kind=? "
+                    "AND json_extract(payload_json,'$.invocation_id')=?",
+                    (_ASSESSMENT_RESULT_KIND, allocation.invocation_id),
+                ).fetchall()
+                execution = None
+                if len(result_rows) > 1:
+                    return None
+                if result_rows:
+                    raw, result_digest = result_rows[0]
+                    result = json.loads(raw)
+                    if (
+                        digest_bytes(raw.encode()) != result_digest
+                        or canonical_json_bytes(result).decode() != raw
+                        or result.get("schema_version") != _ASSESSMENT_RESULT_SCHEMA_VERSION
+                        or result.get("allocation_digest") != allocation.canonical_digest
+                        or result.get("invocation_policy_digest") != policy.canonical_digest
+                        or result.get("request_digest") != allocation.request_digest
+                        or result.get("dispatch_at") != terminal_record.get("dispatch_at")
+                        or datetime.fromisoformat(result["observed_at"]) < terminal.dispatch_at
+                    ):
+                        return None
+                    if result.get("retention_outcome") == "RETAINED":
+                        output = result.get("result_text")
+                        if (
+                            type(output) is not str
+                            or len(output.encode()) != result.get("result_bytes")
+                            or digest_bytes(output.encode()) != result.get("result_digest")
+                        ):
+                            return None
+                        execution = NativeAssessmentExecution(output, {})
+                    elif result.get("retention_outcome") != "OVERSIZED":
+                        return None
+                matches.append(RetainedAssessorResult(
+                    RetainedAssessorContractFailure(
+                        envelope.envelope_id, allocation.invocation_id,
+                        allocation.canonical_digest, terminal.terminal_digest,
+                        allocation.context_manifest_digest,
+                    ),
+                    allocation.prompt_contract_version,
+                    envelope.evidence_package_digest,
+                    terminal.outcome,
+                    terminal.completed_at,
+                    execution,
                 ))
-            return matches[0] if len(matches) == 1 else None
+            return tuple(matches)
+        except (KeyError, TypeError, ValueError, ModelUsageIntegrityError):
+            return None
         finally:
             connection.close()
 
@@ -1135,6 +1247,29 @@ class AutonomousNativeEvidenceAssessor:
                 raise NativeEvidenceHold(
                     "SOURCE_POLICY_FACTS_HOLD", source.unit.source_id
                 )
+        if self._usage is not None:
+            retained = self._usage.retained_assessments(candidate, base)
+            source_id = sources[0].unit.source_id if sources else candidate.candidate_id
+            if retained is None:
+                raise NativeEvidenceHold("ASSESSOR_REVALIDATION_UNRESOLVED_HOLD", source_id)
+            if retained:
+                if any(item.base_digest != base.digest for item in retained):
+                    raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
+                latest = max(retained, key=lambda item: (item.completed_at, item.contract_version == VERSION))
+                if latest.execution is not None:
+                    try:
+                        return self._validated_execution(
+                            latest.execution, candidate, base, sources, acquired,
+                        )
+                    except (EvidencePackageError, NativeEvidenceHold) as exc:
+                        if any(item.contract_version == VERSION for item in retained):
+                            if isinstance(exc, NativeEvidenceHold):
+                                raise
+                            raise NativeEvidenceHold(_contract_hold_reason(exc), source_id) from exc
+                elif any(item.contract_version == VERSION for item in retained):
+                    raise NativeEvidenceHold("ASSESSOR_RESULT_NOT_RETAINED_HOLD", source_id)
+                # A changed, settled producer contract owns one fresh envelope.
+                # Retained accounting and the journal prevent unchanged retries.
         prompt = canonical_json_bytes(
             {
                 "contract": VERSION,
@@ -1153,6 +1288,9 @@ class AutonomousNativeEvidenceAssessor:
                         "source_updated_time": result.source_updated_time,
                         "retrieval_time": result.retrieval_time,
                         "body": result.body.decode("utf-8"),
+                        "recognised_named_entities": sorted(
+                            bounded_named_entities(result.body.decode("utf-8"))
+                        ),
                     }
                     for source, result in zip(sources, acquired, strict=True)
                 ],
@@ -1340,7 +1478,9 @@ class AutonomousNativeEvidenceAssessor:
                     "assessment named entities differ from source evidence"
                 )
             named_entities = tuple(sorted(claim_entities | excerpt_entities))
-            if bounded_named_entities(rendered) != set(named_entities):
+            if rendered_named_entities(
+                rendered, frozenset(named_entities)
+            ) != set(named_entities):
                 raise EvidencePackageError(
                     "assessment rendered named entities differ"
                 )
@@ -1429,6 +1569,10 @@ class AutonomousNativeEvidenceAssessor:
             ):
                 raise NativeEvidenceHold(
                     "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
+                )
+            if not _valid_zh_hant_hk_rendering(claim):
+                raise NativeEvidenceHold(
+                    "ASSESSOR_RENDERING_CONTRACT_HOLD", sources[0].unit.source_id
                 )
         assessments = tuple(
             AcquiredSourceAssessment(

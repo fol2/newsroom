@@ -20,6 +20,9 @@ from typing import ContextManager
 from newsroom.authority import AuthenticationProof
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical, validate_sha256_digest
 from newsroom.authority.hermes_native_system import HermesNativeAuthoritySystem
+from newsroom.extraction.types import ExtractionRunId
+from newsroom.graphiti_adapter.identity import typed_id
+from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome, GraphitiAdapterRightsDenied
 from newsroom.increment4.neo4j import Increment4Neo4jCurrentBuildRequest
 from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
 
@@ -137,8 +140,34 @@ class NativeGraphitiProcessor:
                     or any(unit.chunk_count != members[0].chunk_count for unit in members)):
                 raise ValueError("native Graphiti revision chunk coverage differs")
         self._stop_check()
+        terminal_holds = {}
+        for unit in units:
+            failures, _dead = graphiti_failure_state(self._connection, unit.ingest_id)
+            if not failures or self._connection.execute(
+                "SELECT 1 FROM unpublished_graphiti_ingest WHERE ingest_id=? AND outcome='COMPLETE'",
+                (unit.ingest_id,),
+            ).fetchone() is not None:
+                continue
+            try:
+                history = self._system.graphiti.attempt_history(
+                    typed_id(ExtractionRunId, "run", unit.ingest_id),
+                    limit=1, proof=self._proof,
+                )
+            except GraphitiAdapterRightsDenied:
+                terminal_holds[unit.ingest_id] = "CURRENT_SOURCE_RIGHTS_HOLD"
+                continue
+            if history and history[0].outcome.terminal:
+                head = history[0]
+                # A settled terminal adapter result is not a new retryable
+                # provider failure. Keep the original cause and its accounting.
+                terminal_holds[unit.ingest_id] = (
+                    "RETAINED_COMPLETE_RECONCILIATION_REQUIRED"
+                    if head.outcome is GraphitiAdapterOutcome.COMPLETE else
+                    f"{head.outcome.value}:{head.failure_code}"
+                )
         _ingest(
-            self._connection, graphiti=self._runner, units=units,
+            self._connection, graphiti=self._runner,
+            units=tuple(unit for unit in units if unit.ingest_id not in terminal_holds),
             max_graphiti=len(units), rights_check=self._rights,
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
@@ -161,6 +190,7 @@ class NativeGraphitiProcessor:
             else:
                 failures, dead = graphiti_failure_state(self._connection, unit.ingest_id)
                 reason = (
+                    terminal_holds[unit.ingest_id] if unit.ingest_id in terminal_holds else
                     "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN" if route_held else
                     "PARTIAL_EXTRACTION" if row is not None else
                     "DEAD_LETTER" if dead else "RETRY_PENDING" if failures else

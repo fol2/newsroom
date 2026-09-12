@@ -25,8 +25,11 @@ class _ObjectHydrationStoreMixin:
     """Authenticated, purpose-bound hydration with exact current-state cutoff."""
 
     def hydrate(
-        self, grant: _HydrationGrant, *, in_transaction: bool = False
+        self, grant: _HydrationGrant, *, in_transaction: bool = False,
+        reuse_retained: bool = False
     ) -> tuple[bytes, ObjectAccessDecisionView]:
+        if type(reuse_retained) is not bool:
+            raise TypeError("reuse_retained must be boolean")
         if type(in_transaction) is not bool:
             raise TypeError("in_transaction must be boolean")
         if in_transaction and not self._connection.in_transaction:
@@ -178,75 +181,82 @@ class _ObjectHydrationStoreMixin:
                         state_cutoff_value
                     )
                     state_cutoff = digest_bytes(state_cutoff_bytes)
-                    access_decision_id = ObjectAccessDecisionId.new()
-                    canonical_value = {
-                        "access_decision_id": str(access_decision_id),
-                        "policy_contract_digest": policy.contract_digest,
-                        "authentication_context_id": str(
-                            authentication.authentication_context_id
-                        ),
-                        "authorization_request_digest": (
-                            grant.authorization_request.request_digest
-                        ),
-                        "authorization_decision_id": str(
-                            grant.authorization.authorization_decision_id
-                        ),
-                        "principal_id": authentication.principal_id,
-                        "authority_domain": authentication.authority_domain,
-                        "purpose": policy.purpose,
-                        "admission_id": str(grant.request.admission_id),
-                        "object_class": str(row["object_class"]),
-                        "allowed_use": str(row["allowed_use"]),
-                        "security_scope": str(row["security_scope"]),
-                        "retention_scope": str(row["retention_scope"]),
-                        "offset": offset,
-                        "allowed_bytes": length,
-                        "state_cutoff": state_cutoff_value,
-                        "state_cutoff_digest": state_cutoff,
-                        "decided_at": decided_at.to_text(),
-                    }
-                    canonical = canonical_json_bytes(canonical_value)
-                    canonical_digest = digest_bytes(canonical)
-                    self._persist_security_records(
-                        conn,
-                        authentication=grant.authentication,
-                        request=grant.authorization_request,
-                        decision=grant.authorization,
-                        recorded_at=decided_at.to_text(),
+                    retained = (
+                        self._retained_hydration(conn, grant, state_cutoff, offset, length, row)
+                        if reuse_retained else None
                     )
-                    conn.execute(
-                        "INSERT INTO object_access_decisions("
-                        "access_decision_id,hydration_policy_contract_digest,"
-                        "authentication_context_id,authorization_request_digest,"
-                        "authorization_decision_id,principal_id,authority_domain,"
-                        "purpose,admission_id,object_class,allowed_use,"
-                        "security_scope,retention_scope,byte_offset,allowed_bytes,"
-                        "state_cutoff_bytes,state_cutoff_digest,decided_at,"
-                        "canonical_bytes,canonical_digest) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            str(access_decision_id),
-                            policy.contract_digest,
-                            str(authentication.authentication_context_id),
-                            grant.authorization_request.request_digest,
-                            str(grant.authorization.authorization_decision_id),
-                            authentication.principal_id,
-                            authentication.authority_domain,
-                            policy.purpose,
-                            str(grant.request.admission_id),
-                            str(row["object_class"]),
-                            str(row["allowed_use"]),
-                            str(row["security_scope"]),
-                            str(row["retention_scope"]),
-                            offset,
-                            length,
-                            state_cutoff_bytes,
-                            state_cutoff,
-                            decided_at.to_text(),
-                            canonical,
-                            canonical_digest,
-                        ),
-                    )
+                    if retained is not None:
+                        access_decision_id = retained.access_decision_id
+                    else:
+                        access_decision_id = ObjectAccessDecisionId.new()
+                        canonical_value = {
+                            "access_decision_id": str(access_decision_id),
+                            "policy_contract_digest": policy.contract_digest,
+                            "authentication_context_id": str(
+                                authentication.authentication_context_id
+                            ),
+                            "authorization_request_digest": (
+                                grant.authorization_request.request_digest
+                            ),
+                            "authorization_decision_id": str(
+                                grant.authorization.authorization_decision_id
+                            ),
+                            "principal_id": authentication.principal_id,
+                            "authority_domain": authentication.authority_domain,
+                            "purpose": policy.purpose,
+                            "admission_id": str(grant.request.admission_id),
+                            "object_class": str(row["object_class"]),
+                            "allowed_use": str(row["allowed_use"]),
+                            "security_scope": str(row["security_scope"]),
+                            "retention_scope": str(row["retention_scope"]),
+                            "offset": offset,
+                            "allowed_bytes": length,
+                            "state_cutoff": state_cutoff_value,
+                            "state_cutoff_digest": state_cutoff,
+                            "decided_at": decided_at.to_text(),
+                        }
+                        canonical = canonical_json_bytes(canonical_value)
+                        canonical_digest = digest_bytes(canonical)
+                        self._persist_security_records(
+                            conn,
+                            authentication=grant.authentication,
+                            request=grant.authorization_request,
+                            decision=grant.authorization,
+                            recorded_at=decided_at.to_text(),
+                        )
+                        conn.execute(
+                            "INSERT INTO object_access_decisions("
+                            "access_decision_id,hydration_policy_contract_digest,"
+                            "authentication_context_id,authorization_request_digest,"
+                            "authorization_decision_id,principal_id,authority_domain,"
+                            "purpose,admission_id,object_class,allowed_use,"
+                            "security_scope,retention_scope,byte_offset,allowed_bytes,"
+                            "state_cutoff_bytes,state_cutoff_digest,decided_at,"
+                            "canonical_bytes,canonical_digest) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                str(access_decision_id),
+                                policy.contract_digest,
+                                str(authentication.authentication_context_id),
+                                grant.authorization_request.request_digest,
+                                str(grant.authorization.authorization_decision_id),
+                                authentication.principal_id,
+                                authentication.authority_domain,
+                                policy.purpose,
+                                str(grant.request.admission_id),
+                                str(row["object_class"]),
+                                str(row["allowed_use"]),
+                                str(row["security_scope"]),
+                                str(row["retention_scope"]),
+                                offset,
+                                length,
+                                state_cutoff_bytes,
+                                state_cutoff,
+                                decided_at.to_text(),
+                                canonical,
+                                canonical_digest,
+                            ),
+                        )
                     # The state and pinned bytes are rechecked immediately before
                     # leaving the authority transaction.
                     self._current_admission_row(
@@ -279,6 +289,84 @@ class _ObjectHydrationStoreMixin:
                 finally:
                     pinned.close()
             return data, self.access_decision_view(access_decision_id)
+
+    def _retained_hydration(self, conn, grant, cutoff, offset, length, admission):
+        # Use the existing admission/time index; never scan all access history.
+        row = conn.execute(
+            "SELECT * FROM object_access_decisions WHERE admission_id=? "
+            "AND hydration_policy_contract_digest=? AND principal_id=? "
+            "AND authority_domain=? AND purpose=? AND byte_offset=? "
+            "AND allowed_bytes=? AND state_cutoff_digest=? "
+            "ORDER BY decided_at DESC,rowid DESC LIMIT 1",
+            (str(grant.request.admission_id), grant.policy.contract_digest,
+             grant.authentication.principal_id, grant.authentication.authority_domain,
+             grant.policy.purpose, offset, length, cutoff),
+        ).fetchone()
+        if row is None:
+            return None
+        value = self._require_canonical_record(row)
+        for field in ("object_class", "allowed_use", "security_scope", "retention_scope"):
+            if row[field] != admission[field]:
+                raise AuthorityPersistenceError("retained access admission semantics differ")
+        if UtcTimestamp.parse(row["decided_at"]).value > self._clock().value:
+            return None
+        for field, column in (("policy_contract_digest", "hydration_policy_contract_digest"),
+                              ("offset", "byte_offset")):
+            if value.get(field) != row[column]:
+                raise AuthorityPersistenceError("retained access indexed fields differ")
+        for field in ("authentication_context_id", "authorization_request_digest",
+                      "authorization_decision_id", "principal_id", "authority_domain",
+                      "purpose", "admission_id", "object_class", "allowed_use",
+                      "security_scope", "retention_scope", "allowed_bytes", "decided_at"):
+            if value.get(field) != row[field]:
+                raise AuthorityPersistenceError("retained access indexed fields differ")
+        decision_row = conn.execute(
+            "SELECT * FROM authorization_decisions WHERE authorization_decision_id=?",
+            (row["authorization_decision_id"],),
+        ).fetchone()
+        if decision_row is None:
+            raise AuthorityPersistenceError("retained access authorisation is missing")
+        decision = self._decision_record_from_row(decision_row)
+        context_row = conn.execute(
+            "SELECT * FROM authentication_contexts WHERE authentication_context_id=?",
+            (row["authentication_context_id"],),
+        ).fetchone()
+        request_row = conn.execute(
+            "SELECT * FROM authorization_requests WHERE request_digest=?",
+            (row["authorization_request_digest"],),
+        ).fetchone()
+        if context_row is None or request_row is None:
+            raise AuthorityPersistenceError("retained access security records are missing")
+        context = self._authentication_record_from_row(context_row)
+        request = self._request_record_from_row(request_row)
+        if (decision.authentication_context_id != context.authentication_context_id
+                or decision.authorization_request_digest != request.request_digest
+                or request.authentication_context_id != context.authentication_context_id):
+            raise AuthorityPersistenceError("retained access security binding differs")
+        recorded_request = self._decode_canonical_object(request.canonical_bytes)
+        current_request = grant.authorization_request.canonical_value()
+        recorded_semantic = recorded_request.pop("stable_semantic_request_digest")
+        current_semantic = current_request.pop("stable_semantic_request_digest")
+        for ephemeral in ("authentication_context_id", "request_digest"):
+            recorded_request.pop(ephemeral)
+            current_request.pop(ephemeral)
+        if recorded_request != current_request:
+            raise AuthorityPersistenceError("retained access request semantics differ")
+        # An explicit complete range and length=None can read the same bytes
+        # with different request identities. Record the new exact request once.
+        if recorded_semantic != current_semantic:
+            return None
+        for field in ("principal_id", "authority_domain", "authentication_method",
+                      "assurance_class", "credential_binding_digest"):
+            if getattr(context, field) != getattr(grant.authentication, field):
+                return None
+        if (decision.authorization_policy_version != grant.authorization.authorization_policy_version
+                or decision.effective_scopes != grant.authorization.effective_scopes
+                or not decision.allowed):
+            return None
+        return self.access_decision_view(
+            ObjectAccessDecisionId.parse(str(row["access_decision_id"]))
+        )
 
     def access_decision_view(
         self, access_decision_id: ObjectAccessDecisionId

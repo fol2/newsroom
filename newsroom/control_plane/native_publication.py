@@ -31,6 +31,7 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceSource,
 )
 from newsroom.control_plane.native_assessor import (
+    assessment_revalidation_due,
     RetainedAssessorContractFailure,
     RetainedAssessorPreDispatchFailure,
 )
@@ -441,12 +442,17 @@ class NativePublicationContinuation:
         assessment_pre_dispatch_failure: (
             Callable[[object], RetainedAssessorPreDispatchFailure | None] | None
         ) = None,
+        assessment_contract_version: str | None = None,
         clock=UtcTimestamp.now,
     ) -> None:
         if (
             type(journal) is not NativeRevisionJournal
             or type(evidence_controller) is not NativeEvidenceController
             or not callable(clock)
+            or (
+                assessment_contract_version is not None
+                and (type(assessment_contract_version) is not str or not assessment_contract_version)
+            )
             or (
                 assessment_contract_failure is not None
                 and not callable(assessment_contract_failure)
@@ -474,6 +480,7 @@ class NativePublicationContinuation:
         self._sources = dict(sources)
         self._assessment_contract_failure = assessment_contract_failure
         self._assessment_pre_dispatch_failure = assessment_pre_dispatch_failure
+        self._assessment_contract_version = assessment_contract_version
         self._clock = clock
 
     def advance(
@@ -498,6 +505,36 @@ class NativePublicationContinuation:
         if facts.get("candidate_id") not in (None, candidate_id):
             raise NativePublicationError("native continuation stable Candidate differs")
         facts["candidate_id"] = candidate_id
+
+        if (
+            progress.get("stage") == "EVIDENCE_HOLD"
+            and assessment_revalidation_due(facts, self._assessment_contract_version)
+        ):
+            # Retain the superseded references before clearing continuation-only
+            # fields. Intake identity and all original ledger/accounting remain.
+            facts["assessment_superseded"] = {
+                "contract_version": facts.get("assessment_contract_version"),
+                "reason": facts.get("reason"),
+                "package_admission_id": facts.get("package_admission_id"),
+                "editorial_decision_id": facts.get("editorial_decision", {}).get("decision_id"),
+                "acquisition_attempt_count": facts.get("acquisition_attempt_count", 0),
+            }
+            for key in (
+                "package_admission_id", "editorial_decision", "acquisition_receipt_digests",
+                "expected_story_version", "expected_publication_version",
+                "expected_delivery_evidence_version", "publication_applied_at",
+                "publication_observed_at", "acquisition_retryable", "reason",
+                "assessment_started_at", "acquisition_started_at", "failure_class",
+                "editorial_hold_reason_codes",
+            ):
+                facts.pop(key, None)
+            facts.update(
+                assessment_contract_version=self._assessment_contract_version,
+                acquisition_attempt_count=0,
+            )
+            progress = self._journal.advance(
+                revision_id, stage="ASSESSMENT_CONTRACT_REVALIDATION", facts=facts
+            )
 
         if progress.get("stage") == "ASSESSMENT_INTERRUPTED":
             retained_failure = None
@@ -657,6 +694,8 @@ class NativePublicationContinuation:
                 nonlocal assessment_started
                 assessment_started = True
                 facts["assessment_started_at"] = acquisition_started_at
+                if self._assessment_contract_version is not None:
+                    facts["assessment_contract_version"] = self._assessment_contract_version
                 self._journal.advance(
                     revision_id, stage="ASSESSMENT_STARTED", facts=facts
                 )

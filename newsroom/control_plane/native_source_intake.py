@@ -5,7 +5,8 @@ from __future__ import annotations
 import ssl
 import urllib.error
 import urllib.request
-from contextlib import AbstractContextManager
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import AbstractContextManager, ExitStack
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -53,6 +54,7 @@ from .native_policies import (
 from .native_evidence import (
     DependencyAssessment, NativeEvidenceHold, NativeEvidenceSource,
 )
+from .native_progress import NativeRevisionJournal
 
 from .veto import VetoError
 
@@ -129,6 +131,7 @@ class NativeSourceIntake:
         licence: GovUkLicenceEvidence,
         dispatch_fence: Callable[[str, str], AbstractContextManager[None]],
         other_source_poll: Callable[..., NativeSourceDisposition] | None = None,
+        retained_units: Mapping[str, tuple[CorpusIngestUnit, ...]] | None = None,
         fetch: Callable[[str], tuple[int, bytes]] = _fetch_exact,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
@@ -141,6 +144,7 @@ class NativeSourceIntake:
         self.bind_definitions(definition_ids)
         self._fence, self._fetch, self._clock = dispatch_fence, fetch, clock
         self._other_source_poll = other_source_poll
+        self._retained_units = {} if retained_units is None else retained_units
 
     def bind_definitions(
         self, definition_ids: Mapping[str, SourceDefinitionId],
@@ -303,13 +307,10 @@ class NativeSourceIntake:
                 tuple(observations),
             )
         units, item_holds = [], []
-        for path, title in inventory.sections:
-            canonical_url = "https://www.gov.uk" + path
-            item = SourceItem(
-                source_id, root_digest + "|" + path, title, title, canonical_url,
-            )
+        for item, fetched in self._fetch_manual_sections(source_id, root_digest, inventory.sections):
+            canonical_url = item.canonical_url
             try:
-                item_url, item_raw, observed = self._fetch_complete_item(source_id, item)
+                item_url, item_raw, observed = fetched.result()
                 item_admission, item_access = self._admit_observation(source_id, item_raw)
                 observations.append((
                     item_url, digest_bytes(item_raw), str(item_admission.admission_id),
@@ -334,13 +335,36 @@ class NativeSourceIntake:
             tuple(observations), tuple(item_holds),
         )
 
+    def _fetch_manual_sections(self, source_id, root_digest, sections):
+        # Network only in workers; SQLite admission and deterministic coverage
+        # stay on the owner thread. Four responses bound the live working set.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for start in range(0, len(sections), 4):
+                items = tuple(SourceItem(
+                    source_id, root_digest + "|" + path, title, title,
+                    "https://www.gov.uk" + path,
+                ) for path, title in sections[start:start + 4])
+                # Owner-stop fences use a re-entrant transaction on this thread.
+                # Hold it once for the batch, not competing writer locks in each
+                # worker; no authority writes take place under the network fence.
+                with ExitStack() as fences:
+                    for item in items:
+                        fences.enter_context(self._fence(source_id, _api_url(item.canonical_url)))
+                    pending = tuple((item, pool.submit(self._fetch_item_response, item)) for item in items)
+                    wait(tuple(future for _, future in pending))
+                yield from pending
+
     def _fetch_complete_item(self, source_id, item):
         try:
             url = _api_url(item.canonical_url)
         except ValueError:
             raise NativeSourceIntakeHold("SOURCE_ITEM_CANONICAL_URL_HOLD") from None
         with self._fence(source_id, url):
-            status, raw = self._fetch(url)
+            return self._fetch_item_response(item)
+
+    def _fetch_item_response(self, item):
+        url = _api_url(item.canonical_url)
+        status, raw = self._fetch(url)
         if len(raw) > MAX_BODY_BYTES:
             raise NativeSourceIntakeHold("SOURCE_ITEM_BODY_TOO_LARGE")
         if status != 200 or not raw:
@@ -386,7 +410,6 @@ class NativeSourceIntake:
             (IdentityComponent("item_key", item.item_key), IdentityComponent("source_id", source_id)),
             (), f"native-source-item:{item_id}",
         )
-        self._sources.register_item(item_request, proof=self._proof)
         body = item.retained_corpus_body
         revision_digest = content_digest(
             headline=item.headline, body=body, canonical_url=item.canonical_url
@@ -422,7 +445,6 @@ class NativeSourceIntake:
             VERSION, self._source_time(item.published_at), self._source_time(item.updated_at),
             UtcTimestamp.parse(first_observed), f"native-source-revision:{revision_id}",
         )
-        self._sources.record_revision(revision_request, proof=self._proof)
         representation_digest = representation_digest_for(
             source_id=source_id, item_key=item.item_key, revision_digest=revision_digest,
             published_at=item.published_at, updated_at=item.updated_at,
@@ -440,6 +462,32 @@ class NativeSourceIntake:
             fields_digest, representation_digest, UtcTimestamp.parse(first_observed),
             f"native-source-representation:{representation_id}",
         )
+        retained = self._retained_units.get(str(revision_id))
+        if retained is not None:
+            # Polling already checked the current definition/rights and fetched
+            # the complete bytes. Reuse the journal's original chunk receipts,
+            # rather than minting ones journal.land would immediately discard.
+            NativeRevisionJournal._validate_units(retained)
+            representation = self._sources.representation(representation_id, proof=self._proof)
+            if (
+                retained_revision is None or retained_revision.request != revision_request
+                or representation.request != representation_request
+                or any(
+                    unit.source_id != source_id or unit.item_key != item.item_key
+                    or unit.representation_digest != representation_digest
+                    or unit.source_definition_url != version.locator
+                    or unit.authority.definition_id != str(definition_id)
+                    or unit.authority.definition_version_id != str(version_id)
+                    or unit.authority.item_id != str(item_id)
+                    or unit.authority.revision_id != str(revision_id)
+                    or unit.authority.representation_id != str(representation_id)
+                    for unit in retained
+                )
+            ):
+                raise NativeSourceIntakeHold("SOURCE_RETAINED_REVISION_BINDING_HOLD")
+            return retained
+        self._sources.register_item(item_request, proof=self._proof)
+        self._sources.record_revision(revision_request, proof=self._proof)
         self._sources.record_representation(representation_request, proof=self._proof)
         base = CorpusIngestUnit(
             source_id, item.item_key, item.headline, body, item.canonical_url,

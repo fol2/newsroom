@@ -34,7 +34,10 @@ from .govuk_rights import (
 )
 from .graphiti_operational_readiness import OPERATOR_AUTHORITY_DOMAIN, OPERATOR_PRINCIPAL_ID
 from .model_usage import InvocationEfficiencyPolicy, ModelUsageService
-from .native_assessor import AutonomousNativeEvidenceAssessor, NativeAssessmentUsage
+from .native_assessor import (
+    AutonomousNativeEvidenceAssessor, NativeAssessmentUsage,
+    VERSION as ASSESSMENT_CONTRACT_VERSION,
+)
 from .native_collision import NativeCollisionAuthority, NativeCollisionIdentity
 from .native_cycle import _uuid4_for
 from .native_discovery import NativeDiscovery
@@ -633,6 +636,7 @@ def open_native_pipeline(
                     assessment_pre_dispatch_failure=(
                         assessment_usage.retained_pre_dispatch_failure
                     ),
+                    assessment_contract_version=ASSESSMENT_CONTRACT_VERSION,
                     clock=now,
                 ).advance(revision_id=revision_id, candidate_version_id=candidate_version_id)
 
@@ -640,6 +644,7 @@ def open_native_pipeline(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=proof, definition_ids=definitions, licence=licence,
             dispatch_fence=source_fence, clock=clock,
+            retained_units=journal.units,
             other_source_poll=lambda **request: poll_other_source(intake, **request),
         )
 
@@ -663,4 +668,5 @@ def open_native_pipeline(
             stop_check=stop_check, stop_fence=stop_fence, clock=now,
             operator_drain_requested=operator_drain_requested,
             refresh_rights=refresh_rights,
+            assessment_contract_version=ASSESSMENT_CONTRACT_VERSION,
         )

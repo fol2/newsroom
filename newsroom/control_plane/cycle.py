@@ -802,20 +802,26 @@ def _queue(
     model_usage: ModelUsageService | None = None,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
+    pending = []
     for unit in units:
-        if has_graphiti_ingest(unpublished, unit.ingest_id):
+        ingest_id = unit.ingest_id
+        if has_graphiti_ingest(unpublished, ingest_id):
             continue
-        retries, dead = graphiti_failure_state(unpublished, unit.ingest_id)
+        retries, dead = graphiti_failure_state(unpublished, ingest_id)
+        if dead and (
+            model_usage is None or unit.authority is None
+            or unit.proving_run_id != f"native-source:{unit.observation_digest}"
+        ):
+            continue
+        pending.append((unit, ingest_id, retries, dead))
+    dead_ingests = tuple(ingest_id for _, ingest_id, _, dead in pending if dead)
+    retry_evidence = (
+        model_usage.graphiti_ingest_retry_evidence_many(ingest_ids=dead_ingests)
+        if model_usage is not None and dead_ingests else {}
+    )
+    for unit, ingest_id, retries, dead in pending:
         if dead:
-            if (
-                model_usage is None
-                or unit.authority is None
-                or unit.proving_run_id != f"native-source:{unit.observation_digest}"
-            ):
-                continue
-            evidence = model_usage.graphiti_ingest_retry_evidence(
-                ingest_id=unit.ingest_id,
-            )
+            evidence = retry_evidence[ingest_id]
             # Credit only proved local refusals in the original allowance.
             # Later failures cannot mint further credits: at most three useful
             # provider attempts and six total attempts, with history intact.
@@ -828,7 +834,7 @@ def _queue(
                 evidence.unresolved_attempts
                 or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
                 or retries >= limit
-                or next_graphiti_attempt_number(unpublished, unit.ingest_id) > limit
+                or next_graphiti_attempt_number(unpublished, ingest_id) > limit
             ):
                 continue
         if (
@@ -843,7 +849,7 @@ def _queue(
                 unit.revision_id,
                 unit.chunk_ordinal,
                 retries,
-                unit.ingest_id,
+                ingest_id,
                 unit,
             )
         )

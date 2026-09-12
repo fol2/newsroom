@@ -2,6 +2,7 @@ from contextlib import contextmanager, nullcontext
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -245,6 +246,63 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
         assert metadata_only.revision_digest == returned.revision_digest
 
 
+def test_native_source_reobservation_reuses_journal_units_after_current_checks(tmp_path, monkeypatch):
+    args = _args(tmp_path, monkeypatch)
+    args["principal_id"] = OPERATOR_PRINCIPAL_ID
+    args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
+    retained, admitted, fetched = {}, [], []
+    page = [_document()]
+    permitted = [True]
+    instant = [datetime(2026, 9, 8, 12, tzinfo=UTC)]
+    licence = _licence()
+    with open_native_runtime(**args) as runtime:
+        def admit(request, data, **kwargs):
+            admitted.append(request.admission_type)
+            return runtime.authority.objects.admit(request, data, **kwargs)
+
+        def fetch(url):
+            fetched.append(url)
+            return 200, ATOM if url == SOURCE_URLS["UK-01"] else page[0]
+
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources,
+            objects=SimpleNamespace(
+                admit=admit, hydrate=runtime.authority.objects.hydrate,
+                latest_access_decision=runtime.authority.objects.latest_access_decision,
+            ),
+            proof=runtime.proof, definition_ids={"UK-01": _seed_uk01(runtime)},
+            licence=SimpleNamespace(for_source=lambda **kw: (
+                licence.for_source(**kw) if permitted[0] else SimpleNamespace(decision="DENIED")
+            )), dispatch_fence=lambda *_: nullcontext(), fetch=fetch,
+            retained_units=retained,
+            clock=lambda: instant[0],
+        )
+        first = intake.poll()[0]
+        assert first.status == "READY", first
+        retained[first.units[0].revision_id] = first.units
+        admitted.clear()
+        replay = intake.poll()[0]
+        assert replay.units == first.units
+        assert fetched == [SOURCE_URLS["UK-01"], "https://www.gov.uk/api/content/item-1"] * 2
+        # Fresh observations remain governed; unchanged corpus chunks are not re-admitted.
+        assert admitted == ["source.native-observation", "source.native-observation"]
+        retained[first.units[0].revision_id] = tuple(
+            replace(unit, authority=replace(unit.authority, definition_version_id="another-version"))
+            for unit in first.units
+        )
+        held = intake.poll()[0]
+        assert held.item_holds == (("https://www.gov.uk/item-1", "SOURCE_RETAINED_REVISION_BINDING_HOLD"),)
+        retained[first.units[0].revision_id] = first.units
+        page[0] = _document(body="A newly changed complete document.", updated="2026-09-08T13:00:00Z")
+        instant[0] = datetime(2026, 9, 8, 14, tzinfo=UTC)
+        changed = intake.poll()[0]
+        assert changed.status == "READY" and changed.units[0].revision_id != first.units[0].revision_id
+        permitted[0] = False
+        before = len(fetched)
+        assert intake.poll()[0].reason_code == "CURRENT_RIGHTS_HOLD"
+        assert len(fetched) == before
+
+
 def test_native_source_poll_holds_oversize_and_duplicate_native_revision(tmp_path, monkeypatch):
     args = _args(tmp_path, monkeypatch)
     args["principal_id"] = OPERATOR_PRINCIPAL_ID
@@ -471,3 +529,50 @@ def test_native_source_stop_propagates_at_feed_and_item_boundaries(tmp_path, mon
     assert len(fences) == stop_at
     assert len(fetches) == stop_at - 1
     assert held == []
+
+
+def test_manual_network_fetches_are_bounded_parallel_and_writes_stay_serial(tmp_path, monkeypatch):
+    import threading
+    args = _args(tmp_path, monkeypatch)
+    args.update(principal_id=OPERATOR_PRINCIPAL_ID, authority_domain=OPERATOR_AUTHORITY_DOMAIN)
+    barrier = threading.Barrier(2)
+    workers = set()
+    writes = []
+    main_thread = threading.get_ident()
+    fenced = []
+    @contextmanager
+    def fence(*args):
+        assert threading.get_ident() == main_thread
+        fenced.append(args)
+        try:
+            yield
+        finally:
+            fenced.pop()
+    def fetch(url):
+        if url == SOURCE_URLS['UK-03']:
+            return 200, _manual()
+        assert len(fenced) == 2
+        workers.add(threading.get_ident())
+        barrier.wait(timeout=2)
+        return 200, _manual_section(int(url[-1]))
+    with open_native_runtime(**args) as runtime:
+        intake = NativeSourceIntake(
+            sources=runtime.authority.sources, objects=runtime.authority.objects,
+            proof=runtime.proof, definition_ids={'UK-03': _seed_missing(runtime, 'UK-03')},
+            licence=_licence(), dispatch_fence=fence, fetch=fetch,
+            clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
+        )
+        original = intake._retain_item
+        def retain(*a, **kw):
+            assert not fenced
+            writes.append(threading.get_ident())
+            return original(*a, **kw)
+        monkeypatch.setattr(intake, '_retain_item', retain)
+        disposition = intake.poll()[SOURCE_IDS.index('UK-03')]
+        assert disposition.status == 'READY', disposition.item_holds
+        assert len(workers) == 2 and main_thread not in workers
+        assert writes == [main_thread, main_thread]
+        assert [unit.canonical_url for unit in disposition.units] == [
+            'https://www.gov.uk/guidance/immigration-rules/part-1',
+            'https://www.gov.uk/guidance/immigration-rules/part-2',
+        ]

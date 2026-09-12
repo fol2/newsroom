@@ -2575,21 +2575,44 @@ class ModelUsageService:
         )
         return evidence
 
+    def graphiti_ingest_retry_evidence_many(
+        self, *, ingest_ids: tuple[str, ...],
+    ) -> dict[str, GraphitiIngestRetryEvidence]:
+        """Authenticate one queue's retry history once in one read snapshot."""
+        return {
+            ingest_id: evidence
+            for ingest_id, (evidence, _) in self._graphiti_ingest_retry_evidence_batch(
+                ingest_ids=ingest_ids,
+            ).items()
+        }
+
     def _graphiti_ingest_retry_evidence(
-        self, *, ingest_id: str, before_attempt_number: int | None = None
+        self, *, ingest_id: str, before_attempt_number: int | None = None,
     ) -> tuple[GraphitiIngestRetryEvidence, int]:
-        _token(ingest_id, field="Graphiti ingest id")
+        return self._graphiti_ingest_retry_evidence_batch(
+            ingest_ids=(ingest_id,), before_attempt_number=before_attempt_number,
+        )[ingest_id]
+
+    def _graphiti_ingest_retry_evidence_batch(
+        self, *, ingest_ids: tuple[str, ...], before_attempt_number: int | None = None,
+    ) -> dict[str, tuple[GraphitiIngestRetryEvidence, int]]:
+        ingest_ids = tuple(dict.fromkeys(ingest_ids))
+        for ingest_id in ingest_ids:
+            _token(ingest_id, field="Graphiti ingest id")
+        if not ingest_ids:
+            return {}
         if before_attempt_number is not None and (
             type(before_attempt_number) is not int or before_attempt_number <= 0
         ):
             raise ModelUsageIntegrityError("Graphiti retry boundary differs")
         connection = self._connection()
         try:
+            connection.execute("BEGIN")
             envelope_rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
                 "ORDER BY envelope_id"
-            ).fetchall()
+            )
             envelopes: dict[str, WorkEnvelope] = {}
             attempts: dict[str, int] = {}
             for row in envelope_rows:
@@ -2605,7 +2628,7 @@ class ModelUsageService:
                         "retained Graphiti envelope binding differs"
                     )
                 envelopes[envelope.envelope_id] = envelope
-                if envelope.ingest_id != ingest_id:
+                if envelope.ingest_id not in ingest_ids:
                     continue
                 prefix, separator, suffix = str(
                     envelope.graphiti_attempt_id or ""
@@ -2618,7 +2641,7 @@ class ModelUsageService:
                         WorkloadClass.GRAPHITI_EMBEDDING,
                     }
                     or separator != ":"
-                    or prefix != ingest_id
+                    or prefix != envelope.ingest_id
                     or not suffix.isdigit()
                     or int(suffix) <= 0
                 ):
@@ -2626,7 +2649,10 @@ class ModelUsageService:
                         "retained Graphiti envelope binding differs"
                     )
                 attempt = int(suffix)
-                if attempt in attempts.values():
+                if any(
+                    number == attempt and envelopes[key].ingest_id == envelope.ingest_id
+                    for key, number in attempts.items()
+                ):
                     raise ModelUsageIntegrityError(
                         "retained Graphiti attempt identity is duplicated"
                     )
@@ -2637,9 +2663,9 @@ class ModelUsageService:
                 "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
                 "FROM model_work_outcomes ORDER BY envelope_id"
             ):
-                if str(row[1]) not in attempts:
-                    continue
                 record = _object(row[4])
+                if str(row[1]) not in attempts and record.get("envelope_id") not in attempts:
+                    continue
                 unsigned = dict(record)
                 retained_digest = unsigned.pop("outcome_digest", None)
                 if (
@@ -2667,10 +2693,10 @@ class ModelUsageService:
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=a.invocation_id "
                 "ORDER BY a.envelope_id,a.leaf_ordinal"
-            ).fetchall()
+            )
             by_attempt: dict[
-                int, list[tuple[InvocationAllocation, InvocationTerminal | None]]
-            ] = {attempt: [] for attempt in attempts.values()}
+                str, list[tuple[InvocationAllocation, InvocationTerminal | None]]
+            ] = {envelope_id: [] for envelope_id in attempts}
             for row in allocation_rows:
                 allocation = _allocation_from_record(_object(row[13]))
                 if tuple(row[index] for index in range(13)) != (
@@ -2721,83 +2747,88 @@ class ModelUsageService:
                         raise ModelUsageIntegrityError(
                             "retained Graphiti terminal binding differs"
                         )
-                by_attempt[attempt].append((allocation, terminal))
+                by_attempt[allocation.envelope_id].append((allocation, terminal))
 
-            selected_attempts = {
-                envelope_id: attempt
-                for envelope_id, attempt in attempts.items()
-                if before_attempt_number is None or attempt < before_attempt_number
-            }
-            zero: list[int] = []
-            settled: list[int] = []
-            unresolved: list[int] = []
-            for envelope_id, attempt in sorted(
-                selected_attempts.items(), key=lambda item: item[1]
-            ):
-                leaves = by_attempt[attempt]
-                if envelope_id not in work_outcomes:
-                    unresolved.append(attempt)
-                    continue
-                if not leaves:
-                    # A terminal controller refusal has no provider allocation.
-                    # It counts toward raw attempts but is not proof of a zero leaf.
-                    continue
-                attempt_zero = True
-                attempt_dispatched = False
-                attempt_unresolved = False
-                for allocation, terminal in leaves:
-                    if terminal is None:
-                        attempt_unresolved = True
+            result = {}
+            for ingest_id in ingest_ids:
+                selected_attempts = {
+                    envelope_id: attempt
+                    for envelope_id, attempt in attempts.items()
+                    if envelopes[envelope_id].ingest_id == ingest_id
+                    and (before_attempt_number is None or attempt < before_attempt_number)
+                }
+                zero: list[int] = []
+                settled: list[int] = []
+                unresolved: list[int] = []
+                for envelope_id, attempt in sorted(
+                    selected_attempts.items(), key=lambda item: item[1]
+                ):
+                    leaves = by_attempt[envelope_id]
+                    if envelope_id not in work_outcomes:
+                        unresolved.append(attempt)
                         continue
-                    policy = _policy_for_allocation(connection, allocation)
-                    self._validate_terminal(
-                        terminal,
-                        allocation.workload_class,
-                        policy,
-                        requested_max_output_tokens=allocation.max_output_tokens,
-                    )
-                    if _is_exact_pre_dispatch_zero(terminal):
+                    if not leaves:
+                        # A terminal controller refusal has no provider allocation.
+                        # It counts toward raw attempts but is not proof of a zero leaf.
                         continue
-                    attempt_zero = False
-                    if terminal.dispatch_at is None or not _has_exact_dispatch(
-                        connection, terminal
-                    ):
-                        attempt_unresolved = True
-                        continue
-                    if terminal.usage_status is UsageStatus.REPORTED:
-                        _require_reported_telemetry(connection, terminal)
-                        attempt_dispatched = True
-                    elif _valid_native_disposition(
-                        connection,
-                        allocation=allocation,
-                        terminal=terminal,
-                    ) is not None:
-                        attempt_dispatched = True
+                    attempt_zero = True
+                    attempt_dispatched = False
+                    attempt_unresolved = False
+                    for allocation, terminal in leaves:
+                        if terminal is None:
+                            attempt_unresolved = True
+                            continue
+                        policy = _policy_for_allocation(connection, allocation)
+                        self._validate_terminal(
+                            terminal,
+                            allocation.workload_class,
+                            policy,
+                            requested_max_output_tokens=allocation.max_output_tokens,
+                        )
+                        if _is_exact_pre_dispatch_zero(terminal):
+                            continue
+                        attempt_zero = False
+                        if terminal.dispatch_at is None or not _has_exact_dispatch(
+                            connection, terminal
+                        ):
+                            attempt_unresolved = True
+                            continue
+                        if terminal.usage_status is UsageStatus.REPORTED:
+                            _require_reported_telemetry(connection, terminal)
+                            attempt_dispatched = True
+                        elif _valid_native_disposition(
+                            connection,
+                            allocation=allocation,
+                            terminal=terminal,
+                        ) is not None:
+                            attempt_dispatched = True
+                        else:
+                            attempt_unresolved = True
+                    if attempt_unresolved:
+                        unresolved.append(attempt)
+                    elif attempt_zero:
+                        zero.append(attempt)
+                    elif attempt_dispatched:
+                        settled.append(attempt)
                     else:
-                        attempt_unresolved = True
-                if attempt_unresolved:
-                    unresolved.append(attempt)
-                elif attempt_zero:
-                    zero.append(attempt)
-                elif attempt_dispatched:
-                    settled.append(attempt)
-                else:
-                    unresolved.append(attempt)
+                        unresolved.append(attempt)
 
-            attempt_numbers = tuple(sorted(selected_attempts.values()))
-            settled_attempts = tuple(settled)
-            return (
-                GraphitiIngestRetryEvidence(
-                    attempt_numbers=attempt_numbers,
-                    zero_dispatch_attempts=tuple(zero),
-                    settled_provider_attempts=settled_attempts,
-                    latest_settled_provider_attempt=(
-                        settled_attempts[-1] if settled_attempts else None
+                attempt_numbers = tuple(sorted(selected_attempts.values()))
+                settled_attempts = tuple(settled)
+                result[ingest_id] = (
+                    GraphitiIngestRetryEvidence(
+                        attempt_numbers=attempt_numbers,
+                        zero_dispatch_attempts=tuple(zero),
+                        settled_provider_attempts=settled_attempts,
+                        latest_settled_provider_attempt=(
+                            settled_attempts[-1] if settled_attempts else None
+                        ),
+                        unresolved_attempts=tuple(unresolved),
                     ),
-                    unresolved_attempts=tuple(unresolved),
-                ),
-                sum(len(leaves) for leaves in by_attempt.values()),
-            )
+                    sum(len(leaves) for key, leaves in by_attempt.items()
+                        if envelopes[key].ingest_id == ingest_id),
+                )
+            return result
         finally:
             connection.close()
 

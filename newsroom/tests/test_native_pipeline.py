@@ -499,6 +499,44 @@ def test_native_pipeline_retries_a_bounded_acquisition_hold_next_cycle(tmp_path,
         connection.close()
 
 
+@pytest.mark.parametrize("reason", (
+    "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD", "NO_QUALIFYING_NEW_INFORMATION",
+    "EDITORIAL_ADMISSION_HOLD",
+))
+def test_native_pipeline_revalidates_only_repairable_holds_once_per_contract(tmp_path, monkeypatch, reason):
+    pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
+    pipeline._assessment_contract_version = "new-contract"
+    journal.land((units[0],))
+    journal.advance(units[0].revision_id, stage="EVIDENCE_HOLD", facts={
+        "graphiti_receipts": [{"retained": True}],
+        "candidate_version_id": "candidate:one", "reason": reason,
+        "editorial_hold_reason_codes": (
+            ["INVALID_GOVERNED_CLAIM_EVIDENCE", "UNQUALIFIED_HEADLINE_CLAIM"]
+            if reason == "EDITORIAL_ADMISSION_HOLD" else []
+        ),
+    })
+    dispositions[0] = ()
+
+    def publish(*, revision_id, candidate_version_id):
+        calls.append(("revalidate", revision_id))
+        journal.advance(revision_id, stage="EVIDENCE_HOLD", facts={
+            **journal.progress[revision_id]["facts"],
+            "assessment_contract_version": pipeline._assessment_contract_version,
+        })
+
+    pipeline._publish = NS(advance=publish)
+    try:
+        for cycle in ("first", "unchanged"):
+            pipeline.tick(cycle_id=cycle)
+        expected = int(reason != "NO_QUALIFYING_NEW_INFORMATION")
+        assert len([call for call in calls if call[0] == "revalidate"]) == expected
+        pipeline._assessment_contract_version = "next-contract"
+        pipeline.tick(cycle_id="changed-contract")
+        assert len([call for call in calls if call[0] == "revalidate"]) == 2 * expected
+    finally:
+        connection.close()
+
+
 def test_native_pipeline_honours_global_stop_before_source_poll(tmp_path, monkeypatch):
     pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
     def stop(): raise VetoError("owner stop")
