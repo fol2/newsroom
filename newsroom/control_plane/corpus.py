@@ -201,12 +201,37 @@ class CorpusIngestUnit:
 
     @property
     def ingest_id(self) -> str:
+        # Reuse identical digest inputs only within this property read. Nothing
+        # is cached on the unit or added to its retained dataclass wire shape.
+        revision_digest = self.revision_digest
+        representation_digest = representation_digest_for(
+            source_id=self.source_id,
+            item_key=self.item_key,
+            revision_digest=revision_digest,
+            published_at=self.published_at,
+            updated_at=self.updated_at,
+        )
+        revision_id = (
+            self.authority.revision_id if self.authority is not None else str(
+                observation_authority_ids(
+                    source_id=self.source_id,
+                    item_key=self.item_key,
+                    revision_digest=revision_digest,
+                    representation_digest=representation_digest,
+                    rights_authority_run_id=self.proving_run_id,
+                    rights_gate_id=f"RIGHTS_{self.source_id}",
+                    rights_gate_reason="evaluation fixture",
+                    published_at=self.published_at,
+                    updated_at=self.updated_at,
+                )[4]
+            )
+        )
         return ingest_key(
             source_id=self.source_id,
             item_key=self.item_key,
-            content_digest_value=self.revision_digest,
-            revision_id=self.revision_id,
-            representation_digest=self.representation_digest,
+            content_digest_value=revision_digest,
+            revision_id=revision_id,
+            representation_digest=representation_digest,
             published_at=self.published_at,
             updated_at=self.updated_at,
             chunk_ordinal=self.chunk_ordinal,

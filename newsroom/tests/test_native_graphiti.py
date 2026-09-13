@@ -928,7 +928,7 @@ def test_terminal_hold_identity_work_is_bounded_per_independent_advance(
             assert not queued
             assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 0
             assert (len(identity_reads), len(body_characters), sum(body_characters)) == (
-                chunks, 2 * chunks, 2 * chunks * len(base.body),
+                chunks, chunks, chunks * len(base.body),
             )
     finally:
         connection.close()
