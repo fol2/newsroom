@@ -13,6 +13,8 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
     InvocationAllocation,
+    InvocationEfficiencyPolicy,
+    UsageComponents,
     ModelUsageService,
     WorkEnvelope,
     WorkloadClass,
@@ -118,7 +120,20 @@ def _allocation(
     ingest_id=None,
 ):
     workload_value = workload.value
-    policy = digest_canonical({"policy": workload_value})
+    typed_policy = InvocationEfficiencyPolicy.create(
+        policy_id="qualification-policy", version="v1", workload_class=workload,
+        provider=provider, route=route, model="fixture", reasoning="none",
+        one_turn=True, exact_input=True, skills_enabled=False, tools_enabled=False,
+        mcp_enabled=False, prior_message_count=0, max_prompt_bytes=10,
+        max_context_tokens=10, max_output_tokens=1, max_total_tokens=10,
+        prompt_contract_version="qualification-v1",
+        output_schema_digest=digest_canonical({"schema": 1}),
+        allowed_context_identities=("qualification-context",),
+        allowed_config_identities=("qualification-config",),
+        hard_estimate_ceiling_tokens=None, evidence_digest=digest_canonical({"evidence": 1}),
+        qualified=True,
+    )
+    policy = typed_policy.canonical_digest
     allocated_at = datetime(2026, 9, 9, tzinfo=UTC)
     graphiti = workload in {
         WorkloadClass.GRAPHITI_CHAT_PRIMARY,
@@ -178,7 +193,7 @@ def _allocation(
         recovery_deadline_at=allocated_at + timedelta(minutes=1),
         parent_invocation_id=None,
     )
-    policy_record = canonical_json_bytes({"policy": policy}).decode()
+    policy_record = canonical_json_bytes(typed_policy.as_record()).decode()
     envelope_value = envelope.as_record()
     allocation_value = allocation.as_record()
     assert allocation_value["invocation_policy_digest"] == policy
@@ -214,18 +229,26 @@ def _allocation(
                 if usage_status == "UNREPORTED" else None
             ),
             "usage_status": usage_status,
-            "components": {"total_tokens": 1, "provenance": "PROVIDER_REPORTED"},
+            "components": UsageComponents(
+                total_tokens=None if usage_status == "UNREPORTED" else 1,
+                provenance="UNAVAILABLE" if usage_status == "UNREPORTED" else "PROVIDER_REPORTED",
+            ).as_record(),
             "dispatch_at": "2026-09-09T00:00:01.000000Z",
             "completed_at": "2026-09-09T00:00:02.000000Z",
             "observed_at": "2026-09-09T00:00:02.000000Z",
-            "provider_telemetry_digest": digest_canonical({"telemetry": 1}),
+            "provider_telemetry_digest": (
+                None if usage_status == "UNREPORTED" else digest_canonical({"telemetry": 1})
+            ),
             "raw_telemetry_pointer": None,
             "estimate_policy_digest": None,
             "estimate_calculation": None,
             "pre_dispatch_zero_proved": False,
-            "od_011_reference": None,
+            "od_011_reference": (
+                "OD-011:FIXTURE" if native_embedding
+                or workload is WorkloadClass.GRAPHITI_EMBEDDING else None
+            ),
             "subscription_cli_chat_not_cash_debited": (
-                workload is WorkloadClass.GRAPHITI_CHAT_PRIMARY
+                not native_embedding and workload is not WorkloadClass.GRAPHITI_EMBEDDING
             ),
             "policy_breach": None,
         }
@@ -282,6 +305,42 @@ def _conservative_disposition(connection, invocation):
          record["observed_at"], "ESTIMATED", canonical_json_bytes(record).decode()),
     )
     connection.commit()
+
+
+def test_pending_usage_does_not_hide_a_later_policy_breach(tmp_path):
+    from newsroom.control_plane.native_qualification import NativeQualificationPending
+
+    connection = _open(tmp_path / "pending-and-breach.sqlite3")
+    try:
+        _cycle(connection)
+        _allocation(connection, usage_status="UNREPORTED")
+        _allocation(connection, usage_status="UNREPORTED",
+                    workload=WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING)
+        last = connection.execute(
+            "SELECT invocation_id FROM model_invocation_allocations "
+            "ORDER BY allocated_at DESC,invocation_id DESC LIMIT 1"
+        ).fetchone()[0]
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (last,),
+        ).fetchone()[0])
+        record["policy_breach"] = "INVOCATION_TOTAL_CEILING_EXCEEDED"
+        record["terminal_digest"] = ""
+        record["terminal_digest"] = digest_canonical(record)
+        connection.execute(
+            "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? "
+            "WHERE invocation_id=?",
+            (record["terminal_digest"], canonical_json_bytes(record).decode(), last),
+        )
+        connection.commit()
+        with pytest.raises(NativeQualificationError, match="unresolved") as failure:
+            record_qualification(connection, IDENTITY)
+        assert not isinstance(failure.value, NativeQualificationPending)
+        assert connection.execute(
+            "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
 
 
 def test_exact_identity_cycle_with_evidenced_hold_qualifies(tmp_path):

@@ -240,6 +240,91 @@ def test_continuous_qualification_failure_closes_without_second_cycle(
         assert terminal == ("COMPLETE",)
 
 
+@pytest.mark.parametrize("settle_after_first_tick,once,corrupt_total", [
+    (False, False, False), (True, False, False), (False, True, False),
+    (False, False, True), (False, True, True),
+])
+def test_unreported_usage_defers_qualification_without_reopening_pipeline(
+    tmp_path, monkeypatch, settle_after_first_tick, once, corrupt_total,
+):
+    from newsroom.control_plane.native_qualification import (
+        NativeQualificationError, NativeQualificationPending, record_qualification,
+    )
+    from newsroom.tests.test_native_qualification import (
+        IDENTITY, _allocation, _conservative_disposition, _cycle, _open,
+    )
+
+    connection = _open(tmp_path / "unpublished.sqlite3")
+    journal = _cycle(connection)
+    invocation = _allocation(connection, usage_status="UNREPORTED")
+    if corrupt_total:
+        from newsroom.authority.canonical import canonical_json_bytes
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (invocation,),
+        ).fetchone()[0])
+        record["components"]["total_tokens"] = 1
+        record["terminal_digest"] = ""
+        record["terminal_digest"] = digest_canonical(record)
+        connection.execute(
+            "UPDATE model_invocation_terminals SET terminal_digest=?,record_json=? "
+            "WHERE invocation_id=?",
+            (record["terminal_digest"], canonical_json_bytes(record).decode(), invocation),
+        )
+        connection.commit()
+    original_terminal = connection.execute(
+        "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+        (invocation,),
+    ).fetchone()
+    report = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
+    factory, opened = _pipeline(monkeypatch, lambda _: report)
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = IDENTITY
+            yield pipeline
+
+    waits = []
+
+    def wait(_seconds):
+        waits.append(True)
+        if len(waits) == 1:
+            assert connection.execute(
+                "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+            ).fetchone() == (0,)
+            if settle_after_first_tick:
+                _conservative_disposition(connection, invocation)
+        return len(waits) == 2
+
+    try:
+        service = _service(
+            tmp_path, bound, qualify_once=record_qualification, wait=wait,
+        )
+        if corrupt_total:
+            with pytest.raises(NativeQualificationError, match="semantics") as failure:
+                service.run(once=once)
+            assert not isinstance(failure.value, NativeQualificationPending)
+            assert waits == []
+        elif once:
+            with pytest.raises(NativeQualificationPending, match="unresolved"):
+                service.run(once=True)
+            assert waits == []
+        else:
+            result = service.run()
+            assert result.outcome == "COMPLETE" and len(waits) == 2
+        assert opened == ["open", "close"]
+        assert connection.execute(
+            "SELECT count(*) FROM ledger WHERE kind='NATIVE_SERVICE_QUALIFICATION'"
+        ).fetchone() == (int(settle_after_first_tick),)
+        assert connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (invocation,),
+        ).fetchone() == original_terminal
+    finally:
+        connection.close()
+
+
 def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, monkeypatch):
     factory, opened = _pipeline(
         monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(RuntimeError("secret")),

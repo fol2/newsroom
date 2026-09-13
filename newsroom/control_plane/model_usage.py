@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
@@ -39,6 +39,9 @@ from newsroom.control_plane.issue_790_step16_activation import (
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
+if TYPE_CHECKING:
+    from newsroom.control_plane.corpus import CorpusIngestUnit
+
 MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v3"
 MODEL_USAGE_INTERFACE_SCHEMA_VERSION = "newsroom.model-usage.v4"
 MODEL_USAGE_MIGRATION_ID = "model-usage-v4-conservative-disposition"
@@ -57,6 +60,9 @@ NATIVE_EMBEDDING_TIMEOUT_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
 )
 NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE = (
     "NATIVE_AUTONOMOUS_OPENROUTER_EMBEDDING_TIMEOUT"
+)
+NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE = (
+    "NATIVE_AUTONOMOUS_GRAPHITI_EMBEDDING_CANCELLATION"
 )
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
@@ -750,7 +756,10 @@ def _valid_native_disposition(
     if authority_scope not in {
         NATIVE_AUTONOMOUS_USAGE_SCOPE,
         NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+        NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
     }:
+        if row[6] == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
+            raise ModelUsageIntegrityError("native cancellation disposition scope differs")
         return None
     policy = _policy_for_allocation(connection, allocation)
     if authority_scope == NATIVE_AUTONOMOUS_USAGE_SCOPE:
@@ -761,6 +770,13 @@ def _valid_native_disposition(
             envelope=validated_native_envelope or _native_envelope(connection, allocation),
         )
         conservative_total = policy.max_total_tokens
+    elif authority_scope == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
+        if row[11] != _json(record):
+            raise ModelUsageIntegrityError("native cancellation disposition is not canonical")
+        expected_scope = _native_graphiti_embedding_cancellation_authority(
+            connection, allocation=allocation, terminal=terminal, policy=policy,
+        )
+        conservative_total = max(policy.max_total_tokens, allocation.prompt_bytes)
     else:
         if (
             allocation.workload_class
@@ -805,7 +821,10 @@ def _valid_native_disposition(
             policy.max_total_tokens, allocation.prompt_bytes
         )
     scope_digest = digest_canonical(expected_scope)
-    if authority_scope == NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE and any(
+    if authority_scope in {
+        NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+        NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+    } and any(
         record.get(key) != value for key, value in expected_scope.items()
     ):
         raise ModelUsageIntegrityError("native conservative disposition differs")
@@ -880,13 +899,33 @@ def _valid_native_embedding_timeout_disposition_record(
     return retained == dict(disposition_record)
 
 
+def _valid_native_graphiti_embedding_cancellation_disposition_record(
+    connection: sqlite3.Connection,
+    *,
+    allocation_record: Mapping[str, object],
+    terminal_record: Mapping[str, object],
+    disposition_record: Mapping[str, object],
+) -> bool:
+    if disposition_record.get("authority_scope") != NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
+        return False
+    try:
+        retained = _valid_native_disposition(
+            connection, allocation=_allocation_from_record(allocation_record),
+            terminal=_terminal_from_record(terminal_record),
+        )
+    except ModelUsageIntegrityError:
+        return False
+    return retained == dict(disposition_record)
+
+
 def _native_disposed_invocation_ids(connection: sqlite3.Connection) -> set[str]:
     rows = connection.execute(
         "SELECT invocation_id FROM model_usage_conservative_dispositions "
-        "WHERE json_extract(record_json,'$.authority_scope') IN (?,?)",
+        "WHERE json_extract(record_json,'$.authority_scope') IN (?,?,?)",
         (
             NATIVE_AUTONOMOUS_USAGE_SCOPE,
             NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
+            NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
         ),
     ).fetchall()
     result: set[str] = set()
@@ -947,28 +986,274 @@ def _native_envelope(
     ):
         raise ModelUsageIntegrityError("native conservative attempt binding differs")
 
-    # The native journal reconstructs canonical LANDED units and their exact
-    # source-observation authority before this controller-scoped disposition.
-    from newsroom.control_plane.native_progress import NativeRevisionJournal
-
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
     ).fetchone() is None:
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
-    journal = NativeRevisionJournal(connection)
-    if not any(
-        unit.ingest_id == envelope.ingest_id
-        and unit.proving_run_id.startswith("native-source:")
-        and unit.authority is not None
-        for units in journal.units.values()
-        for unit in units
-    ):
+    if _native_landed_source_unit(connection, ingest_id=envelope.ingest_id) is None:
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
     return envelope
+
+
+def _native_landed_source_unit(
+    connection: sqlite3.Connection, *, ingest_id: str
+) -> CorpusIngestUnit | None:
+    """Prove one governed unit without replaying unrelated native progress."""
+
+    from newsroom.control_plane.native_progress import (
+        LAND,
+        NativeRevisionJournal,
+        _unit,
+    )
+
+    def decode_landing(
+        row: tuple[object, object],
+    ) -> tuple[str, tuple[CorpusIngestUnit, ...]]:
+        payload_digest, raw_value = row
+        raw = str(raw_value)
+        payload = _object(raw)
+        try:
+            bodies: dict[str, str] = {}
+            units = tuple(_unit(value, bodies) for value in payload.get("units", ()))
+            NativeRevisionJournal._validate_units(units)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            ) from exc
+        if (
+            raw != canonical_json_bytes(payload).decode("utf-8")
+            or payload_digest != digest_bytes(raw.encode("utf-8"))
+            or payload.get("revision_id") != units[0].revision_id
+        ):
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            )
+        return units[0].revision_id, units
+
+    candidate_revisions: set[str] = set()
+    for (raw_value,) in connection.execute(
+        "SELECT payload_json FROM ledger WHERE kind=?", (LAND,)
+    ):
+        try:
+            payload = json.loads(str(raw_value))
+            bodies: dict[str, str] = {}
+            units = tuple(
+                _unit(value, bodies) for value in payload.get("units", ())
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        for unit in units:
+            if unit.ingest_id == ingest_id:
+                candidate_revisions.add(str(payload.get("revision_id")))
+    if len(candidate_revisions) != 1:
+        return None
+    revision_id = next(iter(candidate_revisions))
+
+    retained_units: tuple[CorpusIngestUnit, ...] | None = None
+    for row in connection.execute(
+        "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
+        "AND json_extract(payload_json,'$.revision_id')=?",
+        (LAND, revision_id),
+    ):
+        landed_revision_id, units = decode_landing(row)
+        if landed_revision_id != revision_id:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing differs"
+            )
+        if retained_units is not None and retained_units != units:
+            raise ModelUsageIntegrityError(
+                "native conservative source landing changed"
+            )
+        retained_units = units
+    matches = tuple(
+        unit for unit in retained_units or () if unit.ingest_id == ingest_id
+    )
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+
+def _native_graphiti_embedding_cancellation_authority(
+    connection: sqlite3.Connection,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    policy: InvocationEfficiencyPolicy,
+) -> dict[str, object]:
+    """Re-prove a native cancelled leaf; no exact usage or cash is invented."""
+    if (
+        allocation.workload_class is not WorkloadClass.GRAPHITI_EMBEDDING
+        or allocation.provider != "openrouter"
+        or allocation.route != "GRAPHITI_EMBEDDING"
+        or allocation.model != "openai/text-embedding-3-large"
+        or not policy.qualified or policy.calibration_only
+        or terminal.outcome != "CANCELLED"
+        or terminal.failure_class != "MISSING_PROVIDER_TELEMETRY"
+        or terminal.usage_status is not UsageStatus.UNREPORTED
+        or terminal.components.total_tokens is not None
+        or terminal.dispatch_at is None or terminal.policy_breach is not None
+        or terminal.provider_telemetry_digest is not None
+        or terminal.raw_telemetry_pointer is not None
+        or terminal.pre_dispatch_zero_proved
+        or terminal.subscription_cli_chat_not_cash_debited
+        or terminal.od_011_reference != "OD-011:EVALUATION_GRAPHITI_EMBEDDING"
+        or allocation.prompt_bytes > policy.max_prompt_bytes
+        or allocation.max_output_tokens > policy.max_output_tokens
+        or allocation.context_identity not in policy.allowed_context_identities
+        or allocation.config_identity not in policy.allowed_config_identities
+        or allocation.reasoning != "none"
+        or not allocation.one_turn or not allocation.exact_input
+        or allocation.skills_enabled or allocation.tools_enabled or allocation.mcp_enabled
+        or allocation.prior_message_count != 0
+        or any(getattr(allocation, key) != getattr(policy, key) for key in (
+            "reasoning", "prompt_contract_version", "output_schema_digest",
+            "one_turn", "exact_input", "skills_enabled", "tools_enabled",
+            "mcp_enabled", "prior_message_count",
+        ))
+    ):
+        raise ModelUsageIntegrityError("native Graphiti embedding cancellation is ineligible")
+    if not _has_exact_dispatch(connection, terminal):
+        raise ModelUsageIntegrityError("native Graphiti cancellation lacks exact dispatch")
+    dispatches = connection.execute(
+        "SELECT observed_at,evidence_digest FROM model_transport_observations "
+        "WHERE invocation_id=? AND state='DISPATCH_STARTED'",
+        (allocation.invocation_id,),
+    ).fetchall()
+    if len(dispatches) != 1 or tuple(dispatches[0]) != (_utc_text(terminal.dispatch_at), digest_canonical({
+        "invocation_id": allocation.invocation_id, "provider": allocation.provider,
+        "route": allocation.route, "request_digest": allocation.request_digest,
+    })):
+        raise ModelUsageIntegrityError("native Graphiti cancellation dispatch binding differs")
+    # The parent envelope is CHAT_PRIMARY, but the leaf is EMBEDDING. Do not
+    # widen the existing subscription-disposition entry point to cash workloads.
+    row = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,admitted_at,canonical_digest,"
+        "record_json FROM model_work_envelopes WHERE envelope_id=?",
+        (allocation.envelope_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("native Graphiti cancellation envelope is absent")
+    envelope = _envelope_from_record(_object(row[5]))
+    if tuple(row[:5]) != (
+        envelope.envelope_id, envelope.cycle_id, envelope.workload_class.value,
+        _utc_text(envelope.admitted_at), envelope.canonical_digest,
+    ) or (
+        row[5] != _json(envelope.as_record())
+        or envelope.envelope_id != allocation.envelope_id
+        or envelope.cycle_id != allocation.cycle_id
+        or envelope.workload_class is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
+        or envelope.ingest_id is None
+    ):
+        raise ModelUsageIntegrityError("native Graphiti cancellation envelope differs")
+    prefix, separator, attempt = str(envelope.graphiti_attempt_id or "").rpartition(":")
+    if separator != ":" or prefix != envelope.ingest_id or not attempt.isdigit() or int(attempt) <= 0:
+        raise ModelUsageIntegrityError("native Graphiti cancellation attempt differs")
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
+    ).fetchone() is None:
+        raise ModelUsageIntegrityError("native Graphiti cancellation lacks source landing")
+    unit = _native_landed_source_unit(connection, ingest_id=envelope.ingest_id)
+    if unit is None or unit.proving_run_id != "native-source:" + unit.observation_digest:
+        raise ModelUsageIntegrityError("native Graphiti cancellation lacks source landing")
+
+    row = connection.execute(
+        "SELECT canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
+        "internal_ordinal,semantic_state_digest,provider_attempt_id,"
+        "call_shape_policy_digest,record_json FROM graphiti_internal_requests "
+        "WHERE invocation_id=?", (allocation.invocation_id,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("native Graphiti cancellation request is absent")
+    record = _object(row[8])
+    try:
+        values = dict(record)
+        values.pop("schema_version", None)
+        values["leaf_class"] = GraphitiLeafClass(values["leaf_class"])
+        identity = GraphitiInternalRequestIdentity.create(**values)
+        ModelUsageService._validate_graphiti_identity(allocation, identity)
+    except (KeyError, TypeError, ValueError, ModelUsageAdmissionError) as exc:
+        raise ModelUsageIntegrityError("native Graphiti cancellation request differs") from exc
+    revision = unit.effective_revision
+    if tuple(row[:8]) != (
+        identity.canonical_digest, identity.invocation_id, identity.envelope_id,
+        identity.graphiti_attempt_id, identity.internal_ordinal,
+        identity.semantic_state_digest, identity.provider_attempt_id,
+        identity.call_shape_policy_digest,
+    ) or (
+        row[8] != _json(identity.as_record())
+        or identity.leaf_class is not GraphitiLeafClass.EMBEDDING
+        or identity.semantic_request_class != "EMBEDDING_VECTOR"
+        or identity.response_schema_identity != "embedding-vector"
+        or identity.response_schema_digest != digest_canonical({
+            "schema": "embedding-vector", "model": allocation.model,
+        })
+        or identity.ingest_obligation_id != envelope.ingest_id
+        or identity.graphiti_attempt_id != envelope.graphiti_attempt_id
+        or identity.effective_revision_digest != digest_canonical({
+            "source_id": revision.source_id, "item_key": revision.item_key,
+            "revision_digest": revision.revision_digest,
+            "first_observed_at": revision.first_observed_at,
+        })
+    ):
+        raise ModelUsageIntegrityError("native Graphiti cancellation request binding differs")
+    row = connection.execute(
+        "SELECT context_manifest_digest,provider,route,evidence_package_digest,record_json "
+        "FROM model_invocation_context_manifests WHERE context_manifest_digest=?",
+        (allocation.context_manifest_digest,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageIntegrityError("native Graphiti cancellation manifest is absent")
+    manifest = _object(row[4])
+    unsigned = dict(manifest)
+    retained_digest = unsigned.pop("context_manifest_digest", None)
+    if (
+        row[4] != _json(manifest)
+        or retained_digest != allocation.context_manifest_digest
+        or digest_canonical(unsigned) != retained_digest
+        or tuple(row[:4]) != (
+            retained_digest, allocation.provider, allocation.route,
+            identity.effective_revision_digest,
+        )
+        or any(manifest.get(key) != getattr(allocation, key) for key in (
+            "provider", "route", "model", "reasoning", "prompt_bytes",
+            "prompt_digest", "request_digest", "output_schema_digest",
+            "context_identity", "config_identity", "one_turn", "exact_input",
+            "skills_enabled", "tools_enabled", "mcp_enabled", "prior_message_count",
+        ))
+        or any(manifest.get(key) != getattr(identity, key) for key in (
+            "effective_revision_digest", "ingest_obligation_id", "graphiti_attempt_id",
+            "provider_attempt_id", "semantic_state_digest", "call_shape_policy_digest",
+            "dispatch_authority_digest",
+        ))
+    ):
+        raise ModelUsageIntegrityError("native Graphiti cancellation manifest binding differs")
+    conservative_total = max(policy.max_total_tokens, allocation.prompt_bytes)
+    return {
+        "authority_schema_version": NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION,
+        "authority_scope": NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+        "invocation_id": allocation.invocation_id,
+        "terminal_digest": terminal.terminal_digest,
+        "allocation_digest": allocation.canonical_digest,
+        "policy_digest": policy.canonical_digest,
+        "envelope_digest": envelope.canonical_digest,
+        "ingest_id": envelope.ingest_id,
+        "graphiti_attempt_id": envelope.graphiti_attempt_id,
+        "landed_unit_digest": digest_canonical(asdict(unit)),
+        "internal_request_digest": identity.canonical_digest,
+        "context_manifest_digest": allocation.context_manifest_digest,
+        "request_digest": allocation.request_digest,
+        "request_bytes": allocation.prompt_bytes,
+        "qualified_policy_maximum_total_tokens": policy.max_total_tokens,
+        "conservative_total_tokens": conservative_total,
+        "estimated_policy_ceiling_exceeded": conservative_total > policy.max_total_tokens,
+        "exact_policy_compliance_unknown": True,
+        "cash_spend_known": False,
+    }
 
 
 def _native_disposition_authority(
@@ -2492,8 +2777,8 @@ class ModelUsageService:
                 ) from exc
             raise
 
+    @staticmethod
     def _validate_graphiti_identity(
-        self,
         allocation: InvocationAllocation,
         identity: GraphitiInternalRequestIdentity,
     ) -> None:
@@ -3447,8 +3732,8 @@ class ModelUsageService:
             raise ModelUsageIntegrityError("invocation terminal record differs")
         return terminal
 
+    @staticmethod
     def _validate_terminal(
-        self,
         terminal: InvocationTerminal,
         workload: WorkloadClass,
         policy: InvocationEfficiencyPolicy,
@@ -3960,6 +4245,104 @@ class ModelUsageService:
                     _json(record),
                 ),
             )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def disposition_native_graphiti_embedding_cancellation(
+        self, *, invocation_id: str, observed_at: datetime,
+    ) -> dict[str, object]:
+        """Apply standing native authority without releasing unknown cash spend."""
+        invocation_id = _token(invocation_id, field="invocation id")
+        observed_at_text = _utc_text(observed_at)
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            allocation, terminal = _retained_terminal_allocation(connection, invocation_id)
+            policy = _policy_for_allocation(connection, allocation)
+            authority = _native_graphiti_embedding_cancellation_authority(
+                connection, allocation=allocation, terminal=terminal, policy=policy,
+            )
+            if observed_at < terminal.observed_at:
+                raise ModelUsageIntegrityError("native cancellation disposition precedes terminal")
+            record = _valid_native_disposition(
+                connection, allocation=allocation, terminal=terminal,
+            )
+            if record is None:
+                # Refuse a new estimate when exact evidence already exists.
+                # Later reconciliation may supersede a retained estimate without
+                # invalidating the original cancellation or its historical bound.
+                if connection.execute(
+                    "SELECT 1 FROM model_provider_telemetry WHERE invocation_id=? "
+                    "UNION ALL SELECT 1 FROM model_usage_reconciliations "
+                    "WHERE invocation_id=? LIMIT 1",
+                    (invocation_id, invocation_id),
+                ).fetchone() is not None:
+                    raise ModelUsageIntegrityError("native Graphiti cancellation already has telemetry")
+                scope_digest = digest_canonical(authority)
+                unsigned = {
+                    **authority,
+                    "schema_version": CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+                    "native_scope_digest": scope_digest,
+                    "authority_digest": scope_digest,
+                    "usage_status": UsageStatus.ESTIMATED.value,
+                    "components": UsageComponents(
+                        total_tokens=max(policy.max_total_tokens, allocation.prompt_bytes),
+                        provenance="BOUNDED_ESTIMATE",
+                    ).as_record(),
+                    "estimate_policy_digest": policy.canonical_digest,
+                    "estimate_calculation": "MAX_QUALIFIED_POLICY_TOTAL_OR_EXACT_REQUEST_UTF8_BYTES",
+                    "exact_usage_remains_unknown": True,
+                    "provider_dispatch_preserved": True,
+                    "unknown_spend_released": False,
+                    "observed_at": observed_at_text,
+                }
+                record = {**unsigned, "disposition_digest": digest_canonical(unsigned)}
+                connection.execute(
+                    "INSERT INTO model_usage_conservative_dispositions("
+                    "disposition_digest,invocation_id,terminal_digest,allocation_digest,"
+                    "policy_digest,approved_plan_digest,authority_digest,approved_by,"
+                    "approval_reference,approved_at,observed_at,usage_status,record_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record["disposition_digest"], invocation_id, terminal.terminal_digest,
+                     allocation.canonical_digest, policy.canonical_digest, scope_digest,
+                     scope_digest, NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+                     NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+                     observed_at_text, observed_at_text, UsageStatus.ESTIMATED.value,
+                     _json(record)),
+                )
+            elif record.get("authority_scope") != NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
+                raise ModelUsageIntegrityError("native cancellation disposition scope differs")
+
+            # complete() retained this exact missing-telemetry cause. A valid
+            # estimate may close it, but never another cause or live/unknown leaf.
+            latest = connection.execute(
+                "SELECT state,reason,invocation_id FROM model_usage_route_circuit_events "
+                "WHERE route=? ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
+                (allocation.route,),
+            ).fetchone()
+            if (
+                latest is not None
+                and tuple(latest) == ("OPEN", "MISSING_PROVIDER_TELEMETRY", invocation_id)
+                and connection.execute(
+                    "SELECT 1 FROM model_invocation_allocations a LEFT JOIN "
+                    "model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+                    "WHERE a.route=? AND t.invocation_id IS NULL LIMIT 1",
+                    (allocation.route,),
+                ).fetchone() is None
+                and _canonical_circuit_route(allocation.route) not in _usage_blocking_routes(connection)
+            ):
+                self._append_route_state(
+                    connection, route=allocation.route, state="CLOSED",
+                    reason="NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_DISPOSITION:"
+                    + str(record["disposition_digest"]),
+                    invocation_id=invocation_id, recorded_at=observed_at,
+                )
             connection.commit()
             return record
         except Exception:

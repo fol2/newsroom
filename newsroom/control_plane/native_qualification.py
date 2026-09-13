@@ -19,8 +19,13 @@ from newsroom.increment9.proving import SOURCE_IDS
 from .govuk_evidence import _api_url
 from .model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    ModelUsageService,
+    NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
     WorkloadClass,
+    _policy_for_allocation,
+    _retained_terminal_allocation,
     _valid_native_embedding_timeout_disposition_record,
+    _valid_native_graphiti_embedding_cancellation_disposition_record,
 )
 from .native_progress import LAND, PORTFOLIO, STATE, NativeRevisionJournal
 from .store import LEDGER_GENESIS, append_ledger
@@ -69,6 +74,10 @@ _RETAINED_CONTENT_HOLDS = frozenset({
 
 class NativeQualificationError(ValueError):
     """Raised when retained private-runtime evidence does not qualify."""
+
+
+class NativeQualificationPending(NativeQualificationError):
+    """Valid retained usage remains unknown; no qualification is issued."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +402,7 @@ def _invocations(
         selected = [value for value in selected if value in retained_ids]
         if tuple(sorted(selected)) != retained_ids:
             raise NativeQualificationError("native invocation inventory differs")
+    usage_pending = False
     for invocation_id in selected:
         terminal_row = connection.execute(
             "SELECT terminal_digest,usage_status,record_json "
@@ -412,6 +422,22 @@ def _invocations(
             or digest_canonical(unsigned) != retained_digest
         ):
             raise NativeQualificationError("native model terminal binding differs")
+        if terminal.get("usage_status") == "UNREPORTED":
+            # Unknown usage is pending only after the same retained semantics
+            # used by accounting; a rehashed but impossible total is corruption.
+            try:
+                allocation, typed_terminal = _retained_terminal_allocation(
+                    connection, invocation_id,
+                )
+                breach = ModelUsageService._validate_terminal(
+                    typed_terminal, allocation.workload_class,
+                    _policy_for_allocation(connection, allocation),
+                    requested_max_output_tokens=allocation.max_output_tokens,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise NativeQualificationError("native model terminal semantics differ") from exc
+            if breach is not None:
+                raise NativeQualificationError("native model usage is unresolved")
         reconciliation_rows = tuple(connection.execute(
             "SELECT reconciliation_digest,record_json FROM model_usage_reconciliations "
             "WHERE invocation_id=? ORDER BY observed_at,reconciliation_digest",
@@ -429,7 +455,7 @@ def _invocations(
             ):
                 raise NativeQualificationError("native usage reconciliation differs")
         disposition_row = connection.execute(
-            "SELECT disposition_digest,terminal_digest,usage_status,record_json "
+            "SELECT disposition_digest,terminal_digest,usage_status,record_json,approved_by "
             "FROM model_usage_conservative_dispositions WHERE invocation_id=?",
             (invocation_id,),
         ).fetchone()
@@ -443,6 +469,15 @@ def _invocations(
                 terminal_record=terminal,
                 disposition_record=disposition,
             )
+            if (
+                disposition_row[4] == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE
+                or disposition.get("authority_scope")
+                == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE
+            ) and not _valid_native_graphiti_embedding_cancellation_disposition_record(
+                connection, allocation_record=allocations[invocation_id],
+                terminal_record=terminal, disposition_record=disposition,
+            ):
+                raise NativeQualificationError("native embedding cancellation disposition differs")
             if (
                 retained_digest != disposition_row[0]
                 or digest_canonical(unsigned) != retained_digest
@@ -470,11 +505,16 @@ def _invocations(
             ):
                 raise NativeQualificationError("native usage disposition differs")
             effective = disposition
-        if (
-            effective.get("usage_status") not in {"REPORTED", "ESTIMATED"}
-            or effective.get("policy_breach") is not None
-        ):
+        if effective.get("policy_breach") is not None:
             raise NativeQualificationError("native model usage is unresolved")
+        if effective.get("usage_status") == "UNREPORTED":
+            usage_pending = True
+        elif effective.get("usage_status") not in {"REPORTED", "ESTIMATED"}:
+            raise NativeQualificationError("native model usage is unresolved")
+    # Validate every selected record before deferring: an earlier unknown usage
+    # must not conceal a later corrupt binding or policy breach.
+    if usage_pending:
+        raise NativeQualificationPending("native model usage is unresolved")
     return tuple(sorted(selected))
 
 
@@ -600,6 +640,7 @@ def validate_qualification(
 
 __all__ = [
     "NativeQualificationError",
+    "NativeQualificationPending",
     "RetainedNativeQualification",
     "record_qualification",
     "validate_qualification",

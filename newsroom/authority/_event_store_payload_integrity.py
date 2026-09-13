@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from .canonical import digest_bytes, validate_sha256_digest
@@ -22,6 +23,11 @@ from .types import (
     UtcTimestamp,
     require_scope,
     require_token,
+)
+
+
+_CANONICAL_UUID4 = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
 
 
@@ -108,16 +114,19 @@ class _PayloadAndEnvelopeIntegrity:
             raise AuthorityPersistenceError(
                 "event sequence and versions must be positive"
             )
-        EventId.parse(str(row["event_id"]))
-        CommandId.parse(str(row["command_id"]))
-        PayloadId.parse(str(row["payload_id"]))
-        AggregateId.parse(str(row["aggregate_id"]))
-        AuthenticationContextId.parse(
-            str(row["authentication_context_id"])
-        )
-        AuthorizationDecisionId.parse(
-            str(row["authorization_decision_id"])
-        )
+        for field, identifier_type in (
+            ("event_id", EventId),
+            ("command_id", CommandId),
+            ("payload_id", PayloadId),
+            ("aggregate_id", AggregateId),
+            ("authentication_context_id", AuthenticationContextId),
+            ("authorization_decision_id", AuthorizationDecisionId),
+        ):
+            value = str(row[field])
+            # These validated identities are not returned. Avoid constructing
+            # discarded UUID/typed-ID objects; retain exact parse failures.
+            if _CANONICAL_UUID4.fullmatch(value) is None:
+                identifier_type.parse(value)
         UtcTimestamp.parse(str(row["recorded_at"]))
         for field in (
             "event_type",

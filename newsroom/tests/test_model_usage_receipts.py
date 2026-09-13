@@ -7,6 +7,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from pathlib import Path
@@ -17,7 +18,7 @@ import newsroom.control_plane.issue_790_canary as issue_790_canary_module
 import newsroom.control_plane.issue_790_contract as issue_790_contract_module
 import newsroom.control_plane.issue_790_disposition as issue_790_operation
 import newsroom.control_plane.model_usage as model_usage_module
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.control_plane.graphiti import (
     GRAPHITI_CHAT_PRIMARY_ROUTE,
     GRAPHITI_CONTEXT_IDENTITY,
@@ -76,6 +77,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 )
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.store import (
+    append_ledger,
     connect as connect_unpublished_store,
     insert_graphiti_attempt_receipt,
 )
@@ -2224,6 +2226,136 @@ def test_native_conservative_disposition_uses_qualified_policy_bound(
         recorded_at=T0 + timedelta(seconds=21),
     )
     assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+
+
+def test_native_conservative_disposition_reads_only_its_landed_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect_unpublished_store(str(path))
+    selected_first = replace(_native("selected"), chunk_count=2)
+    selected = replace(
+        selected_first,
+        chunk_ordinal=2,
+        predecessor_ingest_id=selected_first.ingest_id,
+    )
+    unrelated = _native("unrelated")
+    journal = NativeRevisionJournal(connection)
+    journal.land((selected_first, selected))
+    journal.land((unrelated,))
+    for ordinal in range(100):
+        journal.advance(
+            unrelated.revision_id,
+            stage="UNRELATED",
+            facts={"ordinal": ordinal},
+        )
+    append_ledger(
+        connection,
+        "NATIVE_REVISION_LANDED",
+        {
+            "revision_id": selected.revision_id,
+            "units": [asdict(selected_first), asdict(selected)],
+        },
+    )
+    connection.commit()
+    connection.close()
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(
+            service,
+            ingest_id=selected.ingest_id,
+        )
+    )
+
+    def refuse_full_replay(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("native disposition replayed the full journal")
+
+    monkeypatch.setattr(NativeRevisionJournal, "__init__", refuse_full_replay)
+
+    disposition = service.disposition_native_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    assert disposition["authority_scope"] == "NATIVE_AUTONOMOUS_INTERNAL_PIPELINE"
+
+
+def test_native_conservative_disposition_rejects_conflicting_landing(
+    tmp_path: Path,
+) -> None:
+    unit = _land_native_ingest(tmp_path)
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(
+            service,
+            ingest_id=unit.ingest_id,
+        )
+    )
+    conflicting = replace(unit, headline="Contradictory retained headline")
+    connection = connect_unpublished_store(str(tmp_path / "unpublished.sqlite3"))
+    append_ledger(
+        connection,
+        "NATIVE_REVISION_LANDED",
+        {
+            "revision_id": unit.revision_id,
+            "units": [asdict(conflicting)],
+        },
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="native conservative source landing changed",
+    ):
+        service.disposition_native_unreported_subscription_usage(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=terminal.terminal_digest,
+            expected_allocation_digest=allocation.canonical_digest,
+            observed_at=T0 + timedelta(seconds=10),
+        )
+
+
+@pytest.mark.parametrize("mutation", ("digest", "canonical_bytes"))
+def test_native_conservative_landing_requires_exact_canonical_record(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect_unpublished_store(str(path))
+    unit = _native("selected")
+    NativeRevisionJournal(connection).land((unit,))
+    raw = str(
+        connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_REVISION_LANDED'"
+        ).fetchone()[0]
+    )
+    if mutation == "digest":
+        connection.execute(
+            "UPDATE ledger SET payload_digest=? "
+            "WHERE kind='NATIVE_REVISION_LANDED'",
+            (_digest({"wrong": "landing"}),),
+        )
+    else:
+        noncanonical = json.dumps(json.loads(raw), indent=2)
+        connection.execute(
+            "UPDATE ledger SET payload_json=?,payload_digest=? "
+            "WHERE kind='NATIVE_REVISION_LANDED'",
+            (noncanonical, digest_bytes(noncanonical.encode("utf-8"))),
+        )
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="native conservative source landing differs",
+    ):
+        model_usage_module._native_landed_source_unit(
+            connection,
+            ingest_id=unit.ingest_id,
+        )
+    connection.close()
 
 
 @pytest.mark.parametrize(

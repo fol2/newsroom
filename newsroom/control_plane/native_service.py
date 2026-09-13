@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import math
 import os
 import sqlite3
@@ -15,7 +16,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
-from newsroom.control_plane.native_qualification import qualification_report_ready
+from newsroom.control_plane.native_qualification import (
+    NativeQualificationPending, qualification_report_ready,
+)
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.control_plane.store import append_ledger, connect
 from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
@@ -184,8 +187,16 @@ class NativeService:
                         ):
                             if identity is None:
                                 raise ValueError("native qualification requires a runtime identity")
-                            self._qualify_once(ledger, identity)
-                            qualified = True
+                            try:
+                                self._qualify_once(ledger, identity)
+                            except NativeQualificationPending:
+                                if once:
+                                    raise
+                                logging.getLogger(__name__).warning(
+                                    "Native qualification pending: model usage remains unresolved"
+                                )
+                            else:
+                                qualified = True
                         if last.outcome == "DRAINED" or once:
                             break
                         if last.outcome == "COMPLETE":
