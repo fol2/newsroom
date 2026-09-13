@@ -14,6 +14,9 @@ GRAPHITI_FALLBACK_CIRCUIT_SCHEMA_VERSION = (
     "newsroom.graphiti-fallback-circuit-policy.v1"
 )
 _POLICY_PATH = Path(__file__).with_name("graphiti_fallback_circuit_policy_v1.json")
+_NATIVE_POLICY_PATH = Path(__file__).with_name(
+    "native_graphiti_fallback_circuit_policy_v1.json"
+)
 
 
 class FallbackEligibility(StrEnum):
@@ -71,9 +74,10 @@ class GraphitiFallbackCircuitPolicy:
         return GraphitiFallbackDecision(outcome, eligibility, outcome_class)
 
 
-@lru_cache(maxsize=1)
-def load_checked_graphiti_fallback_circuit_policy() -> GraphitiFallbackCircuitPolicy:
-    payload = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))
+def _load_checked_graphiti_fallback_circuit_policy(
+    path: Path,
+) -> GraphitiFallbackCircuitPolicy:
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("checked Graphiti fallback policy is not an object")
     expected_digest = payload.pop("canonical_digest", None)
@@ -121,6 +125,16 @@ def load_checked_graphiti_fallback_circuit_policy() -> GraphitiFallbackCircuitPo
     return policy
 
 
+@lru_cache(maxsize=1)
+def load_checked_graphiti_fallback_circuit_policy() -> GraphitiFallbackCircuitPolicy:
+    return _load_checked_graphiti_fallback_circuit_policy(_POLICY_PATH)
+
+
+@lru_cache(maxsize=1)
+def load_checked_native_graphiti_fallback_circuit_policy() -> GraphitiFallbackCircuitPolicy:
+    return _load_checked_graphiti_fallback_circuit_policy(_NATIVE_POLICY_PATH)
+
+
 def classify_graphiti_fallback(outcome: str) -> GraphitiFallbackDecision:
     """Classify a retained runtime outcome without changing its public spelling."""
 
@@ -135,4 +149,5 @@ __all__ = [
     "GraphitiFallbackDecision",
     "classify_graphiti_fallback",
     "load_checked_graphiti_fallback_circuit_policy",
+    "load_checked_native_graphiti_fallback_circuit_policy",
 ]

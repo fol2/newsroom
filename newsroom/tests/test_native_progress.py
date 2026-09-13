@@ -409,3 +409,53 @@ def test_commit_failure_rolls_back_reference_and_allows_retry(tmp_path, monkeypa
     assert after["ordinal"] == 2
     assert NativeRevisionJournal(connection).progress[revision] == after
     connection.close()
+
+
+def test_portfolio_reference_reopens_and_changes_only_with_committed_inventory(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from newsroom.control_plane import native_progress
+    from newsroom.control_plane.native_source_intake import NativeSourceDisposition
+
+    path = str(tmp_path / "portfolio-reference.sqlite3")
+    connection = connect(path)
+    journal = NativeRevisionJournal(connection)
+    with pytest.raises(ValueError, match="portfolio reference"):
+        journal.portfolio_reference(())
+    first = NativeSourceDisposition("UK-01", "READY", "UNCHANGED")
+    journal.sources((first,))
+    reference = journal.portfolio_reference(journal.portfolio)
+    journal.sources((first,))
+    assert journal.portfolio_reference(journal.portfolio) == reference
+    original = native_progress.append_ledger
+
+    def interrupted(*args):
+        original(*args)
+        raise RuntimeError("append interrupted")
+
+    second = NativeSourceDisposition("UK-01", "HOLD", "CURRENT_RIGHTS_HOLD")
+    with monkeypatch.context() as patch:
+        patch.setattr(native_progress, "append_ledger", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.sources((second,))
+    assert journal.portfolio_reference(journal.portfolio) == reference
+    assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 1
+    connection.close()
+
+    connection = connect(path)
+    try:
+        journal = NativeRevisionJournal(connection)
+        assert journal.portfolio_reference(journal.portfolio) == reference
+        forged = deepcopy(journal.portfolio)
+        forged[0]["reason_code"] = "FORGED"
+        with pytest.raises(ValueError, match="portfolio reference"):
+            journal.portfolio_reference(forged)
+        journal.sources((second,))
+        changed = journal.portfolio_reference(journal.portfolio)
+        assert changed["seq"] > reference["seq"]
+        assert changed["payload_digest"] != reference["payload_digest"]
+        # Mutating the shared logical object also fails its committed-byte proof.
+        journal.portfolio[0]["reason_code"] = "FORGED"
+        with pytest.raises(ValueError, match="portfolio reference"):
+            journal.portfolio_reference(journal.portfolio)
+    finally:
+        connection.close()

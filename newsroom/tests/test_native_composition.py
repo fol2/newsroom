@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import os
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -194,7 +194,8 @@ def test_deployed_continuous_runtime_qualifies_without_prior_qualification_open(
             replacement.replace(authority)
         try:
             yield SimpleNamespace(
-                tick=lambda **_request: NativePipelineReport((), {}, 0)
+                tick=lambda **_request: NativePipelineReport((), {}, 0),
+                terminal_report=asdict,
             )
         finally:
             opens.append("close")

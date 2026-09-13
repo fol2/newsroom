@@ -2,19 +2,32 @@
 
 import json
 import sqlite3
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import timedelta
 
 import pytest
 
 from newsroom.control_plane import model_usage as usage_module
 from newsroom.control_plane.cycle import _graphiti_usage_cycle_id, _queue
+from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
+from newsroom.control_plane.graphiti_fallback_policy import (
+    load_checked_native_graphiti_fallback_circuit_policy,
+)
+from newsroom.control_plane.graphiti_requests import (
+    load_checked_native_graphiti_call_shape_policy,
+)
 from newsroom.control_plane.model_usage import (
     InvocationTerminal, ModelUsageIntegrityError, ModelUsageService, UsageComponents, UsageStatus,
     WorkEnvelope, WorkloadClass,
 )
 from newsroom.control_plane.store import connect, record_graphiti_failure
-from newsroom.tests.test_graphiti_internal_requests import T0, _bound_request, _service_fixture
+from newsroom.control_plane.native_progress import NativeRevisionJournal
+from newsroom.tests.test_graphiti_internal_requests import (
+    EXTRACTED_ENTITIES_SCHEMA,
+    T0,
+    _bound_request,
+    _service_fixture,
+)
 from newsroom.tests.test_model_usage_receipts import _reported
 from newsroom.tests.test_native_graphiti import _native
 
@@ -31,6 +44,9 @@ def _attempt(service, policy, shape, unit, number):
     allocation, identity = _bound_request(
         service=service, envelope=envelope, policy=policy, shape=shape,
         ordinal=1, semantic=f"{unit.ingest_id}:{number}",
+        effective_revision_digest=usage_module.digest_canonical(
+            asdict(unit.effective_revision)
+        ),
     )
     service.allocate_graphiti_request(
         allocation, identity=identity,
@@ -132,6 +148,84 @@ def test_native_retry_rechecks_pending_settlement_without_a_cache(tmp_path):
     assert _proof(service, unit, 3).zero_dispatch_attempts == (1, 2, 3)
     assert [entry[-1] for entry in _queue(connection, (unit,), model_usage=service)] == [unit]
     connection.close()
+
+
+def test_native_retry_requires_the_exact_historical_direct_fallback_event(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    unit = _native("direct-fallback-history")
+    NativeRevisionJournal(connection).land((unit,))
+    connection.close()
+    service = ModelUsageService(str(path))
+    envelope = WorkEnvelope.create(
+        cycle_id=_graphiti_usage_cycle_id(
+            unit, attempt_number=1, requested_cycle_id=None,
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=unit.ingest_id,
+        graphiti_attempt_id=f"{unit.ingest_id}:1",
+    )
+    service.open_envelope(envelope)
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY", reason="QUOTA", invocation_id=None,
+        recorded_at=T0 + timedelta(seconds=1),
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+        effective_revision_digest=usage_module.digest_canonical(
+            asdict(unit.effective_revision)
+        ),
+        ingest_obligation_id=unit.ingest_id,
+        deadline=T0 + timedelta(minutes=3),
+        call_shape_policy=load_checked_native_graphiti_call_shape_policy(),
+        fallback_policy=load_checked_native_graphiti_fallback_circuit_policy(),
+    )
+    assert observer.use_direct_fallback(
+        prompt="source-safe prompt",
+        schema=EXTRACTED_ENTITIES_SCHEMA,
+        semantic_request_class="ExtractedEntities",
+        max_tokens=77,
+    )
+    allocation = observer.before_cli_invocation(
+        provider="grok-build-cli",
+        model="grok-4.6",
+        prompt="source-safe prompt",
+        schema=EXTRACTED_ENTITIES_SCHEMA,
+        semantic_request_class="ExtractedEntities",
+        max_tokens=77,
+    )
+    _settle(service, envelope, allocation, zero=False)
+    assert _proof(service, unit).settled_provider_attempts == (1,)
+
+    with sqlite3.connect(path) as connection:
+        event_digest = connection.execute(
+            "SELECT json_extract(record_json,'$.primary_unavailable_event_digest') "
+            "FROM graphiti_internal_requests WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone()[0]
+        connection.execute(
+            "DELETE FROM model_usage_route_circuit_events WHERE event_digest=?",
+            (event_digest,),
+        )
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="direct fallback primary authority is absent",
+    ):
+        _proof(service, unit)
 
 
 def test_native_retry_probes_unsettled_attempt_above_raw_failure_count(tmp_path):

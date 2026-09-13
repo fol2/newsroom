@@ -782,3 +782,137 @@ def test_qualification_accepts_shared_progress_and_rejects_broken_reference(tmp_
         validate_qualification(connection, IDENTITY)
     assert connection.total_changes == before
     connection.close()
+
+
+def _compact_cycle(connection, journal, *, reference=None, states=None):
+    cycle_id = f"compact-cycle-{connection.execute('SELECT max(seq) FROM ledger').fetchone()[0]}"
+    append_ledger(connection, "NATIVE_SERVICE_CYCLE_STARTED", {
+        "cycle_id": cycle_id, "runtime_identity_digest": IDENTITY,
+    })
+    pipeline = {
+        "source_portfolio_ref": journal.portfolio_reference(journal.portfolio)
+        if reference is None else reference,
+        "revision_states": {"EVIDENCE_HOLD": 1} if states is None else states,
+        "unclassified_revisions": 0,
+    }
+    append_ledger(connection, "NATIVE_SERVICE_CYCLE_TERMINAL", {
+        "runtime_identity_digest": IDENTITY, "cycle_id": cycle_id,
+        "outcome": "COMPLETE", "failure_class": None, "pipeline": pipeline,
+    })
+    connection.commit()
+
+
+def test_compact_qualification_replays_after_restart_and_later_portfolio(tmp_path):
+    path = tmp_path / "compact-reopen.sqlite3"
+    connection = _open(path)
+    journal = _cycle(connection)
+    legacy = record_qualification(connection, IDENTITY)
+    assert validate_qualification(connection, IDENTITY) == legacy
+    _compact_cycle(connection, journal)
+    compact = record_qualification(connection, IDENTITY)
+    assert compact.source_inventory_digest == legacy.source_inventory_digest
+    assert validate_qualification(connection, IDENTITY) == compact
+    # Future source inventory does not rebind the original qualification.
+    _portfolio(journal, next(iter(journal.units.values()))[0], source_override={
+        "observations": (("https://fixture.example/new", "sha256:" + "b" * 64,
+                          "new-admission", "new-access"),),
+    })
+    connection.close()
+    connection = connect(str(path))
+    try:
+        assert validate_qualification(connection, IDENTITY) == compact
+        reopened = NativeRevisionJournal(connection)
+        _compact_cycle(connection, reopened)
+        changed = record_qualification(connection, IDENTITY)
+        assert changed.source_inventory_digest != compact.source_inventory_digest
+        assert validate_qualification(connection, IDENTITY) == changed
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("case", [
+    "missing", "wrong-kind", "future", "stale", "wrong-digest", "bool-seq",
+    "extra-field", "count-mismatch", "same-count-mutation",
+])
+def test_compact_qualification_rejects_inexact_portfolio_reference(tmp_path, case):
+    connection = _open(tmp_path / "bad-reference.sqlite3")
+    try:
+        journal = _cycle(connection)
+        reference = journal.portfolio_reference(journal.portfolio)
+        if case == "wrong-kind":
+            seq, digest = connection.execute(
+                "SELECT seq,payload_digest FROM ledger WHERE kind='NATIVE_REVISION_LANDED'"
+            ).fetchone()
+            reference = {"seq": seq, "payload_digest": digest}
+        elif case == "missing":
+            reference = {"seq": 999999, "payload_digest": reference["payload_digest"]}
+        elif case == "future":
+            reference = {"seq": connection.execute("SELECT max(seq) FROM ledger").fetchone()[0] + 3,
+                         "payload_digest": reference["payload_digest"]}
+        elif case in {"stale", "same-count-mutation"}:
+            sources = json.loads(canonical_json_bytes(journal.portfolio))
+            if case == "same-count-mutation":
+                sources[0]["observations"] = [["https://fixture.example/changed",
+                    "sha256:" + "b" * 64, "admission", "access"]]
+            # Even an equal-value older reference is not the latest portfolio.
+            journal._retain("NATIVE_SOURCE_PORTFOLIO", {"sources": sources})
+        elif case == "wrong-digest":
+            reference = {**reference, "payload_digest": "sha256:" + "0" * 64}
+        elif case == "bool-seq":
+            reference = {**reference, "seq": True}
+        elif case == "extra-field":
+            reference = {**reference, "ordinal": 1}
+        _compact_cycle(connection, journal, reference=reference,
+                       states={"EVIDENCE_HOLD": 2} if case == "count-mismatch" else None)
+        if case == "future":
+            journal._retain("NATIVE_SOURCE_PORTFOLIO", {"sources": list(journal.portfolio)})
+        with pytest.raises(NativeQualificationError):
+            record_qualification(connection, IDENTITY)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("change", ["missing", "kind", "digest", "bytes", "noncanonical"])
+def test_compact_reference_rechecks_exact_row_after_authenticated_inventory(tmp_path, change):
+    from newsroom.control_plane.native_qualification import _ledger, _service_cycle, _terminal_portfolio
+
+    connection = _open(tmp_path / "changed-reference.sqlite3")
+    try:
+        journal = _cycle(connection)
+        _compact_cycle(connection, journal)
+        rows = _ledger(connection)
+        _, _, terminal, payload = _service_cycle(rows, IDENTITY)
+        seq = payload["pipeline"]["source_portfolio_ref"]["seq"]
+        if change == "missing":
+            connection.execute("DELETE FROM ledger WHERE seq=?", (seq,))
+        elif change == "kind":
+            connection.execute("UPDATE ledger SET kind='OTHER' WHERE seq=?", (seq,))
+        elif change == "digest":
+            connection.execute("UPDATE ledger SET digest=? WHERE seq=?", ("sha256:" + "0" * 64, seq))
+        elif change == "bytes":
+            connection.execute("UPDATE ledger SET payload_json='{}' WHERE seq=?", (seq,))
+        else:
+            connection.execute("UPDATE ledger SET payload_json=payload_json || ' ' WHERE seq=?", (seq,))
+        with pytest.raises(NativeQualificationError):
+            _terminal_portfolio(connection, rows, terminal, payload["pipeline"])
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("missing_observation", (False, True))
+def test_compact_reference_preserves_full_source_hold_validation(tmp_path, missing_observation):
+    connection = _open(tmp_path / "compact-hold.sqlite3")
+    try:
+        held = _content_hold("SOURCE_ITEM_METADATA_HOLD")
+        if missing_observation:
+            held["observations"] = ()
+        journal = _cycle(connection, source_override=held)
+        _compact_cycle(connection, journal)
+        if missing_observation:
+            with pytest.raises(NativeQualificationError):
+                record_qualification(connection, IDENTITY)
+        else:
+            retained = record_qualification(connection, IDENTITY)
+            assert validate_qualification(connection, IDENTITY) == retained
+    finally:
+        connection.close()

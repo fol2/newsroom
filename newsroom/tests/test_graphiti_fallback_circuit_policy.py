@@ -7,10 +7,12 @@ from newsroom.control_plane.graphiti_fallback_policy import (
     GraphitiFallbackClass,
     classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
+    load_checked_native_graphiti_fallback_circuit_policy,
 )
 from newsroom.control_plane.graphiti_requests import (
     GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
+    load_checked_native_graphiti_call_shape_policy,
 )
 from newsroom.graphiti_adapter import cli_client, cursor_transport
 
@@ -93,10 +95,10 @@ def test_public_fallback_classifier_is_fail_closed(
 
 
 def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() -> None:
-    policy = load_checked_graphiti_fallback_circuit_policy()
-    call_shape = load_checked_graphiti_call_shape_policy()
+    policy = load_checked_native_graphiti_fallback_circuit_policy()
+    call_shape = load_checked_native_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-816-v2"
+    assert policy.version == "issue-981-grok-build-fallback-v1"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -147,6 +149,30 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     assert "AUTHENTICATION_BRIDGE=" not in " ".join(primary.command_flags)
     assert "cursor-agent" not in " ".join(primary.command_flags)
     fallback = call_shape.route_for(GraphitiLeafClass.FALLBACK)
+    assert fallback.config_identity == "graphiti-grok-hermetic-user-config-v2"
+    assert fallback.command_semantic_version == (
+        "newsroom.graphiti-provider-dispatch.v8"
+    )
+    assert "--max-output-tokens=REQUEST_MAX_TOKENS" not in fallback.command_flags
+    assert (
+        "USER_CONFIG_MODEL_MAX_COMPLETION_TOKENS=REQUEST_MAX_TOKENS"
+        in fallback.command_flags
+    )
+    assert cli_client.GROK_COMPLETION_LIMIT_IDENTITY.endswith(
+        'model."grok-4.6".max_completion_tokens=REQUEST_MAX_TOKENS'
+    )
+    assert "USER_CONFIG_SCOPE=ISOLATED_HOME" in fallback.command_flags
+    assert "AUTH_STORAGE=GROK_AUTH_PATH" in fallback.command_flags
+    assert "--verbatim" in fallback.command_flags
+    assert "USER_CONFIG_TITLE_REFRESH=FALSE" in fallback.command_flags
+    assert "USER_CONFIG_TURN_SUMMARY=FALSE" in fallback.command_flags
+    assert "USER_CONFIG_MAX_RETRIES=0" in fallback.command_flags
+    assert (
+        "ACP_SEQUENCE=initialize,session/new,_x.ai/session/rename,session/close"
+        in fallback.command_flags
+    )
+    assert "ACP_INFERENCE_REQUESTS=0" in fallback.command_flags
+    assert "--resume=ACP_SESSION_UUID" in fallback.command_flags
     assert "CONTROLLER_TIMEOUT_MS=160000" in fallback.command_flags
     assert (
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
@@ -156,3 +182,12 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         f"CONTROLLER_STDOUT_CONTRACT={cli_client.GROK_STDOUT_LIMIT_IDENTITY}"
         in fallback.command_flags
     )
+
+
+def test_native_fallback_policy_does_not_rewrite_the_checked_campaign_policy() -> None:
+    policy = load_checked_graphiti_fallback_circuit_policy()
+    call_shape = load_checked_graphiti_call_shape_policy()
+
+    assert policy.version == "issue-816-v2"
+    assert call_shape.version == "issue-816-v2"
+    assert policy.call_shape_policy_digest == call_shape.canonical_digest

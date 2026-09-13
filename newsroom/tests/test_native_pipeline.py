@@ -70,6 +70,21 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         connection.close()
 
 
+def test_first_empty_source_poll_retains_one_reopenable_terminal_reference(tmp_path, monkeypatch):
+    pipeline, journal, connection, _units, _calls, dispositions = _open(tmp_path, monkeypatch)
+    dispositions[0] = ()
+    try:
+        report = pipeline.tick(cycle_id="first-empty")
+        assert report == n.NativePipelineReport((), {}, 0)
+        terminal = pipeline.terminal_report(report)
+        reference = terminal["source_portfolio_ref"]
+        assert NativeRevisionJournal(connection).portfolio_reference(()) == reference
+        assert pipeline.terminal_report(pipeline.tick(cycle_id="still-empty")) == terminal
+        assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
 def test_native_pipeline_retains_same_state_association_without_retry(
     tmp_path, monkeypatch,
 ):

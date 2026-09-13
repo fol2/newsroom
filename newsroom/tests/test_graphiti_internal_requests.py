@@ -14,16 +14,24 @@ from graphiti_core.prompts.extract_edges import ExtractedEdges
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 
 from newsroom.authority.canonical import digest_canonical
+from newsroom.control_plane import model_usage as model_usage_module
 from newsroom.control_plane.cycle_governor import (
     CycleOutcomeInput,
     DurableCycleGovernor,
 )
-from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
+from newsroom.control_plane.graphiti import (
+    GraphitiModelUsageObserver,
+    graphiti_required_route_holds,
+)
 from newsroom.control_plane.graphiti_requests import (
     GraphitiCallShapePolicy,
     GraphitiInternalRequestIdentity,
     GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
+    load_checked_native_graphiti_call_shape_policy,
+)
+from newsroom.control_plane.graphiti_fallback_policy import (
+    load_checked_native_graphiti_fallback_circuit_policy,
 )
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
@@ -453,6 +461,7 @@ def _bound_request(
     shape: GraphitiCallShapePolicy,
     ordinal: int,
     semantic: str,
+    effective_revision_digest: str | None = None,
 ) -> tuple[InvocationAllocation, GraphitiInternalRequestIdentity]:
     ingest_id = str(envelope.ingest_id)
     graphiti_attempt_id = str(envelope.graphiti_attempt_id)
@@ -469,7 +478,8 @@ def _bound_request(
             "retry_state_digest": retry_state_digest,
         }
     )
-    effective_revision_digest = digest_canonical({"revision": "r1"})
+    if effective_revision_digest is None:
+        effective_revision_digest = digest_canonical({"revision": "r1"})
     system_digest = digest_canonical({"system": "fixture"})
     request_digest = digest_canonical(
         {
@@ -488,6 +498,7 @@ def _bound_request(
     provider_attempt_id = (
         f"{graphiti_attempt_id}:provider-attempt:1:leaf:{ordinal}"
     )
+    dispatch_authority_digest = digest_canonical({"rights": "current"})
     manifest = {
         "schema_version": policy.context_manifest_schema_version,
         "provider": policy.provider,
@@ -527,6 +538,8 @@ def _bound_request(
         "graphiti_attempt_id": graphiti_attempt_id,
         "provider_attempt_id": provider_attempt_id,
         "semantic_state_digest": semantic_state_digest,
+        "call_shape_policy_digest": shape.canonical_digest,
+        "dispatch_authority_digest": dispatch_authority_digest,
         "request_digest": request_digest,
         "one_turn": True,
         "exact_input": True,
@@ -600,7 +613,7 @@ def _bound_request(
         invocation_id=allocation.invocation_id,
         invocation_policy_digest=policy.canonical_digest,
         call_shape_policy_digest=shape.canonical_digest,
-        dispatch_authority_digest=digest_canonical({"rights": "current"}),
+        dispatch_authority_digest=dispatch_authority_digest,
         dispatch_deadline_at="2026-08-24T20:03:00+00:00",
         owner_stop_clear=True,
         route_circuit_state="CLOSED",
@@ -913,6 +926,294 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
         )
     assert duplicate_error.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
     assert provider_calls == 1
+
+
+def test_open_primary_uses_request_bound_grok_without_cursor_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-direct-fallback",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-direct-fallback",
+        graphiti_attempt_id="ingest-direct-fallback:1",
+    )
+    service.open_envelope(envelope)
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY",
+        reason="QUOTA",
+        invocation_id=None,
+        recorded_at=T0 + timedelta(seconds=1),
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+        effective_revision_digest=digest_canonical(
+            {"effective_revision": "direct-fallback"}
+        ),
+        ingest_obligation_id="ingest-direct-fallback",
+        deadline=T0 + timedelta(minutes=3),
+        call_shape_policy=load_checked_native_graphiti_call_shape_policy(),
+        fallback_policy=load_checked_native_graphiti_fallback_circuit_policy(),
+    )
+    monkeypatch.setattr(
+        "newsroom.graphiti_adapter.cli_client._cursor_selected_model_for_chain",
+        lambda: pytest.fail("open primary attempted Cursor model discovery"),
+    )
+    cursor_calls = 0
+    grok_calls = 0
+
+    def cursor_runner(*_args: object, **_values: object) -> CliExecution:
+        nonlocal cursor_calls
+        cursor_calls += 1
+        raise AssertionError("open primary attempted Cursor transport")
+
+    def grok_runner(
+        _prompt: str,
+        _schema: str | None,
+        *,
+        max_tokens: int,
+        dispatch_started: object,
+    ) -> CliExecution:
+        nonlocal grok_calls
+        assert max_tokens == 77
+        grok_calls += 1
+        assert callable(dispatch_started)
+        dispatch_started()
+        return CliExecution(
+            text='{"extracted_entities":[]}',
+            usage={
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 6,
+            },
+        )
+
+    invocations: list[dict[str, object]] = []
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=77,
+            cursor_runner=cursor_runner,
+            grok_runner=grok_runner,
+            invocations=invocations,
+            invocation_observer=observer,
+        )
+    )
+
+    assert result == {"extracted_entities": []}
+    assert cursor_calls == 0
+    assert grok_calls == 1
+    assert [item["provider"] for item in invocations] == ["grok-build-cli"]
+    retained = service.graphiti_request_records(envelope_id=envelope.envelope_id)
+    assert len(retained["requests"]) == 1
+    identity = retained["requests"][0]
+    assert identity["leaf_class"] == "FALLBACK"
+    assert identity["parent_invocation_id"] is None
+    assert identity["primary_unavailable_event_digest"] == service.route_state(
+        "GRAPHITI_CHAT_PRIMARY"
+    )["event_digest"]
+    leaves = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
+    assert len(leaves) == 1
+    assert leaves[0]["route"] == "GRAPHITI_CHAT_FALLBACK"
+    assert leaves[0]["transport_dispatch_observed"] is True
+    assert leaves[0]["usage_status"] == "REPORTED"
+    assert leaves[0]["context_manifest"]["environment_keys"][0] == (
+        "GROK_AUTH_PATH"
+    )
+    reopened = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    assert reopened.graphiti_request_records(
+        envelope_id=envelope.envelope_id
+    )["requests"] == retained["requests"]
+
+    connection = service._connection()
+    allocation = model_usage_module._allocation_from_record(
+        json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_allocations"
+        ).fetchone()[0])
+    )
+    historical_event_digest = str(identity["primary_unavailable_event_digest"])
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY", reason="LATER_OPEN_EVENT",
+        invocation_id=None, recorded_at=T0 + timedelta(seconds=20),
+    )
+    assert model_usage_module._retained_graphiti_request_identity(
+        connection, allocation,
+    ) is not None
+    connection.execute(
+        "DELETE FROM model_usage_route_circuit_events WHERE event_digest=?",
+        (historical_event_digest,),
+    )
+    connection.commit()
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="direct fallback primary authority is absent",
+    ):
+        model_usage_module._retained_graphiti_request_identity(
+            connection, allocation,
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize("mutation", ("indexed-route", "rehashed-canonical"))
+def test_direct_fallback_primary_event_authentication_rejects_mutation(
+    tmp_path: Path, mutation: str,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY", reason="QUOTA", invocation_id=None,
+        recorded_at=T0,
+    )
+    event_digest = str(service.route_state("GRAPHITI_CHAT_PRIMARY")["event_digest"])
+    connection = service._connection()
+    if mutation == "indexed-route":
+        connection.execute(
+            "UPDATE model_usage_route_circuit_events SET route=? "
+            "WHERE event_digest=?",
+            ("GRAPHITI_CHAT_FALLBACK", event_digest),
+        )
+    else:
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_usage_route_circuit_events "
+            "WHERE event_digest=?", (event_digest,),
+        ).fetchone()[0])
+        record["reason"] = "ALTERED"
+        unsigned = dict(record)
+        unsigned.pop("event_digest")
+        record["event_digest"] = digest_canonical(unsigned)
+        connection.execute(
+            "UPDATE model_usage_route_circuit_events SET record_json=? "
+            "WHERE event_digest=?",
+            (json.dumps(record, sort_keys=True, separators=(",", ":")), event_digest),
+        )
+    connection.commit()
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="direct fallback primary authority differs",
+    ):
+        model_usage_module._require_primary_unavailable_event(
+            connection, event_digest,
+        )
+    connection.close()
+
+
+def test_direct_fallback_rejects_a_superseded_primary_open_event(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-stale-direct-fallback",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-stale-direct-fallback",
+        graphiti_attempt_id="ingest-stale-direct-fallback:1",
+    )
+    service.open_envelope(envelope)
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY",
+        reason="QUOTA",
+        invocation_id=None,
+        recorded_at=T0 + timedelta(seconds=1),
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+        call_shape_policy=load_checked_native_graphiti_call_shape_policy(),
+        fallback_policy=load_checked_native_graphiti_fallback_circuit_policy(),
+    )
+    assert observer.use_direct_fallback(
+        prompt="source-safe prompt",
+        schema=EXTRACTED_ENTITIES_SCHEMA,
+        semantic_request_class="ExtractedEntities",
+        max_tokens=77,
+    )
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY",
+        reason="SYSTEMIC_TRANSPORT",
+        invocation_id=None,
+        recorded_at=T0 + timedelta(seconds=2),
+    )
+
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="direct fallback primary authority differs",
+    ):
+        observer.before_cli_invocation(
+            provider="grok-build-cli",
+            model="grok-4.6",
+            prompt="source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=77,
+        )
+
+    assert service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"] == []
+
+
+def test_required_routes_allow_only_a_closed_grok_substitute(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY",
+        reason="QUOTA",
+        invocation_id=None,
+        recorded_at=T0,
+    )
+
+    assert graphiti_required_route_holds(service, fallback_permitted=True) == ()
+    assert [
+        item["route"] for item in graphiti_required_route_holds(service)
+    ] == ["GRAPHITI_CHAT_PRIMARY"]
+
+    service.open_route_circuit(
+        route="GRAPHITI_CHAT_FALLBACK",
+        reason="SYSTEMIC_TRANSPORT",
+        invocation_id=None,
+        recorded_at=T0 + timedelta(seconds=1),
+    )
+    assert [
+        item["route"]
+        for item in graphiti_required_route_holds(
+            service, fallback_permitted=True
+        )
+    ] == ["GRAPHITI_CHAT_PRIMARY"]
+
+
+def test_required_route_check_reads_only_states_needed_for_the_decision() -> None:
+    calls = []
+
+    class Routes:
+        def route_state(self, route):
+            calls.append(route)
+            return {
+                "route": route,
+                "state": "CLOSED",
+                "event_digest": "sha256:" + "a" * 64,
+            }
+
+    service = Routes()
+    assert graphiti_required_route_holds(service) == ()
+    assert calls == ["GRAPHITI_EMBEDDING", "GRAPHITI_CHAT_PRIMARY"]
 
 
 def test_embedding_transport_observes_separate_preallocated_leaf_and_od011_receipt(

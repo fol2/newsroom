@@ -1049,6 +1049,11 @@ def _retained_graphiti_request_identity(
         identity.call_shape_policy_digest,
     ):
         raise ModelUsageIntegrityError("native Graphiti request identity differs")
+    if identity.primary_unavailable_event_digest is not None:
+        try:
+            _require_direct_fallback_authority(connection, identity)
+        except ModelUsageAdmissionError as exc:
+            raise ModelUsageIntegrityError(str(exc)) from exc
     manifest_row = connection.execute(
         "SELECT context_manifest_digest,provider,route,evidence_package_digest,"
         "record_json FROM model_invocation_context_manifests "
@@ -1106,6 +1111,61 @@ def _retained_graphiti_request_identity(
     ):
         raise ModelUsageIntegrityError("native Graphiti context manifest differs")
     return identity
+
+
+def _require_primary_unavailable_event(
+    connection: sqlite3.Connection,
+    event_digest: str,
+) -> dict[str, object]:
+    row = connection.execute(
+        "SELECT route,state,reason,invocation_id,recorded_at,record_json "
+        "FROM model_usage_route_circuit_events WHERE event_digest=?",
+        (event_digest,),
+    ).fetchone()
+    if row is None:
+        raise ModelUsageAdmissionError(
+            "Graphiti direct fallback primary authority is absent"
+        )
+    record = _object(row[5])
+    unsigned = dict(record)
+    retained_digest = unsigned.pop("event_digest", None)
+    if (
+        row[5] != _json(record)
+        or retained_digest != event_digest
+        or digest_canonical(unsigned) != event_digest
+        or record.get("schema_version") != MODEL_USAGE_SCHEMA_VERSION
+        or tuple(row[:5])
+        != (
+            record.get("route"),
+            record.get("state"),
+            record.get("reason"),
+            record.get("invocation_id"),
+            record.get("recorded_at"),
+        )
+        or record.get("route") != "GRAPHITI_CHAT_PRIMARY"
+        or record.get("state") != "OPEN"
+    ):
+        raise ModelUsageAdmissionError(
+            "Graphiti direct fallback primary authority differs"
+        )
+    return record
+
+
+def _require_direct_fallback_authority(
+    connection: sqlite3.Connection,
+    identity: GraphitiInternalRequestIdentity,
+) -> None:
+    event_digest = identity.primary_unavailable_event_digest
+    if event_digest is None:
+        return
+    _require_primary_unavailable_event(connection, event_digest)
+    if (
+        identity.leaf_class is not GraphitiLeafClass.FALLBACK
+        or identity.parent_invocation_id is not None
+    ):
+        raise ModelUsageAdmissionError(
+            "Graphiti direct fallback primary authority differs"
+        )
 
 
 def _native_landed_source_unit(
@@ -2726,6 +2786,12 @@ class ModelUsageService:
                 []
                 if allocation.workload_class is WorkloadClass.GRAPHITI_EMBEDDING
                 else [
+                    *(
+                        ["GROK_AUTH_PATH"]
+                        if allocation.workload_class
+                        is WorkloadClass.GRAPHITI_CHAT_FALLBACK
+                        else []
+                    ),
                     "HOME",
                     "LANG",
                     "LC_ALL",
@@ -2746,6 +2812,23 @@ class ModelUsageService:
                 raise ModelUsageAdmissionError(
                     "Graphiti hermetic workspace proof differs from policy"
                 )
+
+            unavailable_event_digest = identity.primary_unavailable_event_digest
+            if unavailable_event_digest is not None:
+                _require_direct_fallback_authority(
+                    connection, identity,
+                )
+                current_primary = self._route_state(
+                    connection, "GRAPHITI_CHAT_PRIMARY",
+                )
+                if (
+                    current_primary.get("state") != "OPEN"
+                    or current_primary.get("event_digest")
+                    != unavailable_event_digest
+                ):
+                    raise ModelUsageAdmissionError(
+                        "Graphiti direct fallback primary authority differs"
+                    )
 
             semantic_state_digest = str(record["semantic_state_digest"])
             reused_attempt_identity = connection.execute(
@@ -3193,6 +3276,11 @@ class ModelUsageService:
                     or identity.graphiti_attempt_id != f"{expected_attempt[0]}:{expected_attempt[1]}"
                 ):
                     raise ModelUsageIntegrityError("retained Graphiti request binding differs")
+                if identity.primary_unavailable_event_digest is not None:
+                    try:
+                        _require_direct_fallback_authority(connection, identity)
+                    except ModelUsageAdmissionError as exc:
+                        raise ModelUsageIntegrityError(str(exc)) from exc
                 requests[identity.invocation_id] = identity
             incomplete_envelopes: set[str] = set()
             by_attempt: dict[
@@ -5210,7 +5298,7 @@ class ModelUsageService:
                     "authority": "UNPUBLISHED_ROUTE_CIRCUIT",
                 }
         row = connection.execute(
-            "SELECT state,reason,invocation_id,recorded_at "
+            "SELECT state,reason,invocation_id,recorded_at,event_digest "
             "FROM model_usage_route_circuit_events WHERE route=? "
             "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
             (canonical_route,),
@@ -5241,6 +5329,7 @@ class ModelUsageService:
             ),
             "invocation_id": row[2],
             "recorded_at": str(row[3]),
+            "event_digest": str(row[4]),
         }
 
     def _append_route_state(

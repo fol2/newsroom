@@ -1183,6 +1183,7 @@ def _ingest(
     operator_drain_requested: Callable[[], bool] = lambda: False,
     defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
     preserve_unit_order: bool = False,
+    fallback_permitted: bool = False,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1257,7 +1258,9 @@ def _ingest(
         if defer_before_unit(unit):
             continue
         if isinstance(graphiti, GovernedRealGraphitiPort) and (
-            holds := graphiti_required_route_holds(model_usage)
+            holds := graphiti_required_route_holds(
+                model_usage, fallback_permitted=fallback_permitted,
+            )
         ):
             # Recheck between units: a downstream failure must not spend the
             # next primary call or consume another unit's retry allowance.

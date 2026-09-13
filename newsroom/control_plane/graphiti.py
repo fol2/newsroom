@@ -24,6 +24,7 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
+    GraphitiFallbackCircuitPolicy,
     classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
 )
@@ -171,15 +172,27 @@ GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
 
 def graphiti_required_route_holds(
     service: ModelUsageService | None,
+    *,
+    fallback_permitted: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Check required downstream routes before spending on an upstream chat."""
     if service is None:
         return ()
-    return tuple(
-        state
-        for route in (GRAPHITI_CHAT_PRIMARY_ROUTE, GRAPHITI_EMBEDDING_ROUTE)
-        if (state := service.route_state(route))["state"] == "OPEN"
-    )
+    holds = []
+    embedding = service.route_state(GRAPHITI_EMBEDDING_ROUTE)
+    if embedding["state"] == "OPEN":
+        holds.append(embedding)
+    primary = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    if primary["state"] == "OPEN":
+        fallback_substitutes = False
+        if fallback_permitted and isinstance(primary.get("event_digest"), str):
+            fallback_substitutes = (
+                service.route_state(GRAPHITI_CHAT_FALLBACK_ROUTE)["state"]
+                == "CLOSED"
+            )
+        if not fallback_substitutes:
+            holds.append(primary)
+    return tuple(holds)
 
 _GRAPHITI_ADAPTER_DIRECTORY = Path(__file__).parent.parent / "graphiti_adapter"
 _GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
@@ -234,6 +247,7 @@ class GraphitiModelUsageObserver:
         dispatch_authority_digest: str | None = None,
         owner_stop_check: Callable[[], None],
         call_shape_policy: GraphitiCallShapePolicy | None = None,
+        fallback_policy: GraphitiFallbackCircuitPolicy | None = None,
     ) -> None:
         self._service = service
         self._envelope = envelope
@@ -253,8 +267,11 @@ class GraphitiModelUsageObserver:
         self._primary_by_request: dict[str, str] = {}
         self._terminal_outcome: dict[str, str] = {}
         self._fallback_by_primary: set[str] = set()
+        self._direct_fallback_by_request: dict[str, str] = {}
         self._shape = call_shape_policy or load_checked_graphiti_call_shape_policy()
-        self._fallback_policy = load_checked_graphiti_fallback_circuit_policy()
+        self._fallback_policy = (
+            fallback_policy or load_checked_graphiti_fallback_circuit_policy()
+        )
         if self._fallback_policy.call_shape_policy_digest != self._shape.canonical_digest:
             raise ValueError("Graphiti fallback policy differs from the call shape")
         self._effective_revision_digest = effective_revision_digest or digest_canonical(
@@ -442,6 +459,7 @@ class GraphitiModelUsageObserver:
         output_schema_digest: str,
         requested_max_tokens: int,
         parent_invocation_id: str | None = None,
+        primary_unavailable_event_digest: str | None = None,
     ) -> InvocationAllocation:
         now = self._clock().astimezone(UTC)
         if self._deadline is not None:
@@ -487,6 +505,9 @@ class GraphitiModelUsageObserver:
             {
                 "leaf_class": leaf_class.value,
                 "parent_invocation_id": parent_invocation_id,
+                "primary_unavailable_event_digest": (
+                    primary_unavailable_event_digest
+                ),
                 "semantic_request_class": semantic_request_class,
             }
         )
@@ -535,7 +556,14 @@ class GraphitiModelUsageObserver:
             "environment_keys": (
                 []
                 if leaf_class is GraphitiLeafClass.EMBEDDING
-                else list(_GRAPHITI_HERMETIC_ENVIRONMENT_KEYS)
+                else [
+                    *(
+                        ("GROK_AUTH_PATH",)
+                        if leaf_class is GraphitiLeafClass.FALLBACK
+                        else ()
+                    ),
+                    *_GRAPHITI_HERMETIC_ENVIRONMENT_KEYS,
+                ]
             ),
             "config_identity": route_contract.config_identity,
             "context_identity": GRAPHITI_CONTEXT_IDENTITY,
@@ -647,6 +675,7 @@ class GraphitiModelUsageObserver:
             ),
             owner_stop_clear=True,
             route_circuit_state=route_circuit_state,
+            primary_unavailable_event_digest=primary_unavailable_event_digest,
         )
         self._service.allocate_graphiti_request(
             allocation,
@@ -732,15 +761,31 @@ class GraphitiModelUsageObserver:
             if parent_invocation_id is None
             else self._terminal_outcome.get(parent_invocation_id)
         )
+        primary_unavailable_event_digest = (
+            self._direct_fallback_by_request.get(request_key)
+            if fallback
+            else None
+        )
         if fallback and (
-            parent_outcome is None
-            or classify_graphiti_fallback(parent_outcome).eligibility
-            is not FallbackEligibility.ELIGIBLE
+            primary_unavailable_event_digest is None
+            and (
+                parent_outcome is None
+                or classify_graphiti_fallback(parent_outcome).eligibility
+                is not FallbackEligibility.ELIGIBLE
+            )
         ):
             raise ModelUsageAdmissionError(
                 "Graphiti fallback requires a malformed primary"
             )
-        if fallback and parent_invocation_id in self._fallback_by_primary:
+        fallback_authority = parent_invocation_id or primary_unavailable_event_digest
+        fallback_leaf_key = (
+            digest_canonical(
+                {"authority": fallback_authority, "request_key": request_key}
+            )
+            if fallback_authority is not None
+            else None
+        )
+        if fallback and fallback_leaf_key in self._fallback_by_primary:
             raise ModelUsageAdmissionError(
                 "Graphiti primary already has its single fallback leaf"
             )
@@ -764,12 +809,46 @@ class GraphitiModelUsageObserver:
             output_schema_digest=schema_digest,
             requested_max_tokens=max_tokens,
             parent_invocation_id=parent_invocation_id,
+            primary_unavailable_event_digest=primary_unavailable_event_digest,
         )
         if primary:
             self._primary_by_request[request_key] = allocation.invocation_id
-        elif fallback and parent_invocation_id is not None:
-            self._fallback_by_primary.add(parent_invocation_id)
+        elif fallback and fallback_leaf_key is not None:
+            self._fallback_by_primary.add(fallback_leaf_key)
         return allocation
+
+    def use_direct_fallback(
+        self,
+        *,
+        prompt: str,
+        schema: str | None,
+        semantic_request_class: str,
+        max_tokens: int,
+    ) -> bool:
+        """Select Grok only when the retained primary route head is OPEN."""
+
+        primary = self._service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+        if primary.get("state") != "OPEN":
+            return False
+        if self._service.route_state(GRAPHITI_CHAT_FALLBACK_ROUTE).get("state") != (
+            "CLOSED"
+        ):
+            return False
+        event_digest = primary.get("event_digest")
+        if not isinstance(event_digest, str):
+            return False
+        request_key = digest_canonical(
+            {
+                "semantic_request_class": semantic_request_class,
+                "prompt_digest": digest_bytes(prompt.encode("utf-8")),
+                "response_schema_digest": digest_canonical(
+                    {"response_schema": schema or "UNSTRUCTURED"}
+                ),
+                "requested_max_tokens": max_tokens,
+            }
+        )
+        self._direct_fallback_by_request[request_key] = event_digest
+        return True
 
     def after_cli_invocation(
         self,
@@ -955,14 +1034,22 @@ class EvaluationGraphitiRunner:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         fallback_permitted: bool = True,
+        governed_fallback_permitted: bool = False,
         proposal_adapter: GovernedGraphitiProposalAdapter | None = None,
         extraction_records: GovernedExtractionRecords | None = None,
         proof: AuthenticationProof | None = None,
+        call_shape_policy: GraphitiCallShapePolicy | None = None,
+        fallback_policy: GraphitiFallbackCircuitPolicy | None = None,
     ) -> None:
         if not isinstance(fallback_permitted, bool):
             raise TypeError("Graphiti fallback permission must be boolean")
+        if not isinstance(governed_fallback_permitted, bool):
+            raise TypeError("governed Graphiti fallback permission must be boolean")
+        if governed_fallback_permitted and not fallback_permitted:
+            raise ValueError("governed Graphiti fallback requires fallback permission")
         self._clock = clock
         self._fallback_permitted = fallback_permitted
+        self._governed_fallback_permitted = governed_fallback_permitted
         governed_dependencies = (proposal_adapter, extraction_records, proof)
         if any(item is not None for item in governed_dependencies) and not all(
             item is not None for item in governed_dependencies
@@ -983,6 +1070,8 @@ class EvaluationGraphitiRunner:
         self._proposal_adapter = proposal_adapter
         self._extraction_records = extraction_records
         self._proof = proof
+        self._call_shape_policy = call_shape_policy
+        self._fallback_policy = fallback_policy
         self._pending_usage: dict[
             tuple[str, int], tuple[ModelUsageService, WorkEnvelope]
         ] = {}
@@ -1034,6 +1123,8 @@ class EvaluationGraphitiRunner:
             deadline=deadline,
             dispatch_authority_digest=digest_canonical(dict(dispatch_authority)),
             owner_stop_check=owner_stop_check,
+            call_shape_policy=self._call_shape_policy,
+            fallback_policy=self._fallback_policy,
         )
         self._pending_usage[(unit.ingest_id, unit.attempt_number)] = (
             model_usage,
@@ -1119,12 +1210,15 @@ class EvaluationGraphitiRunner:
             assert self._extraction_records is not None
             assert self._proof is not None
             if (
-                self._fallback_permitted
+                (
+                    self._fallback_permitted
+                    and not self._governed_fallback_permitted
+                )
                 or deadline is None
                 or invocation_observer is None
             ):
                 # A governed REAL attempt is safe only when the caller's
-                # bounded deadline, zero-fallback rule and usage observer all
+                # bounded deadline, fallback policy and usage observer all
                 # cross the 4D boundary together.
                 raise GraphitiResultStageError(
                     GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
@@ -1152,6 +1246,9 @@ class EvaluationGraphitiRunner:
                     proof=self._proof,
                     execution_deadline=deadline,
                     fallback_permitted=self._fallback_permitted,
+                    governed_fallback_permitted=(
+                        self._governed_fallback_permitted
+                    ),
                     invocation_observer=invocation_observer,
                 )
             except AuthorizationDenied as exc:

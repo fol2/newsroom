@@ -131,6 +131,20 @@ def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, 
         connection.close()
 
 
+def test_native_ingest_permits_the_governed_fallback_route(tmp_path, monkeypatch):
+    observed = []
+
+    def ingest(*_args, **kwargs):
+        observed.append(kwargs["fallback_permitted"])
+
+    processor, connection, _calls = _open(tmp_path, monkeypatch, ingest=ingest)
+    try:
+        processor.advance((_native(),), cycle_id="native-fallback-route")
+        assert observed == [True]
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("generation_id", (None, "00000000-0000-4000-8000-000000008201"))
 def test_successive_zero_proposal_cohorts_bootstrap_only_without_active_generation(
     tmp_path, monkeypatch, generation_id
@@ -687,7 +701,9 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         connection.commit()
 
     monkeypatch.setattr(usage, "disposition_native_unreported_subscription_usage", settle, raising=False)
-    monkeypatch.setattr(n, "graphiti_required_route_holds", lambda _: ())
+    monkeypatch.setattr(
+        n, "graphiti_required_route_holds", lambda _, **_values: ()
+    )
     processor._usage = usage
     outcomes = processor.advance((unit,), cycle_id="native-settlement")
     assert order == (["settle", "ingest"] if retained else ["ingest", "settle"])
@@ -928,7 +944,7 @@ def test_terminal_hold_identity_work_is_bounded_per_independent_advance(
             assert not queued
             assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 0
             assert (len(identity_reads), len(body_characters), sum(body_characters)) == (
-                chunks, 2 * chunks, 2 * chunks * len(base.body),
+                chunks, chunks, chunks * len(base.body),
             )
     finally:
         connection.close()

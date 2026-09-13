@@ -155,6 +155,79 @@ def test_grok_stream_output_retains_provider_reported_tokens() -> None:
     }
 
 
+def _installed_grok_headless_records() -> list[dict[str, object]]:
+    # Actual isolated CLI wire fixture: text.data, interim usage, then end.usage.
+    usage = {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 14,
+        "input_tokens": 187,
+        "output_tokens": 21,
+        "reasoning_tokens": 6,
+    }
+    return [
+        {"type": "text", "data": '{"value":"fixture-ok"}'},
+        {"type": "usage", "usage": usage},
+        {
+            "type": "end",
+            "stopReason": "end_turn",
+            "structuredOutput": {"value": "fixture-ok"},
+            "usage": {**usage, "total_tokens": 222},
+        },
+    ]
+
+
+def test_installed_grok_headless_text_and_terminal_usage_are_not_duplicated() -> None:
+    from newsroom.graphiti_adapter.cli_client import parse_grok_stream_output
+
+    records = _installed_grok_headless_records()
+    output = "\n".join(json.dumps(record) for record in records)
+
+    execution = parse_grok_stream_output(output)
+
+    assert execution.text == '{"value":"fixture-ok"}'
+    assert execution.usage == {
+        "usage_basis": "PROVIDER_REPORTED",
+        "input_tokens": 187,
+        "output_tokens": 21,
+        "cached_read_tokens": 14,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": 6,
+        "total_tokens": 222,
+        "context_tokens": 201,
+    }
+
+
+@pytest.mark.parametrize("terminal_usage", [None, {}, "invalid", {"total_tokens": 222}])
+def test_grok_headless_incomplete_terminal_never_invents_usage(
+    terminal_usage: object,
+) -> None:
+    from newsroom.graphiti_adapter.cli_client import parse_grok_stream_output
+
+    records = _installed_grok_headless_records()
+    records[-1]["usage"] = terminal_usage
+    output = "\n".join(json.dumps(record) for record in records)
+
+    execution = parse_grok_stream_output(output)
+
+    assert execution.text == '{"value":"fixture-ok"}'
+    assert execution.usage["usage_basis"] == "UNREPORTED"
+
+
+def test_grok_headless_interim_usage_is_not_a_terminal_receipt() -> None:
+    from newsroom.graphiti_adapter.cli_client import parse_grok_stream_output
+
+    records = _installed_grok_headless_records()[:-1]
+    interim_usage = records[-1]["usage"]
+    assert isinstance(interim_usage, dict)
+    interim_usage["total_tokens"] = 222
+    output = "\n".join(json.dumps(record) for record in records)
+
+    execution = parse_grok_stream_output(output)
+
+    assert execution.text == '{"value":"fixture-ok"}'
+    assert execution.usage["usage_basis"] == "UNREPORTED"
+
+
 def test_grok_headless_usage_derives_prompt_occupancy_without_inventing_zero() -> None:
     from newsroom.graphiti_adapter.usage_meter import grok_cli_usage
 

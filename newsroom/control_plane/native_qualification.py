@@ -214,6 +214,41 @@ def _service_cycle(
     return start, start_payload, terminal, terminal_payload
 
 
+def _terminal_portfolio(
+    connection: sqlite3.Connection, rows: tuple[tuple, ...], terminal: tuple,
+    pipeline: dict,
+) -> tuple[tuple[dict, ...], dict[str, int]]:
+    if "source_portfolio_ref" not in pipeline:
+        return _portfolio(pipeline)  # Historical inline terminals remain exact.
+    if set(pipeline) != {"source_portfolio_ref", "revision_states", "unclassified_revisions"}:
+        raise NativeQualificationError("native pipeline report fields differ")
+    reference = pipeline["source_portfolio_ref"]
+    latest = next((row for row in reversed(rows)
+                   if row[2] == PORTFOLIO and row[0] < terminal[0]), None)
+    if (
+        type(reference) is not dict or type(reference.get("seq")) is not int
+        or latest is None
+        or reference != {"seq": latest[0], "payload_digest": latest[3]}
+    ):
+        raise NativeQualificationError("native source portfolio reference differs")
+    # _ledger has already authenticated the chain but deliberately discarded
+    # portfolio bodies. Re-read only this exact immutable referenced record.
+    stored = connection.execute(
+        "SELECT seq,at,kind,payload_digest,payload_json,prev_digest,digest "
+        "FROM ledger WHERE seq=?", (reference["seq"],),
+    ).fetchone()
+    if stored is None or stored[:4] + stored[5:] != latest[:4] + latest[5:7]:
+        raise NativeQualificationError("native source portfolio ledger binding differs")
+    document = _document(stored[4], stored[3])
+    if set(document) != {"sources"}:
+        raise NativeQualificationError("native source portfolio fields differ")
+    return _portfolio({
+        "sources": document["sources"],
+        "revision_states": pipeline["revision_states"],
+        "unclassified_revisions": pipeline["unclassified_revisions"],
+    })
+
+
 def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
     if set(pipeline) != {"sources", "revision_states", "unclassified_revisions"}:
         raise NativeQualificationError("native pipeline report fields differ")
@@ -527,7 +562,7 @@ def _candidate_qualification(
     connection: sqlite3.Connection, identity: str, rows: tuple[tuple, ...],
 ) -> RetainedNativeQualification:
     start, _start_payload, terminal, terminal_payload = _service_cycle(rows, identity)
-    sources, states = _portfolio(terminal_payload["pipeline"])
+    sources, states = _terminal_portfolio(connection, rows, terminal, terminal_payload["pipeline"])
     journal, _retained_states = _revision_inventory(connection, sources, states)
     invocation_ids = _invocations(connection, journal)
     return RetainedNativeQualification(
@@ -605,7 +640,7 @@ def validate_qualification(
             raise NativeQualificationError("native qualification ledger binding differs")
         start_payload = _document(start[4], start[3])
         terminal_payload = _document(terminal[4], terminal[3])
-        sources, states = _portfolio(terminal_payload["pipeline"])
+        sources, states = _terminal_portfolio(connection, rows, terminal, terminal_payload["pipeline"])
         if (
             start_payload != {
                 "cycle_id": reference["cycle_id"],

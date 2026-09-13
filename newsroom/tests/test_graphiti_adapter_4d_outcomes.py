@@ -30,6 +30,7 @@ from newsroom.extraction import (
 from newsroom.graphiti_adapter import (
     DeterministicFakeGraphitiAdapter,
     GraphitiAdapterConfiguration,
+    GraphitiAdapterContractError,
     GraphitiAdapterConfigurationId,
     GraphitiAdapterExecution,
     GraphitiAdapterOutcome,
@@ -315,6 +316,54 @@ def test_evaluation_authority_atomically_retains_exact_terminal_receipt(
     assert (
         None if raw_bytes is None else json.loads(raw_bytes)
     ) == (expected_receipt if has_output else None)
+
+
+@pytest.mark.parametrize(
+    ("fallback_permitted", "governed_fallback_permitted", "error"),
+    (
+        (True, False, "governed real Graphiti requires fallback to be disabled"),
+        (False, True, "governed Graphiti fallback requires fallback permission"),
+    ),
+)
+def test_real_authority_rejects_ungoverned_or_unroutable_fallback_permission(
+    tmp_path,
+    fallback_permitted: bool,
+    governed_fallback_permitted: bool,
+    error: str,
+) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    with open_graphiti_system(
+        state, workspace_root=(tmp_path / "workspace").resolve()
+    ) as system:
+        with pytest.raises(GraphitiAdapterContractError, match=error):
+            system.graphiti.execute_attempt(
+                attempt,
+                proof=extraction_proof(),
+                execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+                fallback_permitted=fallback_permitted,
+                governed_fallback_permitted=governed_fallback_permitted,
+                invocation_observer=object(),
+            )
+
+
+def test_real_authority_requires_typed_governed_fallback_permission(tmp_path) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    with open_graphiti_system(
+        state, workspace_root=(tmp_path / "workspace").resolve()
+    ) as system:
+        with pytest.raises(
+            TypeError, match="governed Graphiti fallback permission must be boolean"
+        ):
+            system.graphiti.execute_attempt(
+                attempt,
+                proof=extraction_proof(),
+                execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+                fallback_permitted=True,
+                governed_fallback_permitted=1,  # type: ignore[arg-type]
+                invocation_observer=object(),
+            )
 
 
 def test_evaluation_receipt_binding_failure_rolls_back_both_authorities(
