@@ -88,6 +88,7 @@ class GovernedGraphitiProposalAdapter:
         proof: AuthenticationProof,
         execution_deadline: datetime | None = None,
         fallback_permitted: bool = True,
+        governed_fallback_permitted: bool = False,
         invocation_observer: object | None = None,
     ) -> GraphitiAttemptRecord:
         return self.__execute_attempt(
@@ -95,6 +96,7 @@ class GovernedGraphitiProposalAdapter:
             proof,
             execution_deadline=execution_deadline,
             fallback_permitted=fallback_permitted,
+            governed_fallback_permitted=governed_fallback_permitted,
             invocation_observer=invocation_observer,
         )
 

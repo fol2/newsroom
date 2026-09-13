@@ -31,6 +31,10 @@ from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerat
 from .corpus import CorpusIngestUnit
 from .cycle import _DispatchAuthority, _ingest
 from .graphiti import EvaluationGraphitiRunner, graphiti_required_route_holds
+from .graphiti_fallback_policy import (
+    load_checked_native_graphiti_fallback_circuit_policy,
+)
+from .graphiti_requests import load_checked_native_graphiti_call_shape_policy
 from .graphiti_admission import GraphitiAdmissionConsumerError
 from .graphiti_admission_integration import compose_existing_graphiti_admission_consumer
 from .model_usage import ModelUsageService
@@ -85,6 +89,8 @@ class NativeGraphitiProcessor:
             governed_fallback_permitted=True,
             proposal_adapter=system.graphiti, extraction_records=system.extraction,
             proof=proof,
+            call_shape_policy=load_checked_native_graphiti_call_shape_policy(),
+            fallback_policy=load_checked_native_graphiti_fallback_circuit_policy(),
         )
         self._admission = compose_existing_graphiti_admission_consumer(
             connection, adapter=system.graphiti, extraction=system.extraction,
@@ -194,6 +200,7 @@ class NativeGraphitiProcessor:
             operator_drain_requested=self._operator_drain_requested,
             defer_before_unit=defer,
             preserve_unit_order=True,
+            fallback_permitted=True,
         )
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():

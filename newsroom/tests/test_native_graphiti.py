@@ -131,6 +131,20 @@ def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, 
         connection.close()
 
 
+def test_native_ingest_permits_the_governed_fallback_route(tmp_path, monkeypatch):
+    observed = []
+
+    def ingest(*_args, **kwargs):
+        observed.append(kwargs["fallback_permitted"])
+
+    processor, connection, _calls = _open(tmp_path, monkeypatch, ingest=ingest)
+    try:
+        processor.advance((_native(),), cycle_id="native-fallback-route")
+        assert observed == [True]
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("generation_id", (None, "00000000-0000-4000-8000-000000008201"))
 def test_successive_zero_proposal_cohorts_bootstrap_only_without_active_generation(
     tmp_path, monkeypatch, generation_id

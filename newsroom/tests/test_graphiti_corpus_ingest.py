@@ -7160,6 +7160,60 @@ def test_required_route_circuit_defers_units_without_spend_or_retry_consumption(
     connection.close()
 
 
+def test_only_explicit_native_fallback_permission_substitutes_an_open_primary_route(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "native-fallback-route.sqlite3"))
+    usage = ModelUsageService(str(tmp_path / "native-fallback-route.sqlite3"))
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    unit = replace(
+        _unit(item_key="native-fallback"),
+        proving_run_id="native-source:" + _unit(item_key="native-fallback").observation_digest,
+    )
+    usage.open_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY", reason="TEST_PRIMARY_UNAVAILABLE",
+        invocation_id=None, recorded_at=now,
+    )
+    calls = []
+
+    class Graphiti:
+        requires_canonical_control_plane_stores = True
+
+        def ingest(self, _unit):
+            raise AssertionError("usage path required")
+
+        def ingest_until(self, _unit, *, deadline):
+            raise AssertionError("usage path required")
+
+        def ingest_with_usage(self, selected, **_kwargs):
+            calls.append(selected.ingest_id)
+            return _complete(selected, proposal_count=0, entity_count=0)
+
+    @contextmanager
+    def fence(_unit):
+        yield _DispatchAuthority(
+            {"current": True}, now + timedelta(minutes=15), lambda: None,
+        )
+
+    def run(*, fallback_permitted: bool = False) -> int:
+        return _ingest(
+            connection, graphiti=Graphiti(), units=(unit,), max_graphiti=1,
+            rights_check=lambda _unit: {"current": True}, rights_fence=fence,
+            clock=lambda: now, model_usage=usage, cycle_id="native-fallback-route",
+            fallback_permitted=fallback_permitted,
+        )
+
+    try:
+        assert run() == 0
+        assert calls == []
+        assert run(fallback_permitted=True) == 1
+        assert calls == [unit.ingest_id]
+    finally:
+        connection.close()
+
+
 def test_operator_drain_stops_before_next_ingest_after_current_attempt_settles(
     tmp_path,
 ) -> None:

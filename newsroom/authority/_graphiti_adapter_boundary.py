@@ -25,6 +25,7 @@ from newsroom.graphiti_adapter import (
     GraphitiAdapterConfiguration,
     GraphitiAdapterConfigurationId,
     GraphitiAdapterConfigurationRecord,
+    GraphitiAdapterContractError,
     GraphitiAdapterExecution,
     GraphitiAdapterOutcome,
     GraphitiAdapterReadPolicy,
@@ -164,6 +165,7 @@ class _GraphitiAdapterBoundary:
         *,
         execution_deadline: datetime | None = None,
         fallback_permitted: bool = True,
+        governed_fallback_permitted: bool = False,
         invocation_observer: object | None = None,
     ) -> GraphitiAttemptRecord:
         with self._command_lock:
@@ -172,6 +174,7 @@ class _GraphitiAdapterBoundary:
                 proof,
                 execution_deadline=execution_deadline,
                 fallback_permitted=fallback_permitted,
+                governed_fallback_permitted=governed_fallback_permitted,
                 invocation_observer=invocation_observer,
             )
 
@@ -182,12 +185,19 @@ class _GraphitiAdapterBoundary:
         *,
         execution_deadline: datetime | None,
         fallback_permitted: bool,
+        governed_fallback_permitted: bool,
         invocation_observer: object | None,
     ) -> GraphitiAttemptRecord:
         if not isinstance(attempt, GraphitiAttemptRequest):
             raise TypeError("adapter attempt must be typed")
         if not isinstance(fallback_permitted, bool):
             raise TypeError("Graphiti fallback permission must be boolean")
+        if not isinstance(governed_fallback_permitted, bool):
+            raise TypeError("governed Graphiti fallback permission must be boolean")
+        if governed_fallback_permitted and not fallback_permitted:
+            raise GraphitiAdapterContractError(
+                "governed Graphiti fallback requires fallback permission"
+            )
         if execution_deadline is not None and (
             not isinstance(execution_deadline, datetime)
             or execution_deadline.tzinfo is None
@@ -197,7 +207,7 @@ class _GraphitiAdapterBoundary:
                 "real adapter execution deadline must have an explicit offset"
             )
         if attempt.configuration.runtime_mode is GraphitiRuntimeMode.REAL_GRAPHITI:
-            if fallback_permitted:
+            if fallback_permitted and not governed_fallback_permitted:
                 raise GraphitiAdapterContractError(
                     "governed real Graphiti requires fallback to be disabled"
                 )

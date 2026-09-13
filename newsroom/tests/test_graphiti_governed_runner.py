@@ -340,6 +340,7 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(
     assert retained["execution_controls"] == {
         "execution_deadline": deadline,
         "fallback_permitted": fallback_permitted,
+        "governed_fallback_permitted": fallback_permitted,
         "invocation_observer": observer,
     }
 

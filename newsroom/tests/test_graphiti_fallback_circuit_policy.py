@@ -7,10 +7,12 @@ from newsroom.control_plane.graphiti_fallback_policy import (
     GraphitiFallbackClass,
     classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
+    load_checked_native_graphiti_fallback_circuit_policy,
 )
 from newsroom.control_plane.graphiti_requests import (
     GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
+    load_checked_native_graphiti_call_shape_policy,
 )
 from newsroom.graphiti_adapter import cli_client, cursor_transport
 
@@ -93,8 +95,8 @@ def test_public_fallback_classifier_is_fail_closed(
 
 
 def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() -> None:
-    policy = load_checked_graphiti_fallback_circuit_policy()
-    call_shape = load_checked_graphiti_call_shape_policy()
+    policy = load_checked_native_graphiti_fallback_circuit_policy()
+    call_shape = load_checked_native_graphiti_call_shape_policy()
 
     assert policy.version == "issue-981-grok-build-fallback-v1"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
@@ -170,3 +172,12 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         f"CONTROLLER_STDOUT_CONTRACT={cli_client.GROK_STDOUT_LIMIT_IDENTITY}"
         in fallback.command_flags
     )
+
+
+def test_native_fallback_policy_does_not_rewrite_the_checked_campaign_policy() -> None:
+    policy = load_checked_graphiti_fallback_circuit_policy()
+    call_shape = load_checked_graphiti_call_shape_policy()
+
+    assert policy.version == "issue-816-v2"
+    assert call_shape.version == "issue-816-v2"
+    assert policy.call_shape_policy_digest == call_shape.canonical_digest

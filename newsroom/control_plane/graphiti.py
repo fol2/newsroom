@@ -24,6 +24,7 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
+    GraphitiFallbackCircuitPolicy,
     classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
 )
@@ -177,20 +178,21 @@ def graphiti_required_route_holds(
     """Check required downstream routes before spending on an upstream chat."""
     if service is None:
         return ()
-    routes = [GRAPHITI_EMBEDDING_ROUTE]
+    holds = []
+    embedding = service.route_state(GRAPHITI_EMBEDDING_ROUTE)
+    if embedding["state"] == "OPEN":
+        holds.append(embedding)
     primary = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
-    fallback = service.route_state(GRAPHITI_CHAT_FALLBACK_ROUTE)
-    if primary["state"] == "OPEN" and not (
-        fallback_permitted
-        and fallback["state"] == "CLOSED"
-        and isinstance(primary.get("event_digest"), str)
-    ):
-        routes.append(GRAPHITI_CHAT_PRIMARY_ROUTE)
-    return tuple(
-        state
-        for route in routes
-        if (state := service.route_state(route))["state"] == "OPEN"
-    )
+    if primary["state"] == "OPEN":
+        fallback_substitutes = False
+        if fallback_permitted and isinstance(primary.get("event_digest"), str):
+            fallback_substitutes = (
+                service.route_state(GRAPHITI_CHAT_FALLBACK_ROUTE)["state"]
+                == "CLOSED"
+            )
+        if not fallback_substitutes:
+            holds.append(primary)
+    return tuple(holds)
 
 _GRAPHITI_ADAPTER_DIRECTORY = Path(__file__).parent.parent / "graphiti_adapter"
 _GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
@@ -245,6 +247,7 @@ class GraphitiModelUsageObserver:
         dispatch_authority_digest: str | None = None,
         owner_stop_check: Callable[[], None],
         call_shape_policy: GraphitiCallShapePolicy | None = None,
+        fallback_policy: GraphitiFallbackCircuitPolicy | None = None,
     ) -> None:
         self._service = service
         self._envelope = envelope
@@ -266,7 +269,9 @@ class GraphitiModelUsageObserver:
         self._fallback_by_primary: set[str] = set()
         self._direct_fallback_by_request: dict[str, str] = {}
         self._shape = call_shape_policy or load_checked_graphiti_call_shape_policy()
-        self._fallback_policy = load_checked_graphiti_fallback_circuit_policy()
+        self._fallback_policy = (
+            fallback_policy or load_checked_graphiti_fallback_circuit_policy()
+        )
         if self._fallback_policy.call_shape_policy_digest != self._shape.canonical_digest:
             raise ValueError("Graphiti fallback policy differs from the call shape")
         self._effective_revision_digest = effective_revision_digest or digest_canonical(
@@ -1033,6 +1038,8 @@ class EvaluationGraphitiRunner:
         proposal_adapter: GovernedGraphitiProposalAdapter | None = None,
         extraction_records: GovernedExtractionRecords | None = None,
         proof: AuthenticationProof | None = None,
+        call_shape_policy: GraphitiCallShapePolicy | None = None,
+        fallback_policy: GraphitiFallbackCircuitPolicy | None = None,
     ) -> None:
         if not isinstance(fallback_permitted, bool):
             raise TypeError("Graphiti fallback permission must be boolean")
@@ -1063,6 +1070,8 @@ class EvaluationGraphitiRunner:
         self._proposal_adapter = proposal_adapter
         self._extraction_records = extraction_records
         self._proof = proof
+        self._call_shape_policy = call_shape_policy
+        self._fallback_policy = fallback_policy
         self._pending_usage: dict[
             tuple[str, int], tuple[ModelUsageService, WorkEnvelope]
         ] = {}
@@ -1114,6 +1123,8 @@ class EvaluationGraphitiRunner:
             deadline=deadline,
             dispatch_authority_digest=digest_canonical(dict(dispatch_authority)),
             owner_stop_check=owner_stop_check,
+            call_shape_policy=self._call_shape_policy,
+            fallback_policy=self._fallback_policy,
         )
         self._pending_usage[(unit.ingest_id, unit.attempt_number)] = (
             model_usage,
@@ -1235,6 +1246,9 @@ class EvaluationGraphitiRunner:
                     proof=self._proof,
                     execution_deadline=deadline,
                     fallback_permitted=self._fallback_permitted,
+                    governed_fallback_permitted=(
+                        self._governed_fallback_permitted
+                    ),
                     invocation_observer=invocation_observer,
                 )
             except AuthorizationDenied as exc:

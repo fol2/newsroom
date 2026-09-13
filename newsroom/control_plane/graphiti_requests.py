@@ -15,6 +15,9 @@ GRAPHITI_INTERNAL_REQUEST_SCHEMA_VERSION = (
 )
 GRAPHITI_CALL_SHAPE_SCHEMA_VERSION = "newsroom.graphiti-call-shape-policy.v1"
 _POLICY_PATH = Path(__file__).with_name("graphiti_call_shape_policy_v1.json")
+_NATIVE_POLICY_PATH = Path(__file__).with_name(
+    "native_graphiti_call_shape_policy_v1.json"
+)
 ALLOWED_GRAPHITI_SEMANTIC_REQUEST_CLASSES = frozenset(
     {
         "ExtractedEntities",
@@ -744,8 +747,10 @@ def graphiti_semantic_state_digest(
     )
 
 
-def load_checked_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
-    payload = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))
+def _load_checked_graphiti_call_shape_policy(
+    path: Path,
+) -> GraphitiCallShapePolicy:
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise GraphitiRequestContractError("checked call-shape policy is not an object")
     expected_digest = payload.pop("canonical_digest", None)
@@ -770,6 +775,14 @@ def load_checked_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
     return policy
 
 
+def load_checked_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
+    return _load_checked_graphiti_call_shape_policy(_POLICY_PATH)
+
+
+def load_checked_native_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
+    return _load_checked_graphiti_call_shape_policy(_NATIVE_POLICY_PATH)
+
+
 __all__ = [
     "ALLOWED_GRAPHITI_SEMANTIC_REQUEST_CLASSES",
     "GRAPHITI_CALL_SHAPE_SCHEMA_VERSION",
@@ -783,4 +796,5 @@ __all__ = [
     "GraphitiRequestContractError",
     "graphiti_semantic_state_digest",
     "load_checked_graphiti_call_shape_policy",
+    "load_checked_native_graphiti_call_shape_policy",
 ]
