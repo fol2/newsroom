@@ -279,8 +279,10 @@ def _imports_public_symbol(
 
 
 def _imports_changed_surface(
-    tree: ast.AST, module: str, symbols: set[str], importer: str | None = None
+    tree: ast.AST, module: str, symbols: set[str] | None, importer: str | None = None
 ) -> bool:
+    if symbols is None and module in IGNORED_IMPORT_ROOTS:
+        return False
     parent, _, leaf = module.rpartition(".")
     for node in ast.walk(tree):
         if (
@@ -288,17 +290,23 @@ def _imports_changed_surface(
             and isinstance(node.args[0], ast.Constant) and node.args[0].value == module
         ):
             return True
-        if isinstance(node, ast.Import) and any(alias.name == module for alias in node.names):
+        if isinstance(node, ast.Import) and any(
+            _imports_module(alias.name, module) if symbols is None else alias.name == module
+            for alias in node.names
+        ):
             return True
         if isinstance(node, ast.ImportFrom):
             if node.level:
                 if importer is None:
                     return True
             imported_from = _imported_from(node, importer)
+            if symbols is None and imported_from and _imports_module(imported_from, module):
+                return True
             if imported_from == parent and any(alias.name == leaf for alias in node.names):
                 return True
             if imported_from == module and any(
-                alias.name == "*" or alias.name in symbols for alias in node.names
+                symbols is None or alias.name == "*" or alias.name in symbols
+                for alias in node.names
             ):
                 return True
     return False
@@ -380,20 +388,13 @@ def _discover_tests(
         except (OSError, SyntaxError, UnicodeError):
             unresolved = True
             continue
-        imports = legacy._imported_modules(tree)
+        importer = module_name_for_path(relative)
         direct_hit = any(
-            (
-                _imports_changed_surface(
-                    tree, module, direct_symbols[module], module_name_for_path(relative)
-                )
-                if direct_symbols.get(module) is not None
-                else any(_imports_module(imported, module) for imported in imports)
-            )
+            _imports_changed_surface(tree, module, direct_symbols[module], importer)
             for module in direct
         )
         dependent_hit = any(
-            _imports_module(imported, module)
-            for imported in imports
+            _imports_changed_surface(tree, module, None, importer)
             for module in dependents
         )
         reexport_hit = any(

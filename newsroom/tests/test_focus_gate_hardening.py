@@ -505,3 +505,68 @@ def test_internal_publication_is_not_a_public_effect_gate(route) -> None:
         mixed = route((*paths, effect))
         assert mixed["owner_authority_required"] is True
         assert "F4" in mixed["gates"]
+
+
+@pytest.mark.parametrize("symbol_sensitive", (False, True))
+def test_changed_test_helper_routes_exact_direct_and_transitive_consumers(
+    tmp_path: Path, symbol_sensitive: bool,
+) -> None:
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/tests/__init__.py")
+    helper = "newsroom/tests/fixture.py"
+    original = "def changed():\n    return 1\n\ndef other():\n    return 9\n"
+    _write(tmp_path, helper, original)
+    _write(tmp_path, "newsroom/tests/bridge.py", "from .fixture import changed as retained\n\ndef build():\n    return retained()\n")
+    _write(tmp_path, "newsroom/tests/relay.py", "from newsroom.tests import bridge as selected\n\ndef wrapped():\n    return selected.build()\n")
+    _write(tmp_path, "newsroom/tests/other_fixture.py", "def unrelated(): return 9\n")
+    _write(tmp_path, "newsroom/tests/test_direct.py", "from .fixture import changed as selected\n")
+    _write(tmp_path, "newsroom/tests/test_module.py", "import newsroom.tests.fixture as selected\n")
+    _write(tmp_path, "newsroom/tests/test_transitive.py", "from .relay import wrapped\n")
+    _write(tmp_path, "newsroom/tests/test_helper_neo4j_service.py", "from .bridge import build\n")
+    _write(tmp_path, "newsroom/tests/test_other_symbol.py", "from .fixture import other\n")
+    _write(tmp_path, "newsroom/tests/test_unrelated.py", "from .other_fixture import unrelated\n")
+    base = _commit(tmp_path, "base helper")
+    _write(tmp_path, helper, original.replace("return 1", "return 2"))
+    head = _commit(tmp_path, "changed helper")
+
+    route = selector.select_focus(
+        (helper,), repo_root=tmp_path,
+        **({"base_sha": base, "head_sha": head} if symbol_sensitive else {}),
+    )
+    assert route["full_health_required"] is False
+    assert "unresolved_dependency_analysis:full_health" not in route["reasons"]
+    assert route["selected_tests"] == sorted([
+        "newsroom/tests/test_direct.py", "newsroom/tests/test_module.py",
+        "newsroom/tests/test_transitive.py",
+        *([] if symbol_sensitive else ["newsroom/tests/test_other_symbol.py"]),
+    ])
+    assert route["selected_service_tests"] == ["newsroom/tests/test_helper_neo4j_service.py"]
+    assert route["gates"] == ["F0", "F1", "F2", "F3"]
+    assert "actual_service_consumer:F3" in route["reasons"]
+
+
+@pytest.mark.parametrize("fault", ("syntax", "missing_module", "deleted_helper"))
+def test_test_helper_dependency_fault_keeps_full_health_fallback(tmp_path: Path, fault: str) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/tests/__init__.py")
+    helper = "newsroom/tests/fixture.py"
+    if fault != "deleted_helper":
+        _write(tmp_path, helper, "def broken(\n" if fault == "syntax" else "import newsroom.missing\n")
+    _write(tmp_path, "newsroom/tests/test_consumer.py", "from .fixture import value\n")
+    route = selector.select_focus((helper,), repo_root=tmp_path)
+    assert route["full_health_required"] is True
+    assert "unresolved_dependency_analysis:full_health" in route["reasons"]
+
+
+def test_broad_package_change_retains_absolute_and_relative_submodule_consumers(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/package/__init__.py", "SETTING = 1\n")
+    _write(tmp_path, "newsroom/package/child.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/test_absolute.py", "import newsroom.package.child as selected\n")
+    _write(tmp_path, "newsroom/tests/test_relative.py", "from ..package.child import VALUE\n")
+    route = selector.select_focus(("newsroom/package/__init__.py",), repo_root=tmp_path)
+    assert route["selected_tests"] == [
+        "newsroom/tests/test_absolute.py", "newsroom/tests/test_relative.py",
+    ]
+    assert route["full_health_required"] is False

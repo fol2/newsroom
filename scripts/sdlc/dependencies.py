@@ -51,7 +51,9 @@ def _source_paths(repo_root: Path) -> tuple[Path, ...]:
             relative = path.relative_to(repo_root)
             if "__pycache__" in relative.parts:
                 continue
-            if relative.parts[:2] == ("newsroom", "tests"):
+            # Test cases are selected separately, but their importable support
+            # modules have ordinary direct/transitive repository dependencies.
+            if relative.parts[:2] == ("newsroom", "tests") and path.name.startswith("test_"):
                 continue
             paths.append(path)
     return tuple(sorted(paths))

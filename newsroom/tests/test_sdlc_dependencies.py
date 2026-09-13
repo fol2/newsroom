@@ -194,3 +194,25 @@ def test_cached_graph_returns_isolated_mutable_mappings(tmp_path: Path) -> None:
         "newsroom": "newsroom/__init__.py",
         "newsroom.core": "newsroom/core.py",
     }
+
+
+def test_graph_includes_test_support_modules_but_not_test_cases(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/__init__.py")
+    _write(tmp_path, "newsroom/tests/__init__.py")
+    _write(tmp_path, "newsroom/tests/fixture.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/bridge.py", "from .fixture import VALUE as retained\n")
+    _write(tmp_path, "newsroom/tests/relay.py", "from newsroom.tests import bridge as selected\n")
+    _write(tmp_path, "newsroom/tests/test_consumer.py", "from .relay import selected\n")
+
+    graph = build_dependency_graph(tmp_path)
+    assert graph.dependent_paths("newsroom/tests/fixture.py") == (
+        "newsroom/tests/bridge.py", "newsroom/tests/relay.py",
+    )
+    assert "newsroom/tests/test_consumer.py" not in graph.path_to_module
+    assert python_changes(("newsroom/tests/fixture.py",)) == ()
+
+    # Helpers participate in the same exact-byte snapshot invalidation as code.
+    _write(tmp_path, "newsroom/tests/relay.py", "VALUE = 2\n")
+    assert build_dependency_graph(tmp_path).dependent_paths("newsroom/tests/fixture.py") == (
+        "newsroom/tests/bridge.py",
+    )
