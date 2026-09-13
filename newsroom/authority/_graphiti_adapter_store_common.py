@@ -17,7 +17,7 @@ from newsroom.authority.types import (
     TrustScope,
     UtcTimestamp,
 )
-from newsroom.extraction.models import ExtractionUsage
+from newsroom.extraction.models import ExtractionRunVersion, ExtractionUsage
 from newsroom.extraction.types import (
     ExtractionFailureCode,
     ExtractionOutcome,
@@ -619,7 +619,8 @@ class _GraphitiAdapterStoreSupport:
         return receipt
 
     def _graphiti_attempt_from_row(
-        self, conn: sqlite3.Connection, row: Mapping[str, Any], *, replayed: bool
+        self, conn: sqlite3.Connection, row: Mapping[str, Any], *, replayed: bool,
+        require_current: bool = False,
     ) -> GraphitiAttemptRecord:
         value = self._graphiti_canonical_row_value(row, identity="Graphiti attempt")
         cleanup_row = conn.execute(
@@ -818,6 +819,10 @@ class _GraphitiAdapterStoreSupport:
             aggregate_id=str(record.attempt_id),
             payload_bytes=request.canonical_bytes,
         )
+        if require_current:
+            self._require_graphiti_attempt_current(
+                conn, record, selected_version=version,
+            )
         return record
 
     @classmethod
@@ -923,17 +928,30 @@ class _GraphitiAdapterStoreSupport:
         configuration.require_execution_authorized()
 
     def _validate_graphiti_attempt_lineage(
-        self, conn: sqlite3.Connection, attempt: GraphitiAttemptRecord
+        self, conn: sqlite3.Connection, attempt: GraphitiAttemptRecord,
+        *, selected_version: ExtractionRunVersion | None = None,
     ):
-        version_row = conn.execute(
-            "SELECT * FROM extraction_run_versions WHERE run_version_id=?",
-            (str(attempt.run_version_id),),
-        ).fetchone()
-        if version_row is None:
+        if selected_version is None:
+            version_row = conn.execute(
+                "SELECT * FROM extraction_run_versions WHERE run_version_id=?",
+                (str(attempt.run_version_id),),
+            ).fetchone()
+            if version_row is None:
+                raise AuthorityPersistenceError(
+                    "Graphiti attempt extraction run version is missing"
+                )
+            result = self._run_version_from_row(conn, version_row, replayed=False)
+        else:
+            # The current-read decoder supplies its exact authenticated version
+            # within the same locked operation, never across independent reads.
+            result = selected_version
+        if (
+            type(result) is not ExtractionRunVersion
+            or result.request.run_version_id != attempt.run_version_id
+        ):
             raise AuthorityPersistenceError(
-                "Graphiti attempt extraction run version is missing"
+                "Graphiti attempt differs from retained Extraction Run authority"
             )
-        result = self._run_version_from_row(conn, version_row, replayed=False)
         expected_outcome = {
             ExtractionOutcome.SUCCESS: GraphitiAdapterOutcome.COMPLETE,
             ExtractionOutcome.PARTIAL: GraphitiAdapterOutcome.PARTIAL,
@@ -970,9 +988,12 @@ class _GraphitiAdapterStoreSupport:
         return result
 
     def _require_graphiti_attempt_current(
-        self, conn: sqlite3.Connection, attempt: GraphitiAttemptRecord
+        self, conn: sqlite3.Connection, attempt: GraphitiAttemptRecord,
+        *, selected_version: ExtractionRunVersion | None = None,
     ) -> None:
-        result = self._validate_graphiti_attempt_lineage(conn, attempt)
+        result = self._validate_graphiti_attempt_lineage(
+            conn, attempt, selected_version=selected_version,
+        )
         try:
             self._revalidate_result_current(conn, result)
         except PermissionError as exc:

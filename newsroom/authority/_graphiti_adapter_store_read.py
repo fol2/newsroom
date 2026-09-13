@@ -49,9 +49,8 @@ class _GraphitiAdapterReadMixin:
         with self._lock:
             row = self._graphiti_attempt_row(self._connection, attempt_id)
             result = self._graphiti_attempt_from_row(
-                self._connection, row, replayed=False
+                self._connection, row, replayed=False, require_current=True,
             )
-            self._require_graphiti_attempt_current(self._connection, result)
             workspace_row = self._connection.execute(
                 "SELECT * FROM graphiti_workspaces WHERE workspace_id=?",
                 (str(result.workspace_id),),
@@ -78,14 +77,14 @@ class _GraphitiAdapterReadMixin:
                 "ORDER BY attempt_number DESC LIMIT ?",
                 (str(run_id), limit),
             ).fetchall()
+            # Validate retention and current rights per row. Tuple construction
+            # remains all-or-error, including corruption in the final row.
             results = tuple(
                 self._graphiti_attempt_from_row(
-                    self._connection, row, replayed=False
+                    self._connection, row, replayed=False, require_current=True,
                 )
                 for row in rows
             )
-            for result in results:
-                self._require_graphiti_attempt_current(self._connection, result)
             return results
 
     def graphiti_manifest_for_attempt(
@@ -96,9 +95,8 @@ class _GraphitiAdapterReadMixin:
         with self._lock:
             attempt_row = self._graphiti_attempt_row(self._connection, attempt_id)
             attempt = self._graphiti_attempt_from_row(
-                self._connection, attempt_row, replayed=False
+                self._connection, attempt_row, replayed=False, require_current=True,
             )
-            self._require_graphiti_attempt_current(self._connection, attempt)
             manifest_row = self._connection.execute(
                 "SELECT * FROM graphiti_input_manifests WHERE manifest_id=?",
                 (str(attempt.manifest_id),),
@@ -136,14 +134,13 @@ class _GraphitiAdapterReadMixin:
             result = self._graphiti_replay_source_from_row(
                 self._connection, row, replayed=False
             )
-            attempt = self._graphiti_attempt_from_row(
+            self._graphiti_attempt_from_row(
                 self._connection,
                 self._graphiti_attempt_row(
                     self._connection, result.source.source_attempt_id
                 ),
-                replayed=False,
+                replayed=False, require_current=True,
             )
-            self._require_graphiti_attempt_current(self._connection, attempt)
             return result
 
     def approved_graphiti_replay_bundle(
@@ -175,12 +172,11 @@ class _GraphitiAdapterReadMixin:
             self._connection, row, replayed=False
         )
         source = retained.source
-        attempt = self._graphiti_attempt_from_row(
+        self._graphiti_attempt_from_row(
             self._connection,
             self._graphiti_attempt_row(self._connection, source.source_attempt_id),
-            replayed=False,
+            replayed=False, require_current=True,
         )
-        self._require_graphiti_attempt_current(self._connection, attempt)
 
         version_row = self._connection.execute(
             "SELECT * FROM extraction_run_versions WHERE run_version_id=?",
