@@ -92,6 +92,62 @@ def test_source_context_types_official_route_framework_and_level_codes():
 
 
 @pytest.mark.parametrize(
+    ("claim", "source_context", "official_term"),
+    (
+        (
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "Immigration Rules Appendix Graduate. "
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "ST8.1/2/3",
+        ),
+        (
+            "Permission was previously granted under Part 14: stateless persons.",
+            "Immigration Rules part 14: stateless persons. "
+            "Permission was previously granted under Part 14: stateless persons.",
+            "Part 14: stateless persons",
+        ),
+    ),
+)
+def test_source_context_types_bounded_immigration_rule_references(
+    claim, source_context, official_term,
+):
+    assert evidence.bounded_named_entities(
+        claim,
+        source_context=source_context,
+    ) == frozenset({(official_term, "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize(
+    ("claim", "source_context"),
+    (
+        (
+            "The qualification must meet ST8.1/2/3X of the Rules.",
+            "Immigration Rules Appendix Graduate. ST8.1/2/3 applies.",
+        ),
+        (
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "A training handbook says ST8.1/2/3 applies.",
+        ),
+        (
+            "Permission was granted under Part 14: stateless persons.",
+            "A handbook cites Part 14: stateless persons.",
+        ),
+        (
+            "Permission was granted under Part 14: stateless personsX.",
+            "Immigration Rules part 14: stateless persons.",
+        ),
+    ),
+)
+def test_immigration_rule_references_require_exact_declared_source_context(
+    claim, source_context,
+):
+    assert evidence.bounded_named_entities(
+        claim,
+        source_context=source_context,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize(
     "source",
     (
         "UK Ancestry applicants may apply.",

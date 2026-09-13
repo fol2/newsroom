@@ -80,7 +80,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v11"
+VERSION = "newsroom.native-evidence-assessor.v12"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -119,11 +119,15 @@ SYSTEM = (
     "supported new information exists, governed_claims and qualification_evidence "
     "may both be empty. When substantive_new_information is non-empty, every item "
     "must exactly equal a HEADLINE or SUBSTANTIVE claim; include the exact HEADLINE "
-    "claim and at least one SUBSTANTIVE claim. The HEADLINE must have qualification "
-    "evidence supported "
-    "by the exact source facts. Return no substantive new information only when the "
-    "source genuinely contains no supported new information, and invent no "
-    "qualification. The named-entity set in rendered_assertion_zh_hant_hk must exactly "
+    "claim and at least one SUBSTANTIVE claim. In qualification test_evidence, copy "
+    "every witness value other than a fixed classifier label byte-for-byte from the "
+    "claim or supporting excerpt. material_relation_span must be one complete "
+    "affirmative source clause containing both the qualifying subject and its new, "
+    "changed, effect or action relation. Never paraphrase or invent new_state, "
+    "practical_effect, affected_group or reader_action. Return no qualification evidence "
+    "and no substantive new information when no such exact qualifying clause is available "
+    "or the source genuinely contains no supported new information; invent no qualification. "
+    "The named-entity set in rendered_assertion_zh_hant_hk must exactly "
     "equal the named-entity set in claim. Require every claim entity to occur in its "
     "supporting excerpt and preserve its source spelling unchanged in the rendered "
     "claim; do not annotate or translate named entities. Do not add an entity found "
@@ -761,7 +765,7 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
@@ -769,6 +773,7 @@ class NativeAssessmentUsage:
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v8"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v9"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v10"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v11"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"

@@ -137,7 +137,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v11"
+    assert VERSION == "newsroom.native-evidence-assessor.v12"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
@@ -151,6 +151,11 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     assert "must exactly equal the named-entity set in claim" in SYSTEM
     assert "only in the excerpt, source body or inventory" in SYSTEM
     assert "must not be copied unchanged" in SYSTEM
+    assert "byte-for-byte from the claim or supporting excerpt" in SYSTEM
+    assert "one complete affirmative source clause" in SYSTEM
+    assert "Never paraphrase or invent new_state" in SYSTEM
+    assert "Return no qualification evidence" in SYSTEM
+    assert "and no substantive new information" in SYSTEM
     connection.close()
 
 
@@ -450,6 +455,43 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
         combined_assessment, combined_claim, combined_claim
     ).stable_reason_codes
+
+    for exact_claim, source_context, rendered, names in (
+        (
+            "The relevant qualification meets ST8.1/2/3 of the Rules.",
+            "Immigration Rules Appendix Graduate. The relevant qualification "
+            "meets ST8.1/2/3 of the Rules.",
+            "有關資格符合ST8.1/2/3規則。",
+            ("ST8.1/2/3",),
+        ),
+        (
+            "Permission was previously granted under Part 14: stateless persons.",
+            "Immigration Rules part 14: stateless persons. Permission was "
+            "previously granted under Part 14: stateless persons.",
+            "先前已根據Part 14: stateless persons獲准。",
+            ("Part 14: stateless persons",),
+        ),
+    ):
+        official = json.loads(canonical_json_bytes(package))
+        official["governed_claims"][0].update({
+            "claim": exact_claim,
+            "supporting_excerpt": exact_claim,
+            "rendered_assertion_zh_hant_hk": rendered,
+        })
+        official["substantive_new_information"] = [exact_claim]
+        official_acquired = SimpleNamespace(**{
+            **vars(acquired), "body": source_context.encode(),
+        })
+        official_assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes({"package": official}).decode(), {}
+            ),
+            candidate, base, (source,), (official_acquired,),
+        )
+        assert official_assessment.governed_claims[0].named_entities == names
+        assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+            official_assessment, source_context, exact_claim
+        ).stable_reason_codes
 
     month_claim = (
         "If the applicant meets the ECAA business person requirement, they will be "
@@ -1329,7 +1371,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     import newsroom.control_plane.native_assessor as module
 
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v9")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
@@ -1348,7 +1390,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     first = assessor(candidate, base, (), ())
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
         _, usage = _usage(tmp_path, monkeypatch)
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
@@ -1376,6 +1418,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     "newsroom.native-evidence-assessor.v8",
     "newsroom.native-evidence-assessor.v9",
     "newsroom.native-evidence-assessor.v10",
+    "newsroom.native-evidence-assessor.v11",
 ))
 @pytest.mark.parametrize("settled", (True, False))
 def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(
@@ -1401,7 +1444,7 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
             )(candidate, base, (), ())
     else:
         old_usage.begin(candidate, base, "unknown prior attempt")
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     _, new_usage = _usage(tmp_path, monkeypatch)
     calls = []
