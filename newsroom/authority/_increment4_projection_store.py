@@ -225,11 +225,13 @@ class _Increment4ProjectionAuthorityStore(
                     )
                 )
 
-            event_rows = conn.execute(
-                "SELECT * FROM ledger_events WHERE ledger_seq<=? ORDER BY ledger_seq",
-                (source_watermark,),
-            ).fetchall()
-            events = tuple(self._event_from_row(row) for row in event_rows)
+            events = tuple(
+                self._event_from_row(row)
+                for row in conn.execute(
+                    "SELECT * FROM ledger_events WHERE ledger_seq<=? ORDER BY ledger_seq",
+                    (source_watermark,),
+                )
+            )
             if not events or events[-1].ledger_seq != source_watermark:
                 raise AuthorityPersistenceError(
                     "Increment 4 source watermark lacks an exact retained event"
