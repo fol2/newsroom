@@ -1018,6 +1018,21 @@ class RetrievalContextAuthority:
         ):
             raise WorkItemContractError("retrieval authority retained bytes differ")
 
+    def verify_retained_currentness(
+        self, connection: sqlite3.Connection, binding: RetrievalInputBinding
+    ) -> bool:
+        """Require intact retention, then report current usability."""
+        # Both native checks use the same current governed context read. Perform
+        # it once here; retain no result beyond this operation.
+        if self._verify_native_binding(binding):
+            return True
+        self.verify_retained_integrity(connection, binding)
+        try:
+            self.verify(connection, binding)
+        except WorkItemContractError:
+            return False
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class WatchConditionWorkItemBinding:
@@ -2669,12 +2684,9 @@ class TriageWorkItemStore:
             elif not self._watch_occurrence_reached(v.watch, v.reentry_kind):
                 reasons.append("watch occurrence")
         if self._retrieval_authority is not None:
-            self._retrieval_authority.verify_retained_integrity(
+            if not self._retrieval_authority.verify_retained_currentness(
                 self._connection, v.retrieval
-            )
-            try:
-                self._retrieval_authority.verify(self._connection, v.retrieval)
-            except WorkItemContractError:
+            ):
                 reasons.append("retrieval_authority_differs")
         elif v.retrieval.state is RetrievalBindingState.RECEIPT:
             reasons.append("retrieval_authority_unavailable")
