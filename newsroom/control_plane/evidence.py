@@ -300,8 +300,8 @@ _SOURCE_BOUND_TECHNICAL_FRAMEWORK = re.compile(
 )
 _SOURCE_BOUND_LEVEL_CODE = re.compile(r"\blevel\s+([A-C][12])\b")
 _SOURCE_BOUND_IMMIGRATION_RULE_CITATION = re.compile(
-    r"(?<![A-Za-z0-9])([A-Z]{1,4}\d{1,3}\.\d{1,3}(?:/\d{1,3}){1,4})"
-    r"(?![A-Za-z0-9/.])"
+    r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d{1,3}\.\d{1,3}(?:/\d{1,3}){1,4})"
+    r"(?![A-Za-z0-9_/]|\.\d)"
 )
 _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE = re.compile(
     r"\b(Part\s+\d{1,3}:\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,4})"
@@ -335,12 +335,23 @@ def _source_bound_official_terms(
     for start, end, term in _contextual_official_term_shapes(text):
         if not re.search(_entity_pattern(term), source_context):
             continue
-        if re.fullmatch(_SOURCE_BOUND_IMMIGRATION_RULE_CITATION, term):
+        reference_pattern = (
+            _SOURCE_BOUND_IMMIGRATION_RULE_CITATION
+            if _SOURCE_BOUND_IMMIGRATION_RULE_CITATION.fullmatch(term)
+            else _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE
+            if _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(term)
+            else None
+        )
+        if reference_pattern is not None and not any(
+            match.group(1) == term for match in reference_pattern.finditer(source_context)
+        ):
+            continue
+        if reference_pattern is _SOURCE_BOUND_IMMIGRATION_RULE_CITATION:
             declared = re.search(
                 r"\bImmigration Rules Appendix\b", source_context,
                 flags=re.IGNORECASE,
             )
-        elif re.fullmatch(_SOURCE_BOUND_IMMIGRATION_PART_REFERENCE, term):
+        elif reference_pattern is _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE:
             declared = re.search(
                 rf"\bImmigration Rules\s+{re.escape(term)}\b",
                 source_context,

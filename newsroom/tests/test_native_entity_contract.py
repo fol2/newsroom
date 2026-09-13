@@ -147,6 +147,29 @@ def test_immigration_rule_references_require_exact_declared_source_context(
     ) == frozenset()
 
 
+@pytest.mark.parametrize("suffix", ("/4.", ".4.", "_extra.", "X."))
+def test_immigration_citation_source_prefix_is_not_an_exact_token(suffix):
+    assert evidence.bounded_named_entities(
+        "The code is ST8.1/2/3",
+        source_context="Immigration Rules Appendix Graduate. The code is ST8.1/2/3" + suffix,
+    ) == frozenset()
+
+
+def test_immigration_citation_allows_sentence_ending_punctuation():
+    claim = "The code is ST8.1/2/3."
+    assert evidence.bounded_named_entities(
+        claim, source_context="Immigration Rules Appendix Graduate. " + claim,
+    ) == frozenset({("ST8.1/2/3", "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize("suffix", (" and related persons.", "-related."))
+def test_immigration_part_source_prefix_is_not_an_exact_title(suffix):
+    assert evidence.bounded_named_entities(
+        "Permission under Part 14: stateless persons",
+        source_context="Immigration Rules Part 14: stateless persons" + suffix,
+    ) == frozenset()
+
+
 @pytest.mark.parametrize(
     "source",
     (
