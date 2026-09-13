@@ -48,7 +48,7 @@ from newsroom.control_plane.model_usage import (
     WorkloadClass,
 )
 from newsroom.extraction.types import ExtractionRunId
-from newsroom.control_plane.store import GRAPHITI_MAX_FAILURES
+from newsroom.control_plane.store import GRAPHITI_MAX_FAILURES, LEDGER_GENESIS
 from newsroom.control_plane.writer import (
     cont_writer_implementation_identity as _graphiti_implementation_identity,
 )
@@ -1128,6 +1128,51 @@ class EvaluationGraphitiRunner:
         ] = {}
         self._authenticated_recovered_gaps: dict[tuple[str, int], object] = {}
 
+    @staticmethod
+    def _exact_private_receipt_ledger_row(
+        connection: sqlite3.Connection,
+        *,
+        receipt: Mapping[str, object],
+    ) -> tuple[object, ...] | None:
+        payload_digest = digest_canonical(receipt)
+        rows = connection.execute(
+            "SELECT current.seq,current.at,current.prev_digest,current.digest,"
+            "current.payload_digest,current.payload_json,prior.digest FROM ledger current "
+            "LEFT JOIN ledger prior ON prior.seq=current.seq-1 "
+            "WHERE current.kind='GRAPHITI_EVALUATION_ATTEMPT' "
+            "AND current.payload_digest=? "
+            "ORDER BY current.seq",
+            (payload_digest,),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        row = tuple(rows[0])
+        try:
+            raw = str(row[5]).encode("utf-8")
+            decoded = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        event_digest = digest_canonical(
+            {
+                "at": str(row[1]),
+                "kind": "GRAPHITI_EVALUATION_ATTEMPT",
+                "payload_digest": payload_digest,
+                "prev": str(row[2]),
+            }
+        )
+        if (
+            decoded != receipt
+            or raw != canonical_json_bytes(receipt)
+            or digest_bytes(raw) != str(row[4])
+            or str(row[4]) != payload_digest
+            or str(row[3]) != event_digest
+            or str(row[2]) != (
+                LEDGER_GENESIS if int(row[0]) == 1 else row[6]
+            )
+        ):
+            return None
+        return row
+
     def prepare_recovered_ambiguous_successor(
         self,
         *,
@@ -1137,6 +1182,7 @@ class EvaluationGraphitiRunner:
         connection: sqlite3.Connection,
         model_usage: ModelUsageService,
         latest_allowed_attempt_number: int | None = None,
+        retained_reentry_attempt_number: int | None = None,
     ) -> bool:
         """Authenticate the one historical terminal-head/private-receipt gap."""
 
@@ -1200,28 +1246,11 @@ class EvaluationGraphitiRunner:
             != GRAPHITI_RESULT_STAGE_UNCLASSIFIED
         ):
             return False
-        payload_digest = digest_canonical(receipt)
-        ledger_rows = connection.execute(
-            "SELECT seq,at,prev_digest,digest,payload_json FROM ledger "
-            "WHERE kind='GRAPHITI_EVALUATION_ATTEMPT' AND payload_digest=? "
-            "ORDER BY seq",
-            (payload_digest,),
-        ).fetchall()
-        if len(ledger_rows) != 1:
-            return False
-        ledger = ledger_rows[0]
-        try:
-            ledger_payload = json.loads(str(ledger[4]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return False
-        ledger_digest = digest_canonical(
-            {
-                "at": str(ledger[1]),
-                "kind": "GRAPHITI_EVALUATION_ATTEMPT",
-                "payload_digest": payload_digest,
-                "prev": str(ledger[2]),
-            }
+        ledger = self._exact_private_receipt_ledger_row(
+            connection, receipt=receipt,
         )
+        if ledger is None:
+            return False
         spend = connection.execute(
             "SELECT status,usage_basis,actual_usd_microunits,"
             "actual_gbp_microunits FROM unpublished_graphiti_spend "
@@ -1234,9 +1263,7 @@ class EvaluationGraphitiRunner:
             (unit.ingest_id, latest_allowed),
         ).fetchone()
         if (
-            ledger_payload != receipt
-            or str(ledger[3]) != ledger_digest
-            or spend is None
+            spend is None
             or tuple(spend) != ("UNRECONCILED", "UNREPORTED", None, None)
             or later_effect is not None
         ):
@@ -1250,6 +1277,7 @@ class EvaluationGraphitiRunner:
                     skipped_receipt_digest=receipt_digest,
                     skipped_recorded_at=skipped_recorded_at.value,
                     latest_allowed_attempt_number=latest_allowed,
+                    retained_reentry_attempt_number=retained_reentry_attempt_number,
                 )
             )
         except ModelUsageIntegrityError:
@@ -1314,18 +1342,29 @@ class EvaluationGraphitiRunner:
         connection: sqlite3.Connection,
         model_usage: ModelUsageService,
     ) -> int | None:
-        """Authenticate attempt 5's retained gap proof for one normal attempt 6."""
+        """Authenticate attempt 5's retained gap proof for replay or attempt 6."""
 
         from newsroom.graphiti_adapter import GraphitiAttemptRecord
 
+        same_attempt_replay = (
+            isinstance(current_attempt, GraphitiAttemptRecord)
+            and next_attempt_number == current_attempt.attempt_number
+        )
         if (
             not isinstance(current_attempt, GraphitiAttemptRecord)
             or current_attempt.attempt_number != GRAPHITI_MAX_FAILURES + 2
-            or current_attempt.outcome.terminal
             or current_attempt.recovered_ambiguous_progression is None
-            or next_attempt_number != current_attempt.attempt_number + 1
+            or next_attempt_number
+            not in {
+                current_attempt.attempt_number,
+                current_attempt.attempt_number + 1,
+            }
             or str(current_attempt.run_id)
             != str(typed_id(ExtractionRunId, "run", unit.ingest_id))
+            or (
+                not same_attempt_replay
+                and current_attempt.outcome.terminal
+            )
         ):
             return None
         if not self.prepare_recovered_ambiguous_successor(
@@ -1335,6 +1374,9 @@ class EvaluationGraphitiRunner:
             connection=connection,
             model_usage=model_usage,
             latest_allowed_attempt_number=current_attempt.attempt_number,
+            retained_reentry_attempt_number=(
+                current_attempt.attempt_number if same_attempt_replay else None
+            ),
         ):
             return None
         key = (unit.ingest_id, current_attempt.attempt_number)
@@ -1342,6 +1384,8 @@ class EvaluationGraphitiRunner:
         self._authenticated_recovered_gaps.pop(key, None)
         if expected != current_attempt.recovered_ambiguous_progression:
             return None
+        if next_attempt_number == current_attempt.attempt_number:
+            self._recovered_ambiguous_progressions[key] = expected
         self._authenticated_recovered_gaps[
             (unit.ingest_id, next_attempt_number)
         ] = expected
@@ -1462,16 +1506,22 @@ class EvaluationGraphitiRunner:
             == f"native-source:{unit.observation_digest}"
             and unit.attempt_number > 1
         ):
-            history = self._extraction_records.run_history(
-                typed_id(ExtractionRunId, "run", unit.ingest_id),
-                limit=1,
-                proof=self._proof,
-            )
-            if len(history) != 1:
-                raise GraphitiResultStageError(
-                    GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+            if recovered_progression is not None:
+                extraction_previous = self._extraction_records.metadata(
+                    recovered_progression.authoritative_run_version_id,
+                    proof=self._proof,
                 )
-            extraction_previous = history[0]
+            else:
+                history = self._extraction_records.run_history(
+                    typed_id(ExtractionRunId, "run", unit.ingest_id),
+                    limit=1,
+                    proof=self._proof,
+                )
+                if len(history) != 1:
+                    raise GraphitiResultStageError(
+                        GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+                    )
+                extraction_previous = history[0]
         attempt = evaluation_attempt_for_body(
             episode_body=unit.episode_body,
             ingest_id=unit.ingest_id,

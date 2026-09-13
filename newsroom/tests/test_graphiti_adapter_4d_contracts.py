@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.policy import PayloadSchemaValidationError
 from newsroom.extraction.types import FixtureExtractionCase, VersionedExtractionComponent
 from newsroom.graphiti_adapter import (
     GRAPHITI_ADAPTER_CONTRACT_VERSION,
@@ -33,6 +34,13 @@ from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_NO_EMBEDDING_COMPONENT,
     GRAPHITI_NO_MODEL_COMPONENT,
     GRAPHITI_PROMPT_COMPONENT,
+)
+from newsroom.graphiti_adapter.policy import (
+    GRAPHITI_ATTEMPT_EXECUTE_COMMAND,
+    _golden_recovered_attempt_value,
+    graphiti_adapter_command_definitions,
+    graphiti_adapter_payload_contracts,
+    merge_graphiti_adapter_authority_registries,
 )
 
 from .extraction_4a_helpers import contract_request, seed_extraction_fixture
@@ -64,6 +72,42 @@ def _real_authority() -> RealGraphitiRuntimeAuthority:
         evaluation_plan_digest=_digest("evaluation"),
         rollback_digest=_digest("rollback"),
     )
+
+
+def test_recovered_attempt_uses_explicit_v2_authority_contract(tmp_path) -> None:
+    contracts = {
+        item.schema_version: item for item in graphiti_adapter_payload_contracts()
+    }
+    legacy = contracts["graphiti_adapter_attempt_v1"]
+    current = contracts["graphiti_adapter_attempt_v2"]
+    recovered = _golden_recovered_attempt_value()
+    assert legacy.contract_digest == (
+        "sha256:9b4dc775aba153967030c96ef0cf974d09b605cdfe59a37fd368ecbbea9d0cf4"
+    )
+    with pytest.raises(PayloadSchemaValidationError, match="invalid exact field set"):
+        legacy.canonicalizer(recovered)
+    assert current.canonicalizer(recovered) == current.golden_vectors[0].expected_bytes
+
+    definitions = {
+        item.definition_version: item
+        for item in graphiti_adapter_command_definitions()
+        if item.command_type == GRAPHITI_ATTEMPT_EXECUTE_COMMAND
+    }
+    assert definitions["graphiti-proposal-adapter-authority-command-v1"].digest == (
+        "sha256:65988dd3eb71f1abfe14ae806ae1ae8960013b44601d83af8011d061a58b3a7a"
+    )
+    state = seed_extraction_fixture(tmp_path)
+    commands, schemas = merge_graphiti_adapter_authority_registries(
+        command_registry=state.commands,
+        payload_schemas=state.schemas,
+    )
+    selected = commands.resolve(GRAPHITI_ATTEMPT_EXECUTE_COMMAND)
+    assert selected.definition_version == (
+        "graphiti-proposal-adapter-attempt-authority-command-v2"
+    )
+    assert schemas.resolve(
+        "graphiti_adapter_attempt_v2", selected.payload_mode
+    ).contract_version == "graphiti-proposal-adapter-attempt-authority-contract-v2"
 
 
 def test_fixed_contract_and_workspace_policies_are_offline_and_canonical() -> None:

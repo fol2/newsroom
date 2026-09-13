@@ -159,6 +159,7 @@ class NativeGraphitiProcessor:
         terminal_holds = {}
         recovered_ambiguous_attempts: dict[str, int] = {}
         authenticated_rejected_attempts: dict[str, tuple[int, ...]] = {}
+        authenticated_reentry_attempts: dict[str, int] = {}
         for ingest_id in units_by_ingest:
             # The authority commits before the private receipt/failure journal.
             # Inspect it even if a crash left no local failure row.
@@ -182,6 +183,28 @@ class NativeGraphitiProcessor:
                     "unpublished_graphiti_attempt_receipts WHERE ingest_id=?",
                     (ingest_id,),
                 ).fetchone()[0]
+                authenticate_retained = getattr(
+                    self._runner,
+                    "authenticate_retained_recovered_ambiguous_progression",
+                    None,
+                )
+                skipped = (
+                    authenticate_retained(
+                        unit=units_by_ingest[ingest_id],
+                        current_attempt=head,
+                        authoritative_attempt=history[1],
+                        next_attempt_number=int(next_attempt),
+                        connection=self._connection,
+                        model_usage=self._usage,
+                    )
+                    if len(history) == 2 and callable(authenticate_retained)
+                    else None
+                )
+                if skipped is not None:
+                    authenticated_rejected_attempts[ingest_id] = (int(skipped),)
+                    if int(next_attempt) == head.attempt_number:
+                        authenticated_reentry_attempts[ingest_id] = int(next_attempt)
+                    continue
                 if head.outcome.terminal:
                     prepare_recovery = getattr(
                         self._runner,
@@ -212,26 +235,6 @@ class NativeGraphitiProcessor:
                         f"{head.outcome.value}:{head.failure_code}"
                     )
                     continue
-                authenticate_retained = getattr(
-                    self._runner,
-                    "authenticate_retained_recovered_ambiguous_progression",
-                    None,
-                )
-                skipped = (
-                    authenticate_retained(
-                        unit=units_by_ingest[ingest_id],
-                        current_attempt=head,
-                        authoritative_attempt=history[1],
-                        next_attempt_number=int(next_attempt),
-                        connection=self._connection,
-                        model_usage=self._usage,
-                    )
-                    if len(history) == 2 and callable(authenticate_retained)
-                    else None
-                )
-                if skipped is not None:
-                    authenticated_rejected_attempts[ingest_id] = (int(skipped),)
-                    continue
         deferred = set()
 
         def defer(unit: CorpusIngestUnit) -> bool:
@@ -253,6 +256,7 @@ class NativeGraphitiProcessor:
             fallback_permitted=True,
             recovered_ambiguous_attempts=recovered_ambiguous_attempts,
             authenticated_rejected_attempts=authenticated_rejected_attempts,
+            authenticated_reentry_attempts=authenticated_reentry_attempts,
         )
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():

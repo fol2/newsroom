@@ -944,7 +944,7 @@ def test_native_recovered_ambiguous_attempt_crosses_private_attempt_gap_once(
                 ingest_id=unit.ingest_id,
                 attempt_number=number,
                 proving_run_id=unit.proving_run_id,
-                generation_id="test-generation",
+                generation_id=cycle.GRAPHITI_GENERATION_ID,
                 reserved_gbp_microunits=500_000,
                 ceiling_gbp_microunits=None,
             )
@@ -1108,6 +1108,435 @@ def test_native_recovered_gap_allows_only_accounted_attempt_six(
             assert ("ingest", 6) in calls
         else:
             assert len(calls) == 1
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "retained_outcome",
+    (
+        pytest.param("COMPLETE", id="terminal-complete"),
+        pytest.param("MALFORMED_OUTPUT", id="terminal-non-complete"),
+        pytest.param("TIMEOUT", id="non-terminal"),
+    ),
+)
+def test_native_reenters_retained_recovered_attempt_before_a_new_successor(
+    tmp_path, monkeypatch, retained_outcome,
+):
+    """A crash after authority attempt 5 leaves private attempt 5 reserved."""
+    from newsroom.control_plane.model_usage import GraphitiIngestRetryEvidence
+    from newsroom.control_plane.store import (
+        insert_graphiti_attempt_receipt,
+        record_graphiti_failure,
+        reserve_graphiti_spend,
+    )
+    from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete
+
+    calls = []
+
+    class Runner:
+        requires_canonical_control_plane_stores = True
+
+        def authenticate_retained_recovered_ambiguous_progression(self, **values):
+            calls.append(("authenticate", values["next_attempt_number"]))
+            return 4
+
+        def ingest_with_usage(self, unit, **_values):
+            calls.append(("ingest", unit.attempt_number))
+            return _complete(
+                unit, proposal_count=0, entity_count=0, relation_count=0
+            )
+
+        ingest = ingest_with_usage
+        ingest_until = ingest_with_usage
+
+        def finalise_usage(self, *_args, **_values):
+            return None
+
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    unit = _native("recovered-gap-reentry")
+    recovery = object()
+    head = SimpleNamespace(
+        attempt_number=5,
+        outcome=GraphitiAdapterOutcome(retained_outcome),
+        recovered_ambiguous_progression=recovery,
+    )
+    third = SimpleNamespace(
+        attempt_number=3,
+        outcome=GraphitiAdapterOutcome.AMBIGUOUS_EFFECT,
+    )
+    processor._system.graphiti = SimpleNamespace(
+        attempt_history=lambda *_args, **_values: (head, third),
+    )
+    processor._runner = Runner()
+    processor._usage = SimpleNamespace(
+        native_graphiti_ingest_retry_evidence_many=lambda **_values: {
+            unit.ingest_id: GraphitiIngestRetryEvidence(
+                attempt_numbers=(1, 2, 3, 4, 5),
+                zero_dispatch_attempts=(1, 2),
+                settled_provider_attempts=(3,),
+                latest_settled_provider_attempt=3,
+                unresolved_attempts=(4, 5),
+            )
+        }
+    )
+    processor._settle_missing_subscription_usage = lambda _units: None
+    monkeypatch.setattr(
+        n, "graphiti_required_route_holds", lambda *_args, **_values: ()
+    )
+    monkeypatch.setattr(
+        cycle, "graphiti_required_route_holds", lambda *_args, **_values: ()
+    )
+    try:
+        for number in range(1, 5):
+            reserve_graphiti_spend(
+                connection,
+                spend_id=f"{unit.ingest_id}:{number}",
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                proving_run_id=unit.proving_run_id,
+                generation_id=cycle.GRAPHITI_GENERATION_ID,
+                reserved_gbp_microunits=500_000,
+                ceiling_gbp_microunits=None,
+            )
+            record_graphiti_failure(
+                connection,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
+                outcome="FAILED",
+                failure_code="PRODUCER_INTERNAL_ERROR",
+            )
+            insert_graphiti_attempt_receipt(
+                connection,
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                outcome="FAILED",
+                receipt={
+                    "attempt_number": number,
+                    "ingest_id": unit.ingest_id,
+                    "outcome": "FAILED",
+                },
+            )
+        reserve_graphiti_spend(
+            connection,
+            spend_id=f"{unit.ingest_id}:5",
+            ingest_id=unit.ingest_id,
+            attempt_number=5,
+            proving_run_id=unit.proving_run_id,
+            generation_id=cycle.GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=None,
+        )
+        connection.commit()
+        assert not cycle._queue(
+            connection,
+            (unit,),
+            model_usage=processor._usage,
+            recovered_ambiguous_attempts={},
+            authenticated_rejected_attempts={unit.ingest_id: (4,)},
+        )
+        assert not cycle._queue(
+            connection,
+            (unit,),
+            model_usage=processor._usage,
+            recovered_ambiguous_attempts={},
+            authenticated_rejected_attempts={unit.ingest_id: (4,)},
+            authenticated_reentry_attempts={unit.ingest_id: 4},
+        )
+        assert cycle._queue(
+            connection,
+            (unit,),
+            model_usage=processor._usage,
+            recovered_ambiguous_attempts={},
+            authenticated_rejected_attempts={unit.ingest_id: (4,)},
+            authenticated_reentry_attempts={unit.ingest_id: 5},
+        )
+
+        result, = processor.advance((unit,), cycle_id="recovered-gap-reentry")
+        assert (result.state, result.reason, calls) == (
+            "GRAPHITI_COMPLETE", None, [("authenticate", 5), ("ingest", 5)]
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_attempt_receipts "
+            "WHERE ingest_id=? AND attempt_number=5",
+            (unit.ingest_id,),
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "retained_outcome",
+    ("COMPLETE", "MALFORMED_OUTPUT", "TIMEOUT"),
+)
+def test_governed_reentry_reconstructs_retained_attempt_five_from_attempt_three(
+    monkeypatch, retained_outcome,
+):
+    """Private receipt loss must not shift the retained authority lineage."""
+    from newsroom.authority._extraction_facade import GovernedExtractionRecords
+    from newsroom.authority._graphiti_adapter_facade import (
+        GovernedGraphitiProposalAdapter,
+    )
+    from newsroom.authority.auth import AuthenticationProof
+    from newsroom.authority.canonical import digest_canonical
+    from newsroom.authority.types import UtcTimestamp
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+    from newsroom.graphiti_adapter import (
+        GraphitiAdapterOutcome,
+        RecoveredAmbiguousProgressionProof,
+    )
+    from newsroom.graphiti_adapter.evaluation_attempt import (
+        evaluation_attempt_for_body,
+    )
+
+    unit = _native("recovered-gap-governed-reentry")
+    authority = unit.authority
+    assert authority is not None
+
+    def attempt(number, *, recovery=None, previous_number=None, previous_id=None):
+        return evaluation_attempt_for_body(
+            episode_body=unit.episode_body,
+            ingest_id=unit.ingest_id,
+            proving_run_id=unit.proving_run_id,
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            observation_digest=unit.observation_digest,
+            published_at=unit.published_at,
+            updated_at=unit.updated_at,
+            effective_revision=unit.effective_revision,
+            canonical_url=unit.canonical_url,
+            revision_digest=unit.revision_digest,
+            representation_digest=unit.representation_digest,
+            authority_ids=(
+                authority.admission_id,
+                authority.access_decision_id,
+                authority.definition_id,
+                authority.definition_version_id,
+                authority.item_id,
+                authority.revision_id,
+                authority.representation_id,
+            ),
+            attempt_number=number,
+            recovered_ambiguous_progression=recovery,
+            extraction_previous_version_number=previous_number,
+            extraction_previous_run_version_id=previous_id,
+        )
+
+    third = attempt(3)
+    instant = UtcTimestamp.parse("2026-09-13T12:00:00.000000Z")
+    recovery = RecoveredAmbiguousProgressionProof(
+        authoritative_attempt_id=third.attempt_id,
+        authoritative_attempt_digest=digest_canonical({"attempt": 3}),
+        authoritative_attempt_number=3,
+        authoritative_run_version_id=third.extraction_request.run_version_id,
+        authoritative_recorded_at=instant,
+        skipped_attempt_number=4,
+        skipped_receipt_digest=digest_canonical({"receipt": 4}),
+        skipped_ledger_sequence=4,
+        skipped_ledger_digest=digest_canonical({"ledger": 4}),
+        skipped_recorded_at=instant,
+        settled_usage_evidence_digest=digest_canonical({"usage": 3}),
+        recovery_marker_digest=digest_canonical({"marker": 3}),
+        marker_attempt_number=3,
+        marker_workspace_id=third.workspace_id,
+        marker_input_digest=digest_canonical({"marker-input": 3}),
+        input_binding_digest=third.extraction_request.input_binding.digest,
+        ingest_id=unit.ingest_id,
+    )
+    fifth = attempt(
+        5,
+        recovery=recovery,
+        previous_number=3,
+        previous_id=third.extraction_request.run_version_id,
+    )
+    from newsroom.tests.test_graphiti_governed_runner import (
+        _governed_dependencies,
+    )
+
+    retained_adapter, _, retained_proof, _, _ = _governed_dependencies(
+        late_timeout=retained_outcome == "TIMEOUT",
+    )
+    current = retained_adapter.execute_attempt(fifth, proof=retained_proof)
+    current = replace(
+        current,
+        outcome=GraphitiAdapterOutcome(retained_outcome),
+        failure_code=(
+            "OUTPUT_SCHEMA_INVALID"
+            if retained_outcome == "MALFORMED_OUTPUT"
+            else current.failure_code
+        ),
+        proposal_set_id=(
+            None
+            if retained_outcome == "MALFORMED_OUTPUT"
+            else current.proposal_set_id
+        ),
+        recovered_ambiguous_progression=recovery,
+    )
+    authenticator = EvaluationGraphitiRunner()
+
+    def prepare(**values):
+        assert values["retained_reentry_attempt_number"] == 5
+        authenticator._recovered_ambiguous_progressions[(unit.ingest_id, 5)] = recovery
+        authenticator._authenticated_recovered_gaps[(unit.ingest_id, 5)] = recovery
+        return True
+
+    monkeypatch.setattr(
+        authenticator, "prepare_recovered_ambiguous_successor", prepare,
+    )
+    assert authenticator.authenticate_retained_recovered_ambiguous_progression(
+        unit=unit,
+        current_attempt=current,
+        authoritative_attempt=object(),
+        next_attempt_number=5,
+        connection=object(),
+        model_usage=object(),
+    ) == 4
+    calls = []
+
+    class Extraction:
+        def metadata(self, run_version_id, *_args, **_values):
+            calls.append(("metadata", run_version_id))
+            return SimpleNamespace(
+                version_number=3,
+                run_version_id=third.extraction_request.run_version_id,
+            )
+
+        def run_history(self, *_args, **_values):
+            raise AssertionError("reentry must not use the latest extraction")
+
+        def register_contract(self, *_args, **_values):
+            calls.append(("register-contract",))
+
+    class Adapter:
+        def register_configuration(self, *_args, **_values):
+            calls.append(("register-configuration",))
+
+        def execute_attempt(self, request, *_args, **_values):
+            calls.append(("execute", request))
+            return object()
+
+    expected = object()
+    adapter = Adapter()
+    extraction = Extraction()
+    runner = EvaluationGraphitiRunner(
+        proposal_adapter=GovernedGraphitiProposalAdapter(
+            register_configuration=adapter.register_configuration,
+            execute_attempt=adapter.execute_attempt,
+            approve_replay=lambda *_args, **_values: None,
+            configuration=lambda *_args, **_values: None,
+            attempt=lambda *_args, **_values: None,
+            attempt_history=lambda *_args, **_values: (),
+            manifest_for_attempt=lambda *_args, **_values: None,
+            replay_source=lambda *_args, **_values: None,
+        ),
+        extraction_records=GovernedExtractionRecords(
+            register_contract=extraction.register_contract,
+            execute=lambda *_args, **_values: None,
+            contract=lambda *_args, **_values: None,
+            metadata=extraction.metadata,
+            run_history=extraction.run_history,
+            proposals=lambda *_args, **_values: (),
+            raw_output=lambda *_args, **_values: None,
+        ),
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture"),
+        fallback_permitted=False,
+    )
+    runner._recovered_ambiguous_progressions[(unit.ingest_id, 5)] = recovery
+    monkeypatch.setattr(
+        runner,
+        "_result_from_governed_authority",
+        lambda **_values: expected,
+    )
+
+    result = runner._ingest(
+        replace(unit, attempt_number=5),
+        deadline=datetime(2026, 9, 13, 12, 1, tzinfo=UTC),
+        invocation_observer=object(),
+    )
+
+    assert result is expected
+    request = next(entry[1] for entry in calls if entry[0] == "execute")
+    assert request.attempt_number == 5
+    assert request.expected_previous_attempt_id == third.attempt_id
+    assert request.extraction_request.version_number == 4
+    assert request.extraction_request.expected_previous_version_id == (
+        third.extraction_request.run_version_id
+    )
+    assert calls[0] == (
+        "metadata",
+        third.extraction_request.run_version_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        '{"attempt":4,"provider_dispatched":0}',
+        '{ "attempt": 4, "provider_dispatched": false }',
+        "orphaned-predecessor",
+    ),
+)
+def test_recovered_gap_requires_byte_exact_private_ledger_payload(mutation):
+    from newsroom.authority.canonical import (
+        canonical_json_bytes,
+        digest_bytes,
+        digest_canonical,
+    )
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+
+    receipt = {"attempt": 4, "provider_dispatched": False}
+    payload_digest = digest_bytes(canonical_json_bytes(receipt))
+    at = "2026-09-13T12:00:00.000000Z"
+    previous = "sha256:" + "0" * 64
+    event_digest = digest_canonical(
+        {
+            "at": at,
+            "kind": "GRAPHITI_EVALUATION_ATTEMPT",
+            "payload_digest": payload_digest,
+            "prev": previous,
+        }
+    )
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute(
+            "CREATE TABLE ledger(seq INTEGER,at TEXT,kind TEXT,prev_digest TEXT,"
+            "digest TEXT,payload_digest TEXT,payload_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO ledger VALUES(1,?,?,?,?,?,?)",
+            (
+                at,
+                "GRAPHITI_EVALUATION_ATTEMPT",
+                previous,
+                event_digest,
+                payload_digest,
+                canonical_json_bytes(receipt).decode("utf-8"),
+            ),
+        )
+        assert EvaluationGraphitiRunner._exact_private_receipt_ledger_row(
+            connection, receipt=receipt,
+        ) is not None
+        if mutation == "orphaned-predecessor":
+            forged_previous = digest_canonical({"unretained": "predecessor"})
+            forged_event = digest_canonical(
+                {
+                    "at": at,
+                    "kind": "GRAPHITI_EVALUATION_ATTEMPT",
+                    "payload_digest": payload_digest,
+                    "prev": forged_previous,
+                }
+            )
+            connection.execute(
+                "UPDATE ledger SET prev_digest=?,digest=?",
+                (forged_previous, forged_event),
+            )
+        else:
+            connection.execute("UPDATE ledger SET payload_json=?", (mutation,))
+        assert EvaluationGraphitiRunner._exact_private_receipt_ledger_row(
+            connection, receipt=receipt,
+        ) is None
     finally:
         connection.close()
 

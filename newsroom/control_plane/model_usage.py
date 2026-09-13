@@ -3180,6 +3180,7 @@ class ModelUsageService:
 
     def native_graphiti_ingest_retry_evidence_many(
         self, *, failed_attempts: Mapping[str, int], max_attempts: int,
+        _allow_missing_work_outcome_attempts: Mapping[str, int] | None = None,
     ) -> dict[str, GraphitiIngestRetryEvidence]:
         """Read only the finite native attempt allowance, never unrelated history.
 
@@ -3212,6 +3213,22 @@ class ModelUsageService:
             for ingest_id, (evidence, _) in self._graphiti_ingest_retry_evidence_batch(
                 ingest_ids=tuple(failed_attempts), native_attempts=native_attempts,
                 native_failed_attempts=failed_attempts,
+                allow_missing_work_outcome_envelopes=frozenset(
+                    WorkEnvelope.create(
+                        cycle_id=native_graphiti_usage_cycle_id(
+                            ingest_id=ingest_id, attempt_number=number,
+                        ),
+                        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                        admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+                        admission_decision_id=None, candidate_id=None,
+                        hypothesis_digest=None, evidence_package_digest=None,
+                        ingest_id=ingest_id,
+                        graphiti_attempt_id=f"{ingest_id}:{number}",
+                    ).envelope_id
+                    for ingest_id, number in (
+                        _allow_missing_work_outcome_attempts or {}
+                    ).items()
+                ),
             ).items()
         }
 
@@ -3224,6 +3241,7 @@ class ModelUsageService:
         skipped_receipt_digest: str,
         skipped_recorded_at: datetime,
         latest_allowed_attempt_number: int | None = None,
+        retained_reentry_attempt_number: int | None = None,
     ) -> str:
         """Authenticate settled use followed only by one local binding refusal."""
 
@@ -3240,6 +3258,10 @@ class ModelUsageService:
             or latest_allowed < skipped_attempt_number
             or skipped_recorded_at.tzinfo is None
             or skipped_recorded_at.utcoffset() is None
+            or (
+                retained_reentry_attempt_number is not None
+                and retained_reentry_attempt_number != latest_allowed
+            )
         ):
             raise ModelUsageIntegrityError(
                 "recovered ambiguous usage attempt sequence differs"
@@ -3253,6 +3275,11 @@ class ModelUsageService:
         evidence = self.native_graphiti_ingest_retry_evidence_many(
             failed_attempts={ingest_id: latest_allowed},
             max_attempts=latest_allowed,
+            _allow_missing_work_outcome_attempts=(
+                None
+                if retained_reentry_attempt_number is None
+                else {ingest_id: retained_reentry_attempt_number}
+            ),
         )[ingest_id]
         if (
             authoritative_attempt_number not in evidence.settled_provider_attempts
@@ -3424,6 +3451,7 @@ class ModelUsageService:
         self, *, ingest_ids: tuple[str, ...], before_attempt_number: int | None = None,
         native_attempts: Mapping[str, tuple[str, int]] | None = None,
         native_failed_attempts: Mapping[str, int] | None = None,
+        allow_missing_work_outcome_envelopes: frozenset[str] = frozenset(),
     ) -> dict[str, tuple[GraphitiIngestRetryEvidence, int]]:
         ingest_ids = tuple(dict.fromkeys(ingest_ids))
         for ingest_id in ingest_ids:
@@ -3666,7 +3694,10 @@ class ModelUsageService:
                     selected_attempts.items(), key=lambda item: item[1]
                 ):
                     leaves = by_attempt[envelope_id]
-                    if envelope_id not in work_outcomes or envelope_id in incomplete_envelopes:
+                    if (
+                        envelope_id not in work_outcomes
+                        and envelope_id not in allow_missing_work_outcome_envelopes
+                    ) or envelope_id in incomplete_envelopes:
                         unresolved.append(attempt)
                         continue
                     if not leaves:

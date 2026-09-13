@@ -805,6 +805,7 @@ def _queue(
     preserve_unit_order: bool = False,
     recovered_ambiguous_attempts: Mapping[str, int] | None = None,
     authenticated_rejected_attempts: Mapping[str, tuple[int, ...]] | None = None,
+    authenticated_reentry_attempts: Mapping[str, int] | None = None,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
     pending = []
@@ -821,6 +822,7 @@ def _queue(
         pending.append((unit, ingest_id, retries, dead))
     recovered_ambiguous_attempts = recovered_ambiguous_attempts or {}
     authenticated_rejected_attempts = authenticated_rejected_attempts or {}
+    authenticated_reentry_attempts = authenticated_reentry_attempts or {}
     failed_attempts = {
         ingest_id: retries
         for _, ingest_id, retries, dead in pending
@@ -840,14 +842,22 @@ def _queue(
                 continue
             evidence = retry_evidence[ingest_id]
             rejected = tuple(authenticated_rejected_attempts.get(ingest_id, ()))
+            reentry = authenticated_reentry_attempts.get(ingest_id)
             if (
                 len(set(rejected)) != len(rejected)
                 or any(number not in evidence.unresolved_attempts for number in rejected)
+                or (
+                    reentry is not None
+                    and (
+                        reentry != next_attempt
+                        or reentry not in evidence.unresolved_attempts
+                    )
+                )
             ):
                 continue
             unresolved = tuple(
                 number for number in evidence.unresolved_attempts
-                if number not in rejected
+                if number not in rejected and number != reentry
             )
             # Credit only proved local refusals in the original allowance.  The
             # authenticated historical binding rejection is a separate credit;
@@ -1211,6 +1221,7 @@ def _ingest(
     fallback_permitted: bool = False,
     recovered_ambiguous_attempts: Mapping[str, int] | None = None,
     authenticated_rejected_attempts: Mapping[str, tuple[int, ...]] | None = None,
+    authenticated_reentry_attempts: Mapping[str, int] | None = None,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1276,6 +1287,7 @@ def _ingest(
         preserve_unit_order=preserve_unit_order,
         recovered_ambiguous_attempts=recovered_ambiguous_attempts,
         authenticated_rejected_attempts=authenticated_rejected_attempts,
+        authenticated_reentry_attempts=authenticated_reentry_attempts,
     ):
         # A routine operator drain is distinct from the signed owner stop.  It
         # is observed only here, between fully settled ingest attempts, so it
