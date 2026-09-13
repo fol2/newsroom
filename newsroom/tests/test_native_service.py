@@ -31,7 +31,7 @@ def test_pending_service_reports_continue_same_open_and_qualify_only_when_termin
     ))
     order = []
     factory, opened = _pipeline(
-        monkeypatch, lambda cycle: order.append(cycle) or next(reports),
+        tmp_path, monkeypatch, lambda cycle: order.append(cycle) or next(reports),
     )
     identity = digest_canonical({"runtime": "cooperative-continuation"})
 
@@ -53,9 +53,18 @@ def test_pending_service_reports_continue_same_open_and_qualify_only_when_termin
     assert opened == ["open", "close"]
 
 
-def _pipeline(monkeypatch, tick):
+def _pipeline(tmp_path, monkeypatch, tick, *, ledger_name="unpublished.sqlite3"):
     pipeline = object.__new__(NativePipeline)
-    pipeline._test_tick = tick
+    def retained_tick(cycle_id):
+        report = tick(cycle_id)
+        if type(report) is NativePipelineReport:
+            # The real pipeline retains its portfolio before returning a report.
+            # Keep that producer contract even where a test isolates the loop.
+            if pipeline._journal._portfolio_record is None or pipeline._journal.portfolio != report.sources:
+                pipeline._journal._retain("NATIVE_SOURCE_PORTFOLIO", {"sources": list(report.sources)})
+        return report
+
+    pipeline._test_tick = retained_tick
     monkeypatch.setattr(
         NativePipeline, "tick",
         lambda self, *, cycle_id: self._test_tick(cycle_id),
@@ -64,10 +73,16 @@ def _pipeline(monkeypatch, tick):
 
     @contextmanager
     def factory():
+        from newsroom.control_plane.native_progress import NativeRevisionJournal
+        from newsroom.control_plane.store import connect
+
         opened.append("open")
+        connection = connect(str(tmp_path / ledger_name))
+        pipeline._journal = NativeRevisionJournal(connection)
         try:
             yield pipeline
         finally:
+            connection.close()
             opened.append("close")
 
     return factory, opened
@@ -89,7 +104,7 @@ def _service(tmp_path, factory, **values):
 def test_native_service_runs_two_ticks_without_story_cap_and_closes(tmp_path, monkeypatch):
     ticks, waits = [], []
     factory, opened = _pipeline(
-        monkeypatch,
+        tmp_path, monkeypatch,
         lambda cycle_id: (
             ticks.append(cycle_id)
             or NativePipelineReport((), {"ACKNOWLEDGED": 4}, 0)
@@ -123,7 +138,7 @@ def test_native_service_interval_is_measured_from_cycle_start(tmp_path, monkeypa
         now[0] += 1.25 if cycle_id == "cycle-1" else 3
         return NativePipelineReport((), {}, 0)
 
-    factory, _ = _pipeline(monkeypatch, tick)
+    factory, _ = _pipeline(tmp_path, monkeypatch, tick)
 
     def wait(seconds):
         waits.append(seconds)
@@ -148,7 +163,7 @@ def test_native_service_failure_keeps_its_full_backoff(tmp_path, monkeypatch):
             raise outcome
         return outcome
 
-    factory, _ = _pipeline(monkeypatch, tick)
+    factory, _ = _pipeline(tmp_path, monkeypatch, tick)
 
     def wait(seconds):
         waits.append(seconds)
@@ -166,7 +181,7 @@ def test_continuous_service_qualifies_first_complete_cycle_before_second_tick(
 ):
     order = []
     factory, opened = _pipeline(
-        monkeypatch,
+        tmp_path, monkeypatch,
         lambda cycle_id: (
             order.append(f"tick:{cycle_id}")
             or NativePipelineReport((), {"ACKNOWLEDGED": 1}, 0)
@@ -207,7 +222,7 @@ def test_continuous_qualification_failure_closes_without_second_cycle(
 ):
     ticks = []
     factory, opened = _pipeline(
-        monkeypatch,
+        tmp_path, monkeypatch,
         lambda cycle_id: (
             ticks.append(cycle_id) or NativePipelineReport((), {}, 0)
         ),
@@ -277,7 +292,7 @@ def test_unreported_usage_defers_qualification_without_reopening_pipeline(
         (invocation,),
     ).fetchone()
     report = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
-    factory, opened = _pipeline(monkeypatch, lambda _: report)
+    factory, opened = _pipeline(tmp_path, monkeypatch, lambda _: report)
 
     @contextmanager
     def bound():
@@ -327,7 +342,7 @@ def test_unreported_usage_defers_qualification_without_reopening_pipeline(
 
 def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, monkeypatch):
     factory, opened = _pipeline(
-        monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(RuntimeError("secret")),
+        tmp_path, monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(RuntimeError("secret")),
     )
     failed = _service(
         tmp_path, factory, cycle_id_factory=lambda: "failed-cycle",
@@ -336,7 +351,7 @@ def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, mon
     assert opened == ["open", "close"]
 
     factory, _ = _pipeline(
-        monkeypatch,
+        tmp_path, monkeypatch,
         lambda _cycle_id: NativePipelineReport((), {"QUEUED": 2}, 2),
     )
     complete = _service(
@@ -356,7 +371,7 @@ def test_native_service_failure_is_terminal_then_restart_continues(tmp_path, mon
 
 def test_native_service_preserves_veto_and_singleton_lock(tmp_path, monkeypatch):
     factory, opened = _pipeline(
-        monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(VetoError("signed stop")),
+        tmp_path, monkeypatch, lambda _cycle_id: (_ for _ in ()).throw(VetoError("signed stop")),
     )
     service = _service(tmp_path, factory, cycle_id_factory=lambda: "stopped-cycle")
     with pytest.raises(VetoError, match="signed stop"):
@@ -391,7 +406,7 @@ def test_native_service_operator_drain_is_terminal_without_qualification(
         service_event.set()
         return NativePipelineReport((), {"QUEUED": 1}, 1)
 
-    factory, opened = _pipeline(monkeypatch, tick)
+    factory, opened = _pipeline(tmp_path, monkeypatch, tick)
     report = _service(
         tmp_path, factory, service_event=service_event,
         cycle_id_factory=lambda: "drained-cycle",
@@ -413,7 +428,7 @@ def test_native_service_operator_drain_is_terminal_without_qualification(
 
 def test_native_service_preflight_precedes_lock_ledger_and_pipeline(tmp_path, monkeypatch):
     factory, opened = _pipeline(
-        monkeypatch, lambda _: pytest.fail("pipeline tick after failed preflight"),
+        tmp_path, monkeypatch, lambda _: pytest.fail("pipeline tick after failed preflight"),
     )
     ledger = tmp_path / "unpublished.sqlite3"
     lock = tmp_path / "locks" / "hermes-native.lock"
@@ -433,7 +448,7 @@ def test_native_service_preflight_precedes_lock_ledger_and_pipeline(tmp_path, mo
 
 
 def test_native_service_binds_both_cycle_records_to_runtime_identity(tmp_path, monkeypatch):
-    factory, _ = _pipeline(monkeypatch, lambda _: NativePipelineReport((), {}, 0))
+    factory, _ = _pipeline(tmp_path, monkeypatch, lambda _: NativePipelineReport((), {}, 0))
     identity = digest_canonical({"actual_test_deployment": str(tmp_path)})
 
     @contextmanager
@@ -463,7 +478,7 @@ def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, ca
     caplog.set_level(logging.WARNING, logger="newsroom.authority.open")
     caplog.handler.setLevel(logging.INFO)
     factory, _ = _pipeline(
-        monkeypatch, lambda _cycle_id: NativePipelineReport((), {}, 0),
+        tmp_path, monkeypatch, lambda _cycle_id: NativePipelineReport((), {}, 0), ledger_name="cli.sqlite3",
     )
 
     def service_factory(args):
@@ -504,7 +519,7 @@ def test_hermes_native_operator_drain_is_clean_and_not_an_owner_stop(
         service_event.set()
         raise OperatorDrainRequested
 
-    factory, _ = _pipeline(monkeypatch, tick)
+    factory, _ = _pipeline(tmp_path, monkeypatch, tick)
 
     def service_factory(args):
         return NativeService(
@@ -528,7 +543,7 @@ def test_hermes_native_operator_drain_is_clean_and_not_an_owner_stop(
 
 
 def test_hermes_native_owner_stop_is_not_a_supervisor_crash(tmp_path, monkeypatch, capsys):
-    factory, opened = _pipeline(monkeypatch, lambda _: None)
+    factory, opened = _pipeline(tmp_path, monkeypatch, lambda _: None)
 
     def stopped():
         raise VetoError("private stop details")
@@ -548,7 +563,7 @@ def test_hermes_native_owner_stop_is_not_a_supervisor_crash(tmp_path, monkeypatc
 def test_malformed_pending_report_does_not_silently_defer_qualification(tmp_path, monkeypatch, states, unclassified):
     from newsroom.control_plane.native_qualification import NativeQualificationError
 
-    factory, opened = _pipeline(monkeypatch, lambda _: NativePipelineReport((), states, unclassified))
+    factory, opened = _pipeline(tmp_path, monkeypatch, lambda _: NativePipelineReport((), states, unclassified))
     with pytest.raises(NativeQualificationError, match="terminal inventory differs"):
         _service(tmp_path, factory, qualify_once=lambda *_: pytest.fail("invalid qualification"),
                  wait=lambda _: pytest.fail("invalid report was silently deferred")).run()
@@ -599,7 +614,7 @@ def test_unknown_assessment_continues_same_open_without_redispatch(tmp_path, mon
             })
         return NativePipelineReport((), {journal.progress[unit.revision_id]["stage"]: 1}, 0)
 
-    factory, opened = _pipeline(monkeypatch, tick)
+    factory, opened = _pipeline(tmp_path, monkeypatch, tick)
     identity = digest_canonical({"runtime": "unknown-assessment-continuation"})
 
     @contextmanager
@@ -635,7 +650,7 @@ def test_service_qualifies_exact_repeated_metadata_hold_without_restart(tmp_path
     held["item_holds"] *= 2
     journal = _cycle(connection, source_override=held)
     report = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
-    factory, opened = _pipeline(monkeypatch, lambda _: report)
+    factory, opened = _pipeline(tmp_path, monkeypatch, lambda _: report)
 
     @contextmanager
     def bound():
@@ -658,5 +673,58 @@ def test_service_qualifies_exact_repeated_metadata_hold_without_restart(tmp_path
         assert source["status"] == "HOLD"
         assert source["item_holds"] == [list(value) for value in held["item_holds"]]
         assert source["observations"] == [list(value) for value in held["observations"]]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("observation_bytes", (100, 10000))
+def test_terminal_references_retained_portfolio_without_changing_logical_report(
+    tmp_path, monkeypatch, observation_bytes,
+):
+    from dataclasses import asdict
+    from newsroom.control_plane.native_qualification import record_qualification, validate_qualification
+    from newsroom.tests.test_native_qualification import IDENTITY, _cycle, _open
+
+    connection = _open(tmp_path / "unpublished.sqlite3")
+    journal = _cycle(connection, source_override={"observations": ((
+        "https://fixture.example/" + "x" * observation_bytes,
+        "sha256:" + "b" * 64,
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    ),)})
+    expected = NativePipelineReport(journal.portfolio, {"EVIDENCE_HOLD": 1}, 0)
+    factory, opened = _pipeline(tmp_path, monkeypatch, lambda _: expected)
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = IDENTITY
+            yield pipeline
+
+    qualified, waits = [], []
+    try:
+        result = _service(
+            tmp_path, bound,
+            qualify_once=lambda ledger, identity: qualified.append(record_qualification(ledger, identity)),
+            wait=lambda _: waits.append(True) or len(waits) == 2,
+        ).run()
+        assert opened == ["open", "close"] and len(qualified) == 1
+        assert asdict(result.pipeline) == asdict(expected)
+        assert validate_qualification(connection, IDENTITY) == qualified[0]
+        portfolio = connection.execute(
+            "SELECT seq,payload_digest FROM ledger WHERE kind='NATIVE_SOURCE_PORTFOLIO'"
+        ).fetchall()
+        assert len(portfolio) == 1
+        terminals = connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind='NATIVE_SERVICE_CYCLE_TERMINAL' "
+            "ORDER BY seq DESC LIMIT 2"
+        ).fetchall()
+        for (raw,) in terminals:
+            pipeline = json.loads(raw)["pipeline"]
+            assert pipeline == {
+                "source_portfolio_ref": {"seq": portfolio[0][0], "payload_digest": portfolio[0][1]},
+                "revision_states": {"EVIDENCE_HOLD": 1}, "unclassified_revisions": 0,
+            }
+            assert len(raw.encode()) < 700
     finally:
         connection.close()

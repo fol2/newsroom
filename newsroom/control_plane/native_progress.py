@@ -72,6 +72,7 @@ class NativeRevisionJournal:
         self.progress: dict[str, dict] = {}
         self._records: dict[str, _ProgressRecord] = {}
         self.portfolio: tuple[dict, ...] = ()
+        self._portfolio_record: tuple[int, str] | None = None
         self.observations: dict[str, tuple[str, str, str, str]] = {}
         # ponytail: one startup replay; an indexed snapshot is warranted only
         # after measured native history makes this bounded-kind scan material.
@@ -145,6 +146,17 @@ class NativeRevisionJournal:
                     # Retain the first exact observation, also after a page
                     # leaves the feed. This is a reference, not a second copy.
                     self.observations.setdefault(observation[1], observation)
+            self._portfolio_record = (seq, payload_digest)
+
+    def portfolio_reference(self, sources: tuple[dict, ...]) -> dict:
+        if (
+            self._portfolio_record is None or sources != self.portfolio
+            or digest_bytes(canonical_json_bytes({"sources": list(sources)}))
+            != self._portfolio_record[1]
+        ):
+            raise ValueError("native source portfolio reference differs")
+        return {"seq": self._portfolio_record[0],
+                "payload_digest": self._portfolio_record[1]}
 
     @staticmethod
     def _validate_units(units: tuple[CorpusIngestUnit, ...]) -> None:

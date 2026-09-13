@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
@@ -172,7 +172,7 @@ class NativeService:
                             "outcome": last.outcome,
                             "failure_class": last.failure_class,
                             "pipeline": (
-                                None if last.pipeline is None else asdict(last.pipeline)
+                                None if last.pipeline is None else pipeline.terminal_report(last.pipeline)
                             ),
                         })
                         if (

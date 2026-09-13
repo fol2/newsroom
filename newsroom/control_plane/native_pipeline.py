@@ -68,6 +68,15 @@ class NativePipeline:
         if self._operator_drain_requested():
             raise OperatorDrainRequested
 
+    def terminal_report(self, report: NativePipelineReport) -> dict:
+        # The service/CLI still returns the full logical report. Only its
+        # durable diagnostic refers to the already committed source inventory.
+        return {
+            "source_portfolio_ref": self._journal.portfolio_reference(report.sources),
+            "revision_states": dict(report.revision_states),
+            "unclassified_revisions": report.unclassified_revisions,
+        }
+
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
         self._check()
         self._drain_between_work()
