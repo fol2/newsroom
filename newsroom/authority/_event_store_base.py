@@ -39,6 +39,7 @@ _OPEN_LOG = logging.getLogger("newsroom.authority.open")
 
 @contextmanager
 def _validation_stage(stage: str) -> Iterator[None]:
+    """Log inclusive elapsed time; nested phase durations are not additive."""
     started = perf_counter_ns()
     _OPEN_LOG.info("authority_open stage=%s status=STARTED", stage)
     status = "FAILED"
@@ -277,7 +278,8 @@ class _EventStoreBase:
                 raise AuthoritySchemaError(
                     "SQLite synchronous=FULL is not active"
                 )
-        self._validate_relational_invariants(conn)
+        with _validation_stage("relational_invariants"):
+            self._validate_relational_invariants(conn)
         if self._should_validate_row_integrity():
             with _validation_stage("immutable_records"):
                 self._validate_immutable_records(conn)

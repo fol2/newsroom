@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 import sqlite3
 
 from newsroom.authority.persistence import AuthoritySchemaError
@@ -27,7 +29,8 @@ class _ExtractionIntegrityMixin:
         super()._validate_schema_and_integrity()
         if not self._should_validate_row_integrity():
             return
-        self._validate_extraction_integrity(self._connection)
+        with _validation_stage("extraction_integrity"):
+            self._validate_extraction_integrity(self._connection)
 
     def _validate_extraction_integrity(self, conn: sqlite3.Connection) -> None:
         missing = _EXTRACTION_TABLES - self._table_names()

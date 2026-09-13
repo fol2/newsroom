@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 from contextlib import contextmanager
 import json
 import sqlite3
@@ -94,7 +96,8 @@ class _ObjectStoreBase:
         self._rights_policies = rights_policies
         self._hydration_policies = hydration_policies
         self._cas = cas
-        self._reconcile_objects()
+        with _validation_stage("cas_reconciliation"):
+            self._reconcile_objects()
 
     def _persist_object_contracts(
         self, conn: sqlite3.Connection, *, recorded_at: str

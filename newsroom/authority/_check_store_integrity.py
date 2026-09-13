@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 import sqlite3
 
 from newsroom.authority._check_store_support import (
@@ -29,12 +31,13 @@ class _CheckIntegrityMixin:
         super()._validate_schema_and_integrity()
         if not self._should_validate_row_integrity():
             return
-        conn = self._connection
-        self._validate_check_records(conn)
-        self._validate_attempt_chains(conn)
-        self._validate_baseline_heads(conn)
-        self._validate_occurrence_links(conn)
-        self._validate_check_event_coverage(conn)
+        with _validation_stage("check_integrity"):
+            conn = self._connection
+            self._validate_check_records(conn)
+            self._validate_attempt_chains(conn)
+            self._validate_baseline_heads(conn)
+            self._validate_occurrence_links(conn)
+            self._validate_check_event_coverage(conn)
 
     def _validate_check_records(self, conn: sqlite3.Connection) -> None:
         for row in conn.execute("SELECT * FROM check_requests").fetchall():

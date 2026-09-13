@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import json
@@ -224,9 +226,10 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
 
     def _migrate_or_validate(self) -> None:
         super()._migrate_or_validate()
-        with self._transaction() as conn:
-            self._persist_projection_contracts(conn)
-        self._validate_projection_integrity()
+        with _validation_stage("projection_integrity"):
+            with self._transaction() as conn:
+                self._persist_projection_contracts(conn)
+            self._validate_projection_integrity()
 
     def _persist_projection_contracts(self, conn: sqlite3.Connection) -> None:
         recorded_at = self._clock().to_text()

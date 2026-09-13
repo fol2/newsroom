@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 import sqlite3
 from collections.abc import Iterable
 
@@ -32,7 +34,8 @@ class _EditorialRelationIntegrityMixin:
         super()._validate_schema_and_integrity()
         if not self._should_validate_row_integrity():
             return
-        self._validate_editorial_relation_integrity(self._connection)
+        with _validation_stage("editorial_relation_integrity"):
+            self._validate_editorial_relation_integrity(self._connection)
 
     def _validate_editorial_relation_integrity(
         self, conn: sqlite3.Connection
