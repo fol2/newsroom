@@ -863,3 +863,138 @@ def test_native_stop_outranks_quantum_deferral(tmp_path, monkeypatch, stop):
         assert connection.total_changes == before and not calls
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("chunks", (2, 4, 8))
+def test_terminal_hold_identity_work_is_bounded_per_independent_advance(
+    tmp_path, monkeypatch, chunks,
+):
+    from newsroom.control_plane import corpus
+    from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+
+    queued, history = [], []
+    processor, connection, _ = _open(
+        tmp_path, monkeypatch,
+        ingest=lambda _connection, **kw: queued.extend(kw["units"]),
+    )
+    base = replace(
+        _native("terminal-chunks"), body="x" * (chunks * 8192 - 200),
+        chunk_count=chunks,
+    )
+    members = []
+    for ordinal in range(1, chunks + 1):
+        members.append(replace(
+            base, chunk_ordinal=ordinal,
+            predecessor_ingest_id=None if not members else members[-1].ingest_id,
+        ))
+    # Admission validates chunk order independently of the supplied output order.
+    units = tuple(reversed(members))
+    expected_ids = tuple(unit.ingest_id for unit in units)
+    processor._system.graphiti = SimpleNamespace(attempt_history=lambda *args, **kw: (
+        history.append(args[0]) or SimpleNamespace(
+            outcome=GraphitiAdapterOutcome.AMBIGUOUS_EFFECT,
+            failure_code="AMBIGUOUS_EFFECT",
+        ),
+    ))
+    digest = corpus.content_digest
+    identity = corpus.CorpusIngestUnit.ingest_id.fget
+    identity_reads, body_characters = [], []
+
+    def counted_identity(unit):
+        identity_reads.append(unit.chunk_ordinal)
+        return identity(unit)
+
+    def counted_digest(**kwargs):
+        body_characters.append(len(kwargs["body"]))
+        return digest(**kwargs)
+
+    monkeypatch.setattr(corpus.CorpusIngestUnit, "ingest_id", property(counted_identity))
+    monkeypatch.setattr(corpus, "content_digest", counted_digest)
+    try:
+        previous = None
+        for number in (1, 2):
+            identity_reads.clear()
+            body_characters.clear()
+            results = processor.advance(units, cycle_id=f"unchanged-terminal:{number}")
+            assert tuple(item.ingest_id for item in results) == expected_ids
+            assert all(
+                item.state == "GRAPHITI_HOLD" and item.receipt_digest is None
+                and item.reason == "AMBIGUOUS_EFFECT:AMBIGUOUS_EFFECT"
+                for item in results
+            )
+            assert previous is None or results == previous
+            previous = results
+            assert len(history) == number * chunks
+            assert not queued
+            assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 0
+            assert (len(identity_reads), len(body_characters), sum(body_characters)) == (
+                chunks, 2 * chunks, 2 * chunks * len(base.body),
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("invalid", ("duplicate", "wrong_type", "missing_authority"))
+def test_operation_local_identity_selection_preserves_input_rejection(
+    tmp_path, monkeypatch, invalid,
+):
+    processor, connection, calls = _open(
+        tmp_path, monkeypatch, ingest=lambda *args, **kw: pytest.fail("dispatch"),
+    )
+    unit = _native()
+    if invalid == "duplicate":
+        units = (unit, replace(unit, attempt_number=2))
+        message = "native Graphiti cohort repeats an ingest"
+    elif invalid == "wrong_type":
+        units = (SimpleNamespace(ingest_id=unit.ingest_id),)
+        message = "native Graphiti requires retained source authority"
+    else:
+        units = (replace(unit, authority=None),)
+        message = "native Graphiti requires retained source authority"
+    try:
+        before = connection.total_changes
+        with pytest.raises(ValueError, match=message):
+            processor.advance(units, cycle_id="bad-operation-input")
+        assert connection.total_changes == before
+        assert not calls
+    finally:
+        connection.close()
+
+
+def test_operation_local_keys_rederive_replacement_units_and_recheck_rights(
+    tmp_path, monkeypatch,
+):
+    from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome, GraphitiAdapterRightsDenied
+
+    processor, connection, _ = _open(
+        tmp_path, monkeypatch,
+        ingest=lambda _connection, **kw: pytest.fail("dispatch") if kw["units"] else None,
+    )
+    first = _native("changed-body")
+    second = replace(first, body=first.body + " Changed source text.")
+    expected_ids = (first.ingest_id, second.ingest_id)
+    assert expected_ids[0] != expected_ids[1]
+    denied, reads = [], []
+
+    def current_history(*args, **kwargs):
+        reads.append(args[0])
+        if denied:
+            raise GraphitiAdapterRightsDenied("current rights revoked")
+        return (SimpleNamespace(
+            outcome=GraphitiAdapterOutcome.AMBIGUOUS_EFFECT,
+            failure_code="AMBIGUOUS_EFFECT",
+        ),)
+
+    processor._system.graphiti = SimpleNamespace(attempt_history=current_history)
+    try:
+        first_result, = processor.advance((first,), cycle_id="old-body")
+        denied.append(True)
+        second_result, = processor.advance((second,), cycle_id="new-body")
+        assert (first_result.ingest_id, second_result.ingest_id) == expected_ids
+        assert first_result.reason == "AMBIGUOUS_EFFECT:AMBIGUOUS_EFFECT"
+        assert second_result.reason == "CURRENT_SOURCE_RIGHTS_HOLD"
+        assert len(reads) == 2 and reads[0] != reads[1]
+        assert first.body != second.body
+        assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 0
+    finally:
+        connection.close()
