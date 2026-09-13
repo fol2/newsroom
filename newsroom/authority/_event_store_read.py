@@ -363,7 +363,16 @@ class _EventStoreReadMixin:
     def _request_record_from_row(
         self, row: sqlite3.Row
     ) -> AuthorizationRequestRecord:
-        data = bytes(row["canonical_bytes"])
+        from .authorization_request_storage_migrations import (
+            authorization_request_bytes_from_v38_row,
+        )
+
+        try:
+            data = authorization_request_bytes_from_v38_row(row)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthorityPersistenceError(
+                "stored authorization request representation differs"
+            ) from exc
         record_digest = str(row["canonical_record_digest"])
         value = self._decode_canonical(data)
         if not isinstance(value, dict):

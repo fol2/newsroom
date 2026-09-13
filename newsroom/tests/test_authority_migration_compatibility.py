@@ -56,6 +56,7 @@ _EXPECTED_NAMES = {
     35: "graphiti_accounted_zero_proposal_authority_v35",
     36: "authorisation_shared_scope_content_v36",
     37: "authentication_context_compaction_v37",
+    38: "authorization_request_residual_storage_v38",
 }
 _EXPECTED_CHECKSUMS = {
     13: "sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab",
@@ -82,6 +83,7 @@ _EXPECTED_CHECKSUMS = {
     35: "sha256:5618c2a4392aabc196687b1fccbb47deee20bcdccc52cc21759cb46e32277829",
     36: "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
     37: "sha256:8ac6c775a376d1787f645ef6526a7aff8e1c70bbb7d22489d06a810d28cfd1be",
+    38: "sha256:18c4ef2179dfeea90d8ffec815e89190b1053b87dc4a06410d8b00ee7a789b38",
 }
 
 _EXPECTED_MATRIX = """version | migration | objects | history fingerprint | schema fingerprint | object fingerprint
@@ -110,6 +112,7 @@ v34 | graphiti_evaluation_extraction_authority_v34 | 1516 | sha256:f589854a52419
 v35 | graphiti_accounted_zero_proposal_authority_v35 | 1516 | sha256:eb02cf288b626cbd2a895d972a8ebd69ab66a2b3e243445edfc7241bca546b20 | sha256:e6f107455a75986a977008073e3882780155d51b73660b1a2ed780a2e573455a | sha256:38a2ffa11cfd76250cf9782102093708cdf64570fe201d68a1ef3fdd64d3c7a0
 v36 | authorisation_shared_scope_content_v36 | 1522 | sha256:cddffffe87f4c5123c3f5f501bb246668dd7b13077e1e4b0cbced4d7aab2b1d1 | sha256:df4cd39f154791d3e5680ac4fa501c2a076427d0ea18caff40145319c08647d0 | sha256:66ecc87b40ee20a59a0c67ddc0ade6c6a6ca670b9c883939b84b7faa0b6d183c
 v37 | authentication_context_compaction_v37 | 1523 | sha256:4478eb4b5d8ea85fa26a72e02830c71d5fafff20d62e72e56e4be1edb9c26ad4 | sha256:4003bc1eb0124845189a50e561b39da33bfde75ab8eabd19ddf9c7f807417d3d | sha256:fe1f5f6d2a109496751dd035da536c7ce9833c19075d7f2ec0a8c3a985c9b505
+v38 | authorization_request_residual_storage_v38 | 1524 | sha256:28c196a875fd3553b758064fd90c9fa2be1f0f08931b69806dd3c84a7b2e6a70 | sha256:fd12ca767bc53236efb0a7500dae2bc2dbaee70bfc78cdc99a5ad4c421cc2a29 | sha256:89bd6d2ad8f81bfff8ee0cbad72fa1f266038b363a15a4f4e9fb450f8992a016
 """
 
 
@@ -144,7 +147,7 @@ def test_registry_history_and_statement_pins_are_complete_and_named() -> None:
     assert RETAINED_MIN_VERSION == 13
     assert RETAINED_VERSIONS == tuple(_EXPECTED_NAMES)
     assert tuple(record.version for record in MIGRATION_REGISTRY) == tuple(
-        (*range(1, 33), 34, 35, 36, 37)
+        (*range(1, 33), 34, 35, 36, 37, 38)
     )
     assert (
         tuple(
