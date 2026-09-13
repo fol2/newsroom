@@ -13,7 +13,6 @@ from newsroom.control_plane import cycle
 from newsroom.control_plane.store import connect, insert_graphiti_ingest
 from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 from newsroom.tests.test_graphiti_operational_readiness import _unit
-from newsroom.projection.models import ProjectionGenerationState
 
 
 def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}):
@@ -35,7 +34,7 @@ def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}):
     system = SimpleNamespace(**dict.fromkeys(("graphiti", "extraction", "objects", "entities", "relations", "increment4")))
     def build_current(request, **kw):
         calls.append(("empty-cohort-build", {"request": request}))
-        return SimpleNamespace(generation=SimpleNamespace(state=ProjectionGenerationState.ACTIVE))
+        pytest.fail("zero proposals must not build a full-history generation")
     system.increment4 = SimpleNamespace(build_current_and_promote=build_current)
     system.graphiti = SimpleNamespace(attempt_history=lambda *args, **kwargs: ())
     processor = n.NativeGraphitiProcessor(
@@ -97,10 +96,56 @@ def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, 
         assert [entry for entry in calls if entry[0] == "finalise"] == [
             ("finalise", {"ingest_ids": tuple(sorted(unit.ingest_id for unit in units))})
         ]
-        assert len([entry for entry in calls if entry[0] == "empty-cohort-build"]) == 1
+        assert len([entry for entry in calls if entry[0] == "empty-cohort-build"]) == 0
         processor.advance(units, cycle_id="native-cycle:2")
-        assert len([entry for entry in calls if entry[0] == "empty-cohort-build"]) == 1
+        assert len([entry for entry in calls if entry[0] == "empty-cohort-build"]) == 0
         assert connection.execute("SELECT count(*) FROM unpublished_graphiti_ingest").fetchone()[0] == 2
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("generation_id", (None, "00000000-0000-4000-8000-000000008201"))
+def test_successive_zero_proposal_cohorts_need_no_graph_generation(
+    tmp_path, monkeypatch, generation_id
+):
+    from newsroom.tests.test_graphiti_admission_consumer import (
+        _Authority, _Projector, _Rights, _consumer, _seed_receipt,
+    )
+
+    def complete(connection, **kwargs):
+        for unit in kwargs["units"]:
+            _seed_receipt(connection, ingest_id=unit.ingest_id)
+
+    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=complete)
+    projector = _Projector()
+    authority = _Authority({})
+    processor._admission = _consumer(
+        connection, authority, projector, _Rights(),
+        projection_generation_id=generation_id,
+    )
+    processor._system.increment4.generation_status = lambda *a, **kw: pytest.fail(
+        "zero proposals do not require an active graph"
+    )
+    processor._system.increment4.reconcile_active = lambda *a, **kw: pytest.fail(
+        "zero proposals do not change the active graph"
+    )
+    units = (_native("first-zero"), _native("later-independent-zero"))
+    try:
+        for number, unit in enumerate(units, 1):
+            outcome, = processor.advance((unit,), cycle_id=f"zero:{number}")
+            assert outcome.state == "GRAPHITI_COMPLETE"
+            assert outcome.receipt_digest is not None
+            assert outcome.reason is None
+        assert len(processor._completed) == 2
+        assert not authority.calls
+        assert not projector.generation_calls
+        assert not projector.generation_effects
+        assert not any(name == "empty-cohort-build" for name, _ in calls)
+        # Completion is revision coverage only, including a fresh installation
+        # with no configured generation; it does not assert graph readiness.
+        assert connection.execute(
+            "SELECT count(*) FROM unpublished_graphiti_admission_queue"
+        ).fetchone()[0] == 0
     finally:
         connection.close()
 
@@ -275,7 +320,7 @@ def test_admission_preflight_isolates_bad_revision_then_projects_only_verified(
         ] == [(units[0].ingest_id,)]
         assert len([
             entry for entry in calls if entry[0] == "empty-cohort-build"
-        ]) == 1
+        ]) == 0
 
         held.clear()
         second = processor.advance(units, cycle_id="two")
@@ -287,7 +332,7 @@ def test_admission_preflight_isolates_bad_revision_then_projects_only_verified(
         ] == [(units[0].ingest_id,), (units[1].ingest_id,)]
         assert len([
             entry for entry in calls if entry[0] == "empty-cohort-build"
-        ]) == 2
+        ]) == 0
     finally:
         connection.close()
 
@@ -680,15 +725,15 @@ def test_native_quantum_reports_exact_deferred_ids_and_never_projects_chunk_pref
         assert connection.total_changes == before
         prefix = processor.advance(units, cycle_id="prefix")
         assert [item.state for item in prefix] == ["EXTRACTION_COMPLETE", "GRAPHITI_HOLD", "GRAPHITI_COMPLETE"]
-        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 1
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 0
         complete = processor.advance(units, cycle_id="remainder")
         assert all(item.state == "GRAPHITI_COMPLETE" for item in complete)
         assert set(dispatched) == {unit.ingest_id for unit in units}
         assert len(dispatched) == 3
-        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 2
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 0
         processor.advance(units, cycle_id="unchanged")
         assert len(dispatched) == 3
-        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 2
+        assert len([call for call in calls if call[0] == "empty-cohort-build"]) == 0
     finally:
         connection.close()
 

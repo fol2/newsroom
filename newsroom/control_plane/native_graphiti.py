@@ -23,8 +23,6 @@ from newsroom.authority.hermes_native_system import HermesNativeAuthoritySystem
 from newsroom.extraction.types import ExtractionRunId
 from newsroom.graphiti_adapter.identity import typed_id
 from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome, GraphitiAdapterRightsDenied
-from newsroom.increment4.neo4j import Increment4Neo4jCurrentBuildRequest
-from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
 
 from .corpus import CorpusIngestUnit
 from .cycle import _DispatchAuthority, _ingest
@@ -32,7 +30,6 @@ from .graphiti import EvaluationGraphitiRunner, graphiti_required_route_holds
 from .graphiti_admission import GraphitiAdmissionConsumerError
 from .graphiti_admission_integration import compose_existing_graphiti_admission_consumer
 from .model_usage import ModelUsageService
-from .native_cycle import _uuid4_for
 from .store import append_ledger, graphiti_failure_state
 from .veto import OperatorDrainRequested, VetoError
 
@@ -333,28 +330,6 @@ class NativeGraphitiProcessor:
                         self._admission.finalise_decided_cohort(
                             ingest_ids=final_ids
                         )
-                        if not sum(queued[cohort_id] for cohort_id, _ in ready):
-                            # One real full-history generation covers every
-                            # zero-proposal revision ready in this iteration.
-                            frontier = digest_canonical(final_ids)
-                            generation_id = ProjectionGenerationId.parse(
-                                _uuid4_for({"native_zero_proposal_cohort": frontier})
-                            )
-                            built = self._system.increment4.build_current_and_promote(
-                                Increment4Neo4jCurrentBuildRequest(
-                                    generation_id,
-                                    "NATIVE_ZERO_PROPOSAL_COHORT",
-                                    f"native-empty-cohort:{frontier}",
-                                ),
-                                proof=self._proof,
-                            )
-                            if (
-                                built.generation.state
-                                is not ProjectionGenerationState.ACTIVE
-                            ):
-                                raise GraphitiAdmissionConsumerError(
-                                    "native empty-cohort graph is not active"
-                                )
                     except GraphitiAdmissionConsumerError as exc:
                         for _, exact in ready:
                             for ingest in exact:
