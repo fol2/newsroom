@@ -137,11 +137,13 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v10"
+    assert VERSION == "newsroom.native-evidence-assessor.v11"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
     assert "calendar months as months without converting them" in SYSTEM
+    assert "calendar years as years without converting them" in SYSTEM
+    assert "Ordinary unit and process nouns must be translated" in SYSTEM
     assert "excerpt-only entities" not in SYSTEM
     assert "first observation of an old clause" in SYSTEM
     assert "DELETED" in SYSTEM
@@ -301,6 +303,62 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
 
+    ancestry_claim = (
+        "English language requirement for settlement on the UK Ancestry route UKA "
+        "15.1. Unless an exemption applies, the applicant must: (a) Where the date "
+        "of application is before 26 March 2027, the applicant must, unless an "
+        "exemption applies, show English language ability on the Common European "
+        "Framework of Reference for Languages in speaking and listening to at least "
+        "level B1; or (b) Where the date of application is on or after 26 March 2027, "
+        "the applicant must, unless an exemption applies, show English language "
+        "ability on the Common European Framework of Reference for Languages in "
+        "speaking and listening to at least level B2."
+    )
+    ancestry = json.loads(canonical_json_bytes(package))
+    ancestry["governed_claims"][0].update({
+        "claim": ancestry_claim,
+        "supporting_excerpt": ancestry_claim,
+        "rendered_assertion_zh_hant_hk": (
+            "UK Ancestry定居途徑的英語要求：如申請日期早於2027年3月26日，"
+            "除非獲豁免，申請人的聆聽及口語能力須達Common European Framework "
+            "of Reference for Languages至少B1級；如申請日期為2027年3月26日或"
+            "之後，則須至少達B2級。"
+        ),
+        "localised_factual_expressions": [
+            ["26 March 2027", "2027年3月26日"],
+        ],
+    })
+    ancestry["substantive_new_information"] = [ancestry_claim]
+    ancestry_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": ancestry_claim.encode(),
+    })
+    ancestry_assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": ancestry}).decode(), {}
+        ),
+        candidate, base, (source,), (ancestry_acquired,),
+    )
+    assert ancestry_assessment.governed_claims[0].named_entities == (
+        "B1", "B2", "Common European Framework of Reference for Languages",
+        "UK Ancestry",
+    )
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+        ancestry_assessment, ancestry_claim, ancestry_claim
+    ).stable_reason_codes
+    ancestry_near_match = json.loads(canonical_json_bytes(ancestry))
+    ancestry_near_match["governed_claims"][0][
+        "rendered_assertion_zh_hant_hk"
+    ] = ancestry_near_match["governed_claims"][0][
+        "rendered_assertion_zh_hant_hk"
+    ].replace("B2級", "B2X級")
+    with pytest.raises(EvidencePackageError, match="rendered named entities differ"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes({"package": ancestry_near_match}).decode(), {}
+            ),
+            candidate, base, (source,), (ancestry_acquired,),
+        )
+
     for exact_claim, rendered, names in (
         (
             "The applicant must be in the UK.", "申請人必須身在UK。",
@@ -421,6 +479,31 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     )
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
         month_assessment, month_claim, month_claim
+    ).stable_reason_codes
+
+    year_claim = "The applicant will be granted permission for 5 years."
+    year = json.loads(canonical_json_bytes(package))
+    year["governed_claims"][0].update({
+        "claim": year_claim,
+        "supporting_excerpt": year_claim,
+        "rendered_assertion_zh_hant_hk": "申請人會獲批為期5年的許可。",
+        "localised_factual_expressions": [["5 years", "5年"]],
+    })
+    year["substantive_new_information"] = [year_claim]
+    year_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": year_claim.encode(),
+    })
+    year_assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": year}).decode(), {}
+        ),
+        candidate, base, (source,), (year_acquired,),
+    )
+    assert year_assessment.governed_claims[0].localised_factual_expressions == (
+        ("5 years", "5年"),
+    )
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decide(
+        year_assessment, year_claim, year_claim
     ).stable_reason_codes
 
     boundary_claim = "Changes were published by the Home Office"
@@ -1265,7 +1348,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     first = assessor(candidate, base, (), ())
     if new_contract:
-        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v10")
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
         _, usage = _usage(tmp_path, monkeypatch)
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
@@ -1292,6 +1375,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     "newsroom.native-evidence-assessor.v7",
     "newsroom.native-evidence-assessor.v8",
     "newsroom.native-evidence-assessor.v9",
+    "newsroom.native-evidence-assessor.v10",
 ))
 @pytest.mark.parametrize("settled", (True, False))
 def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(
@@ -1317,7 +1401,7 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
             )(candidate, base, (), ())
     else:
         old_usage.begin(candidate, base, "unknown prior attempt")
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v10")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     _, new_usage = _usage(tmp_path, monkeypatch)
     calls = []

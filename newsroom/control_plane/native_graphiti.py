@@ -12,9 +12,10 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import ContextManager
 
 from newsroom.authority import AuthenticationProof
@@ -23,6 +24,7 @@ from newsroom.authority.hermes_native_system import HermesNativeAuthoritySystem
 from newsroom.extraction.types import ExtractionRunId
 from newsroom.graphiti_adapter.identity import typed_id
 from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome, GraphitiAdapterRightsDenied
+from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
 from newsroom.increment4.neo4j import Increment4Neo4jCurrentBuildRequest
 from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
 
@@ -333,9 +335,13 @@ class NativeGraphitiProcessor:
                         self._admission.finalise_decided_cohort(
                             ingest_ids=final_ids
                         )
-                        if not sum(queued[cohort_id] for cohort_id, _ in ready):
-                            # One real full-history generation covers every
-                            # zero-proposal revision ready in this iteration.
+                        if (
+                            not sum(queued[cohort_id] for cohort_id, _ in ready)
+                            and not self._has_active_generation()
+                        ):
+                            # Zero proposals need no new entity/relation graph,
+                            # but a fresh native pipeline needs its first graph
+                            # for downstream retrieval. Retain the real build.
                             frontier = digest_canonical(final_ids)
                             generation_id = ProjectionGenerationId.parse(
                                 _uuid4_for({"native_zero_proposal_cohort": frontier})
@@ -377,6 +383,32 @@ class NativeGraphitiProcessor:
             if self._operator_drain_requested():
                 raise OperatorDrainRequested
         return tuple(statuses[unit.ingest_id] for unit in units)
+
+    def _has_active_generation(self) -> bool:
+        # Select metadata only to decide whether first bootstrap is needed.
+        # This is not graph proof: subsequent retrieval still validates its read.
+        uri = Path(self._system.authority_store_path).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            rows = connection.execute(
+                "SELECT generation_id FROM projection_generations "
+                "WHERE family_id=? AND state='ACTIVE' ORDER BY generation_id LIMIT 2",
+                (INCREMENT4_ADMITTED_FAMILY_ID,),
+            ).fetchall()
+        if not rows:
+            return False
+        if len(rows) != 1:
+            raise GraphitiAdmissionConsumerError("native active graph metadata differs")
+        generation_id = ProjectionGenerationId.parse(str(rows[0][0]))
+        status = self._system.increment4.generation_status(
+            generation_id, proof=self._proof,
+        )
+        if (
+            status.generation.generation_id != generation_id
+            or status.generation.state is not ProjectionGenerationState.ACTIVE
+        ):
+            raise GraphitiAdmissionConsumerError("native active graph metadata differs")
+        return True
 
     def _settle_missing_subscription_usage(
         self, units: tuple[CorpusIngestUnit, ...],
