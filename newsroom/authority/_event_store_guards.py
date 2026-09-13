@@ -89,7 +89,7 @@ class _ExactAuthorityGuards:
             expected_digest,
             digest_column,
         ) in expected:
-            columns = "*" if table == "authentication_contexts" else f"canonical_bytes,{digest_column}"
+            columns = "*"
             row = conn.execute(
                 f"SELECT {columns} FROM {table} "
                 f"WHERE {identity_column}=?",
@@ -98,7 +98,7 @@ class _ExactAuthorityGuards:
             retained_bytes = None if row is None else (
                 self._authentication_record_from_row(row).canonical_bytes
                 if table == "authentication_contexts"
-                else bytes(row["canonical_bytes"])
+                else self._request_record_from_row(row).canonical_bytes
             )
             if (
                 retained_bytes != expected_bytes

@@ -363,13 +363,18 @@ class _EventStoreReadMixin:
     def _request_record_from_row(
         self, row: sqlite3.Row
     ) -> AuthorizationRequestRecord:
-        data = bytes(row["canonical_bytes"])
-        record_digest = str(row["canonical_record_digest"])
-        value = self._decode_canonical(data)
-        if not isinstance(value, dict):
+        from .authorization_request_storage_migrations import (
+            authorization_request_value_from_v38_row,
+        )
+
+        try:
+            value = authorization_request_value_from_v38_row(row)
+            data = canonical_json_bytes(value)
+        except (KeyError, TypeError, ValueError) as exc:
             raise AuthorityPersistenceError(
-                "stored authorization request is not an object"
-            )
+                "stored authorization request representation differs"
+            ) from exc
+        record_digest = str(row["canonical_record_digest"])
         request_digest = str(row["request_digest"])
         if digest_bytes(data) != record_digest:
             raise AuthorityPersistenceError(

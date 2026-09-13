@@ -324,7 +324,7 @@ def test_lineage_read_rejects_exact_authority_provenance_tamper(tmp_path) -> Non
     try:
         connection.execute("DROP TRIGGER immutable_authorization_requests_update")
         connection.execute(
-            "UPDATE authorization_requests SET canonical_bytes=? WHERE "
+            "UPDATE authorization_requests SET storage_request_residual=? WHERE "
             "request_digest=(SELECT e.authorization_request_digest FROM "
             "event_hypothesis_lineage l JOIN ledger_events e "
             "ON e.event_id=l.authority_event_id WHERE l.lineage_id=?)",
@@ -455,7 +455,8 @@ def test_trigger_preserving_fk_clean_aggregate_rewrite_fails_closed(
     assert command["aggregate_id"] == expected
     assert expected.encode() in bytes(command["result_bytes"])
     request = connection.execute(
-        "SELECT canonical_bytes FROM authorization_requests WHERE request_digest=?",
+        "SELECT storage_request_residual FROM authorization_requests "
+        "WHERE request_digest=?",
         (command["authorization_request_digest"],),
     ).fetchone()
     assert expected.encode() in bytes(request[0])

@@ -205,7 +205,8 @@ class _LineageStore(_EventAuthorityStore):
             "v.aggregate_version AS retained_aggregate_version,"
             "g.aggregate_type AS head_aggregate_type,"
             "g.aggregate_id AS head_aggregate_id,g.current_version,"
-            "r.canonical_bytes AS request_bytes,p.payload_bytes,p.payload_digest,"
+            "r.request_digest AS retained_request_digest,"
+            "p.payload_bytes,p.payload_digest,"
             "p.mode,p.schema_version,p.schema_contract_version,"
             "p.schema_contract_digest,p.canonicalizer_implementation_version,"
             "a.principal_id,a.credential_binding_digest "
@@ -240,7 +241,17 @@ class _LineageStore(_EventAuthorityStore):
         result = self._decode_result(
             bytes(row["result_bytes"]), str(row["result_digest"]), replayed=False
         )
-        request = self._decode_canonical(bytes(row["request_bytes"]))
+        request_row = self._connection.execute(
+            "SELECT * FROM authorization_requests WHERE request_digest=?",
+            (row["retained_request_digest"],),
+        ).fetchone()
+        if request_row is None:
+            raise HypothesisLineageContractError(
+                "retained lineage authorization request is missing"
+            )
+        request = self._decode_canonical(
+            self._request_record_from_row(request_row).canonical_bytes
+        )
         target = receipt.reversal_target
         expected = {
             "lineage_id": receipt.lineage_id,

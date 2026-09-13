@@ -14,6 +14,10 @@ from newsroom.authority import (
     ObjectAdmissionId,
     UtcTimestamp,
 )
+from newsroom.authority.authorization_request_storage_migrations import (
+    authorization_request_bytes_from_v38_row,
+    authorization_request_residual_from_v37_row,
+)
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -955,7 +959,7 @@ def test_redigested_security_rebinding_fails_store_reopen(tmp_path: Path) -> Non
         assert original_decision is not None
 
         request_value = json.loads(
-            bytes(original_request["canonical_bytes"]).decode("utf-8")
+            authorization_request_bytes_from_v38_row(original_request).decode("utf-8")
         )
         request_value["operation_type"] = (
             "read:project.discovery:caller-selected-tool"
@@ -965,10 +969,14 @@ def test_redigested_security_rebinding_fails_store_reopen(tmp_path: Path) -> Non
         rebound_request_digest = digest_canonical(unsigned)
         request_value["request_digest"] = rebound_request_digest
         request_bytes = canonical_json_bytes(request_value)
+        residual = authorization_request_residual_from_v37_row({
+            **request_value, "canonical_bytes": request_bytes,
+            "canonical_record_digest": digest_bytes(request_bytes),
+        })
         conn.execute(
             "INSERT INTO authorization_requests("
             "request_digest,authentication_context_id,principal_id,"
-            "authority_domain,operation_type,required_scope,canonical_bytes,"
+            "authority_domain,operation_type,required_scope,storage_request_residual,"
             "canonical_record_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 rebound_request_digest,
@@ -977,7 +985,7 @@ def test_redigested_security_rebinding_fails_store_reopen(tmp_path: Path) -> Non
                 original_request["authority_domain"],
                 request_value["operation_type"],
                 original_request["required_scope"],
-                request_bytes,
+                residual,
                 digest_bytes(request_bytes),
                 original_request["recorded_at"],
             ),

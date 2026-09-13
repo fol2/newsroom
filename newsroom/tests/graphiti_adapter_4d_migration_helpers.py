@@ -259,6 +259,7 @@ def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_v37_security_record_schema(connection: sqlite3.Connection) -> None:
     """Restore exact v36 context bytes without changing any retained identity."""
+    _drop_v38_authorization_request_storage(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 37:
         return
     from newsroom.authority._event_store import _EventAuthorityStore
@@ -301,6 +302,72 @@ def _drop_v37_security_record_schema(connection: sqlite3.Connection) -> None:
         connection.execute("RELEASE SAVEPOINT checked_context_downgrade")
         raise
     connection.execute("RELEASE SAVEPOINT checked_context_downgrade")
+
+
+def _drop_v38_authorization_request_storage(
+    connection: sqlite3.Connection,
+) -> None:
+    """Restore exact v37 request bytes for retained-prefix fixtures."""
+
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 38:
+        return
+    from newsroom.authority._event_store import _EventAuthorityStore
+    from newsroom.authority.authorization_request_storage_migrations import (
+        AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM,
+        AUTHORIZATION_REQUEST_STORAGE_MIGRATION_NAME,
+    )
+    from newsroom.authority.migrations import MIGRATION_STATEMENTS
+
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=38"
+    ).fetchone() != (
+        AUTHORIZATION_REQUEST_STORAGE_MIGRATION_NAME,
+        AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM,
+    ):
+        raise sqlite3.DatabaseError("downgrade requires exact v38 request authority")
+    reader = object.__new__(_EventAuthorityStore)
+    cursor = connection.execute("SELECT rowid,* FROM authorization_requests")
+    names = tuple(item[0] for item in cursor.description)
+    rows = tuple(dict(zip(names, row, strict=True)) for row in cursor)
+    connection.execute("SAVEPOINT checked_request_downgrade")
+    try:
+        connection.execute("DROP TRIGGER immutable_authorization_requests_update")
+        connection.execute("DROP TRIGGER authorization_request_storage_guard")
+        for row in rows:
+            connection.execute(
+                "UPDATE authorization_requests SET storage_request_residual=? "
+                "WHERE rowid=?",
+                (reader._request_record_from_row(row).canonical_bytes, row["rowid"]),
+            )
+        connection.execute(
+            "ALTER TABLE authorization_requests DROP COLUMN storage_request_marker"
+        )
+        connection.execute(
+            "ALTER TABLE authorization_requests RENAME COLUMN "
+            "storage_request_residual TO canonical_bytes"
+        )
+        connection.execute(
+            next(
+                sql
+                for sql in MIGRATION_STATEMENTS
+                if sql.startswith(
+                    "CREATE TRIGGER immutable_authorization_requests_update"
+                )
+            )
+        )
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        connection.execute("DELETE FROM authority_migrations WHERE version=38")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=37")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT checked_request_downgrade")
+        connection.execute("RELEASE SAVEPOINT checked_request_downgrade")
+        raise
+    connection.execute("RELEASE SAVEPOINT checked_request_downgrade")
 
 
 def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:

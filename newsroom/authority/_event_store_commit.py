@@ -6,6 +6,10 @@ import sqlite3
 from typing import Any
 
 from ._capability import _AuthorizedCommandGrant
+from .authorization_request_storage_migrations import (
+    AUTHORIZATION_REQUEST_INDEXED_FIELDS,
+    AUTHORIZATION_REQUEST_STORAGE_MARKER,
+)
 from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from .persistence import (
     AuthorityPersistenceError,
@@ -403,7 +407,15 @@ class _EventStoreCommitMixin:
         decision: Any,
         recorded_at: str,
     ) -> None:
-        request_bytes = canonical_json_bytes(request.canonical_value())
+        request_value = request.canonical_value()
+        request_residual = canonical_json_bytes(
+            {
+                key: value
+                for key, value in request_value.items()
+                if key
+                not in AUTHORIZATION_REQUEST_INDEXED_FIELDS
+            }
+        )
         scopes_bytes = canonical_json_bytes(list(decision.effective_scopes))
         scope_content_digest = digest_bytes(scopes_bytes)
 
@@ -429,8 +441,9 @@ class _EventStoreCommitMixin:
         conn.execute(
             "INSERT OR IGNORE INTO authorization_requests("
             "request_digest,authentication_context_id,principal_id,authority_domain,"
-            "operation_type,required_scope,canonical_bytes,canonical_record_digest,"
-            "recorded_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            "operation_type,required_scope,storage_request_residual,"
+            "canonical_record_digest,recorded_at,storage_request_marker) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 request.request_digest,
                 str(authentication.authentication_context_id),
@@ -438,9 +451,10 @@ class _EventStoreCommitMixin:
                 authentication.authority_domain,
                 request.operation_type,
                 request.required_scope,
-                request_bytes,
+                request_residual,
                 request.digest,
                 recorded_at,
+                AUTHORIZATION_REQUEST_STORAGE_MARKER,
             ),
         )
         conn.execute(

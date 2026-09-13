@@ -222,6 +222,14 @@ from .security_record_migrations import (
     SECURITY_RECORD_SCHEMA_VERSION,
     migrate_security_records,
 )
+from .authorization_request_storage_migrations import (
+    AUTHORIZATION_REQUEST_STORAGE_MIGRATION,
+    AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM,
+    AUTHORIZATION_REQUEST_STORAGE_MIGRATION_NAME,
+    AUTHORIZATION_REQUEST_STORAGE_MIGRATION_STATEMENTS,
+    AUTHORIZATION_REQUEST_STORAGE_SCHEMA_VERSION,
+    migrate_authorization_request_storage,
+)
 from .graphiti_evaluation_migrations import (
     GRAPHITI_EVALUATION_MIGRATION,
     GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
@@ -328,7 +336,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = SECURITY_RECORD_SCHEMA_VERSION
+SCHEMA_VERSION = AUTHORIZATION_REQUEST_STORAGE_SCHEMA_VERSION
 ISOLATED_SCHEMA_VERSION_RESERVATIONS = frozenset({33})
 MIGRATION_NAME = "authority_event_foundation_v1"
 
@@ -1655,6 +1663,21 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  SECURITY_RECORD_MIGRATION_CHECKSUM, applied_at),
             )
             current = SECURITY_RECORD_SCHEMA_VERSION
+        if current == SECURITY_RECORD_SCHEMA_VERSION:
+            migrate_authorization_request_storage(
+                conn,
+                expected_history=tuple(
+                    (r.version, r.name, r.checksum) for r in MIGRATIONS
+                    if r.version <= SECURITY_RECORD_SCHEMA_VERSION
+                ),
+            )
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (AUTHORIZATION_REQUEST_STORAGE_SCHEMA_VERSION,
+                 AUTHORIZATION_REQUEST_STORAGE_MIGRATION_NAME,
+                 AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = AUTHORIZATION_REQUEST_STORAGE_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1701,6 +1724,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     GRAPHITI_ACCOUNTED_ZERO_MIGRATION,
     AUTHORISATION_SCOPE_CONTENT_MIGRATION,
     SECURITY_RECORD_MIGRATION,
+    AUTHORIZATION_REQUEST_STORAGE_MIGRATION,
 )
 
 
@@ -1885,5 +1909,8 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
     ),
     (SECURITY_RECORD_SCHEMA_VERSION, SECURITY_RECORD_MIGRATION_NAME,
      SECURITY_RECORD_MIGRATION_CHECKSUM),
+    (AUTHORIZATION_REQUEST_STORAGE_SCHEMA_VERSION,
+     AUTHORIZATION_REQUEST_STORAGE_MIGRATION_NAME,
+     AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM),
 )
 # fmt: on

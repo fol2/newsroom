@@ -46,7 +46,7 @@ def _tamper_authentication(store: _EventAuthorityStore, command_id: str) -> None
 def _tamper_request(store: _EventAuthorityStore, command_id: str) -> None:
     _drop(store, "immutable_authorization_requests_update")
     store._execute_test_sql(
-        "UPDATE authorization_requests SET canonical_bytes=? WHERE "
+        "UPDATE authorization_requests SET storage_request_residual=? WHERE "
         "request_digest=(SELECT authorization_request_digest FROM "
         "authority_commands WHERE command_id=?)",
         (b"{}", command_id),

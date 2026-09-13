@@ -478,7 +478,7 @@ def test_read_time_provenance_validation_fails_closed(
                 "DROP TRIGGER immutable_authorization_requests_update"
             )
             conn.execute(
-                "UPDATE authorization_requests SET canonical_bytes=?",
+                "UPDATE authorization_requests SET storage_request_residual=?",
                 (b'{"tampered":true}',),
             )
             conn.commit()
