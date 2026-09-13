@@ -40,9 +40,9 @@ def test_current_security_storage_is_compact_with_exact_public_provenance(tmp_pa
     assert canonical_json_bytes(json.loads(after.authorization_request.canonical_bytes)) == before.authorization_request.canonical_bytes
 
 
-def _v36_path(tmp_path):
+def _v36_path(tmp_path, *, count=2):
     path = tmp_path / 'old.sqlite3'
-    commands = (command(key='old-one'), command(key='old-two'))
+    commands = tuple(command(key=f'old-{index}') for index in range(count))
     with open_test_system(path) as system:
         results = tuple(system.commands.execute(item, proof=proof()) for item in commands)
         originals = tuple(system.events.provenance(item.event_id, proof=proof()) for item in results)
@@ -107,31 +107,68 @@ def test_v36_corruption_rejected_before_conversion_with_atomic_rollback(tmp_path
             sql, parameters = f'UPDATE {table} SET principal_id=?', ('changed',)
         else:
             sql, parameters = f'UPDATE {table} SET canonical_digest=?', ('sha256:' + 'f'*64,)
-        _change(connection, table, sql, parameters)
+        _change(connection, table, sql + ' WHERE rowid=(SELECT max(rowid) FROM authentication_contexts)', parameters)
         connection.commit()
         before = _state(connection)
+        updates = []
+        connection.set_trace_callback(lambda sql: updates.append(sql) if sql.startswith(
+            'UPDATE authentication_contexts SET canonical_bytes='
+        ) else None)
         with pytest.raises(sqlite3.IntegrityError):
             apply_pending_migrations(connection, applied_at='2026-09-13T00:00:00.000000Z')
+        assert updates == []
         assert _state(connection) == before
 
 
-def test_v37_conversion_failure_after_first_update_rolls_back_exactly(tmp_path, monkeypatch):
-    path, _, _ = _v36_path(tmp_path)
-    with sqlite3.connect(path) as connection:
-        before = _state(connection)
-        validation_rows = len(before[3])
-        decode = migration._validate_old_context
-        calls = 0
+@pytest.mark.parametrize('counter', ('validations', 'updates'))
+def test_v37_validates_once_then_compacts_with_one_update(tmp_path, monkeypatch, counter):
+    path, _, _ = _v36_path(tmp_path, count=3)
+    validations = []
+    updates = []
+    validate = migration._validate_old_context
 
-        def fail_during_conversion(row):
-            nonlocal calls
-            calls += 1
-            if calls == validation_rows + 2:
-                raise sqlite3.IntegrityError('injected after first compacted context')
-            return decode(row)
-        monkeypatch.setattr(migration, '_validate_old_context', fail_during_conversion)
-        with pytest.raises(sqlite3.IntegrityError, match='after first compacted'):
+    def counted(row):
+        validate(row)
+        validations.append(row['authentication_context_id'])
+
+    monkeypatch.setattr(migration, '_validate_old_context', counted)
+    with sqlite3.connect(path) as connection:
+        connection.set_trace_callback(lambda sql: updates.append(sql) if sql.startswith(
+            'UPDATE authentication_contexts SET canonical_bytes='
+        ) else None)
+        apply_pending_migrations(connection, applied_at='2026-09-13T00:00:00.000000Z')
+        if counter == 'validations':
+            assert len(validations) == 3
+        else:
+            assert len(updates) == 1
+        assert len(set(validations)) == 3
+        assert connection.execute(
+            'SELECT count(*) FROM authentication_contexts WHERE storage_context_marker=?',
+            (b'v37',),
+        ).fetchone()[0] == 3
+
+
+def test_v37_conversion_failure_after_update_rolls_back_exactly(tmp_path):
+    class FailedUpdate(sqlite3.Connection):
+        converted = False
+
+        def execute(self, sql, parameters=()):
+            cursor = super().execute(sql, parameters)
+            if sql.startswith('UPDATE authentication_contexts SET canonical_bytes='):
+                assert super().execute(
+                    'SELECT count(*) FROM authentication_contexts WHERE canonical_bytes=?',
+                    (b'v37',),
+                ).fetchone()[0] > 0
+                self.converted = True
+                raise sqlite3.IntegrityError('injected after compacting contexts')
+            return cursor
+
+    path, _, _ = _v36_path(tmp_path)
+    with sqlite3.connect(path, factory=FailedUpdate) as connection:
+        before = _state(connection)
+        with pytest.raises(sqlite3.IntegrityError, match='after compacting contexts'):
             apply_pending_migrations(connection, applied_at='2026-09-13T00:00:00.000000Z')
+        assert connection.converted
         assert _state(connection) == before
 
 

@@ -61,12 +61,8 @@ def migrate_security_records(
     for row in rows():
         _validate_old_context(row)
     connection.execute("DROP TRIGGER immutable_authentication_contexts_update")
-    for row in rows():
-        _validate_old_context(row)
-        connection.execute(
-            "UPDATE authentication_contexts SET canonical_bytes=? WHERE authentication_context_id=?",
-            (b"v37", row["authentication_context_id"]),
-        )
+    # The same migration transaction retains the fully validated predecessor.
+    connection.execute("UPDATE authentication_contexts SET canonical_bytes=?", (b"v37",))
     connection.execute(
         "ALTER TABLE authentication_contexts RENAME COLUMN canonical_bytes TO storage_context_marker"
     )
