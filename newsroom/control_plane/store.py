@@ -616,6 +616,10 @@ def ensure_reconciliation_schema(
                     f"ALTER TABLE {prefix}unpublished_effective_revision_remap "
                     f"ADD COLUMN {name} {declaration}"
                 )
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {prefix}idx_effective_revision_remap_ingest "
+            "ON unpublished_effective_revision_remap(new_ingest_id,old_ingest_id)"
+        )
         if own_txn:
             connection.commit()
     except Exception:
@@ -1663,7 +1667,7 @@ def _remapped_ingest_aliases(
         for row in connection.execute(
             "SELECT old_ingest_id FROM unpublished_effective_revision_remap "
             "WHERE new_ingest_id=? AND old_ingest_id IS NOT NULL "
-            "AND old_ingest_id != ''",
+            "AND old_ingest_id != '' ORDER BY rowid",
             (new_ingest_id,),
         )
     )
