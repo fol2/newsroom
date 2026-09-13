@@ -631,11 +631,14 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         (2, "other-ingest", "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
         (3, unit.ingest_id, "GRAPHITI_EMBEDDING", "openrouter", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
         (4, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "REPORTED", "NONE"),
+        (5, unit.ingest_id, "GRAPHITI_CHAT_FALLBACK", "grok-build-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
     ):
         identity = str(number)
         connection.execute(
             "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
-            (identity, "cycle", workload, "now", identity,
+            (identity, "cycle", (
+                "GRAPHITI_CHAT_PRIMARY" if number == 5 else workload
+            ), "now", identity,
              json.dumps({"ingest_id": ingest_id})),
         )
         connection.execute(
@@ -648,7 +651,7 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
             ("terminal-" + identity, identity, status, "FAILED", failure, "now", "{}"),
         )
     # Settled and unrelated history must not enter the current-ingest selector.
-    for number in range(5, 55):
+    for number in range(6, 56):
         identity = str(number)
         connection.execute(
             "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
@@ -695,8 +698,11 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         # reconciliation does not rediscover this already settled invocation.
         connection.execute(
             "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("disposition", "1", "terminal-1", "1", policy.canonical_digest,
-             "plan", "authority", "owner", "reference", "now", "now", "ESTIMATED", "{}"),
+            ("disposition-" + kwargs["invocation_id"], kwargs["invocation_id"],
+             kwargs["expected_terminal_digest"], kwargs["expected_allocation_digest"], policy.canonical_digest,
+             "plan-" + kwargs["invocation_id"],
+             "authority-" + kwargs["invocation_id"],
+             "owner", "reference", "now", "now", "ESTIMATED", "{}"),
         )
         connection.commit()
 
@@ -706,12 +712,14 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
     )
     processor._usage = usage
     outcomes = processor.advance((unit,), cycle_id="native-settlement")
-    assert order == (["settle", "ingest"] if retained else ["ingest", "settle"])
-    assert settled == [{
-        "invocation_id": "1", "expected_allocation_digest": "1",
-        "expected_terminal_digest": "terminal-1",
-        "observed_at": datetime(2026, 9, 8, tzinfo=UTC),
-    }]
+    assert order == (
+        ["settle", "settle", "ingest"]
+        if retained
+        else ["settle", "ingest", "settle"]
+    )
+    assert [item["invocation_id"] for item in settled] == (
+        ["1", "5"] if retained else ["5", "1"]
+    )
     assert outcomes[0].state == "GRAPHITI_HOLD"
     assert connection.execute(
         "SELECT usage_status FROM model_invocation_terminals WHERE invocation_id='1'"

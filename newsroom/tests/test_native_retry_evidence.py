@@ -20,7 +20,11 @@ from newsroom.control_plane.model_usage import (
     InvocationTerminal, ModelUsageIntegrityError, ModelUsageService, UsageComponents, UsageStatus,
     WorkEnvelope, WorkloadClass,
 )
-from newsroom.control_plane.store import connect, record_graphiti_failure
+from newsroom.control_plane.store import (
+    connect,
+    insert_graphiti_attempt_receipt,
+    record_graphiti_failure,
+)
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.tests.test_graphiti_internal_requests import (
     EXTRACTED_ENTITIES_SCHEMA,
@@ -208,7 +212,120 @@ def test_native_retry_requires_the_exact_historical_direct_fallback_event(
         semantic_request_class="ExtractedEntities",
         max_tokens=77,
     )
-    _settle(service, envelope, allocation, zero=False)
+    dispatch_at = T0 + timedelta(seconds=10)
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=dispatch_at,
+        state="DISPATCH_STARTED",
+        evidence_digest=allocation.canonical_digest,
+    )
+    terminal = service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="FAILED",
+            failure_class="MISSING_PROVIDER_TELEMETRY",
+            usage_status=UsageStatus.UNREPORTED,
+            components=UsageComponents(provenance="UNAVAILABLE"),
+            dispatch_at=dispatch_at,
+            completed_at=T0 + timedelta(seconds=11),
+            observed_at=T0 + timedelta(seconds=11),
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="native fallback work outcome is absent",
+    ):
+        service.disposition_native_unreported_subscription_usage(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=terminal.terminal_digest,
+            expected_allocation_digest=allocation.canonical_digest,
+            observed_at=T0 + timedelta(seconds=12),
+        )
+    receipt = {
+        "chat_invocations": [
+            {
+                "model_invocation_id": allocation.invocation_id,
+                "model_invocation_terminal_digest": terminal.terminal_digest,
+            }
+        ]
+    }
+    receipt_digest = usage_module.digest_bytes(
+        usage_module.canonical_json_bytes(receipt)
+    )
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="GRAPHITI_FAILED",
+        outcome_record_id=receipt_digest,
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=11),
+    )
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="native fallback attempt receipt is absent",
+    ):
+        service.disposition_native_unreported_subscription_usage(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=terminal.terminal_digest,
+            expected_allocation_digest=allocation.canonical_digest,
+            observed_at=T0 + timedelta(seconds=12),
+        )
+    with connect(service.path) as retained:
+        assert insert_graphiti_attempt_receipt(
+            retained,
+            ingest_id=unit.ingest_id,
+            attempt_number=1,
+            outcome="FAILED",
+            receipt=receipt,
+        ) == receipt_digest
+    disposition = service.disposition_native_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        observed_at=T0 + timedelta(seconds=12),
+    )
+    assert disposition["components"]["total_tokens"] == 147_456
+    assert disposition["exact_usage_remains_unknown"] is True
+    assert disposition["unknown_spend_released"] is False
+    assert _proof(service, unit).settled_provider_attempts == (1,)
+
+    with sqlite3.connect(path) as connection:
+        outcome_digest, outcome_raw = connection.execute(
+            "SELECT outcome_digest,record_json FROM model_work_outcomes "
+            "WHERE envelope_id=?",
+            (envelope.envelope_id,),
+        ).fetchone()
+        crossed_outcome = json.loads(outcome_raw)
+        crossed_outcome["outcome_record_id"] = "cross-bound-receipt"
+        crossed_outcome.pop("outcome_digest")
+        crossed_digest = usage_module.digest_canonical(crossed_outcome)
+        crossed_outcome["outcome_digest"] = crossed_digest
+        connection.execute(
+            "UPDATE model_work_outcomes SET outcome_digest=?,record_json=? "
+            "WHERE envelope_id=?",
+            (crossed_digest, usage_module._json(crossed_outcome), envelope.envelope_id),
+        )
+    with pytest.raises(ModelUsageIntegrityError, match="failure receipt differs"):
+        _proof(service, unit)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE model_work_outcomes SET outcome_digest=?,record_json=? "
+            "WHERE envelope_id=?",
+            (outcome_digest, outcome_raw, envelope.envelope_id),
+        )
+        connection.execute(
+            "UPDATE model_invocation_allocations SET provider='cursor-agent-cli' "
+            "WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        )
+    with pytest.raises(ModelUsageIntegrityError, match="allocation binding differs"):
+        _proof(service, unit)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE model_invocation_allocations SET provider='grok-build-cli' "
+            "WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        )
     assert _proof(service, unit).settled_provider_attempts == (1,)
 
     with sqlite3.connect(path) as connection:
