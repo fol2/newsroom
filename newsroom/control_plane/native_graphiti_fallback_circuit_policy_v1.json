@@ -1,9 +1,9 @@
 {
   "schema_version": "newsroom.graphiti-fallback-circuit-policy.v1",
-  "canonical_digest": "sha256:4f220869ae7a78fef577a4ddd855bb1e5c528c8c3b3ffcfe80de7de3ab248aff",
+  "canonical_digest": "sha256:97343b1c04ba93d373876892cb8d31487e732e99084d622a647879dc4ab81c74",
   "policy_id": "newsroom.graphiti-fallback-circuit-policy",
   "version": "issue-981-grok-build-fallback-v1",
-  "call_shape_policy_digest": "sha256:be91e4500d95089b4c4e5994c143ae745c97333244f1c14d691c2e6ef38491e5",
+  "call_shape_policy_digest": "sha256:e125f1d8320c2c7b507e5926b3f89aceb546d7f03ba75ecd479abcfeda1432fd",
   "eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],

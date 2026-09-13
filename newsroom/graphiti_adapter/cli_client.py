@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -24,6 +25,7 @@ from newsroom.graphiti_adapter.cli_process import (
     retained_cli_qualification,
     run_bounded_process,
     run_bounded_process_async,
+    stop_process_async,
     timeout_diagnostic,
     validated_process_exit_diagnostic,
     validated_sdk_terminal,
@@ -64,6 +66,8 @@ GROK_AUTH_PATH = os.environ.get(
 )
 GROK_PREFLIGHT_TIMEOUT_SECONDS = 20
 GROK_PREFLIGHT_MAX_BYTES = 64 * 1024
+GROK_ACP_PREP_TIMEOUT_SECONDS = 20
+GROK_ACP_PREP_MAX_BYTES = 64 * 1024
 GROK_STDOUT_BASE_BYTES = 64 * 1024
 GROK_STDOUT_BYTES_PER_TOKEN = 64
 GROK_STDOUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
@@ -87,6 +91,7 @@ _GROK_REQUIRED_CLI_CONTROLS = (
     "--reasoning-effort",
     "--output-format",
     "--verbatim",
+    "--resume",
 )
 CLI_CALL_TIMEOUT_SECONDS = (
     GRAPHITI_EXTRACTION_TIMEOUT_MS - GRAPHITI_MAX_CLEANUP_TIMEOUT_MS
@@ -264,7 +269,7 @@ async def run_cli_async(
 
 
 def _grok_command(
-    *, prompt: str, schema: str | None, request_dir: str
+    *, prompt: str, schema: str | None, request_dir: str, session_id: str
 ) -> tuple[str, ...]:
     path = os.path.join(request_dir, "prompt.txt")
     with open(path, "w", encoding="utf-8") as handle:
@@ -294,7 +299,7 @@ def _grok_command(
     ]
     if schema:
         command.extend(["--json-schema", schema])
-    command.extend(["--output-format", "streaming-json"])
+    command.extend(["--output-format", "streaming-json", "--resume", session_id])
     return tuple(command)
 
 
@@ -311,6 +316,7 @@ def _write_grok_completion_limit(
         handle.write(
             "[features]\n"
             "title_refresh = false\n"
+            "turn_summary = false\n"
             "[models]\n"
             "max_retries = 0\n"
             f'[model."{GROK_CHAT_MODEL_ID}"]\n'
@@ -324,6 +330,204 @@ class _GraphitiCliWorkspace:
     cwd: str
     request_dir: str
     environment: dict[str, str]
+
+
+def _grok_acp_command(workspace: _GraphitiCliWorkspace) -> tuple[str, ...]:
+    return (
+        GROK_BIN,
+        "--cwd",
+        workspace.cwd,
+        "--model",
+        GROK_CHAT_MODEL_ID,
+        "--reasoning-effort",
+        GROK_CHAT_REASONING,
+        "agent",
+        "--no-leader",
+        "stdio",
+    )
+
+
+async def _prepare_grok_resume_session_async(
+    workspace: _GraphitiCliWorkspace,
+) -> str:
+    """Create, name and close an empty Grok session without inference."""
+
+    session_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + GROK_ACP_PREP_TIMEOUT_SECONDS
+    try:
+        process = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *_grok_acp_command(workspace),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace.cwd,
+                env=workspace.environment,
+                start_new_session=True,
+                limit=GROK_ACP_PREP_MAX_BYTES + 1,
+            ),
+            timeout=GROK_ACP_PREP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise CliPredispatchRefusal("Grok ACP preparation timed out") from exc
+    except OSError as exc:
+        raise CliPredispatchRefusal("Grok ACP preparation failed") from exc
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    retained_bytes = 0
+    stderr_task: asyncio.Task[None] | None = None
+    stdout_task: asyncio.Task[bytes] | None = None
+
+    def retain(chunk: bytes) -> None:
+        nonlocal retained_bytes
+        retained_bytes += len(chunk)
+        if retained_bytes > GROK_ACP_PREP_MAX_BYTES:
+            raise CliOutputBoundExceeded(
+                "Grok ACP preparation exceeded output byte limit"
+            )
+
+    async def collect_stderr() -> None:
+        while chunk := await process.stderr.read(65_536):
+            retain(chunk)
+
+    async def response_for(
+        ident: int, method: str, params: dict[str, object], *, deadline: float
+    ) -> object:
+        nonlocal stderr_task, stdout_task
+        request = {
+            "jsonrpc": "2.0",
+            "id": ident,
+            "method": method,
+            "params": params,
+        }
+        process.stdin.write(
+            json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+        await process.stdin.drain()
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            if stdout_task is None:
+                stdout_task = asyncio.create_task(process.stdout.readline())
+            waiters: set[asyncio.Task[Any]] = {stdout_task}
+            if stderr_task is not None:
+                waiters.add(stderr_task)
+            done, _pending = await asyncio.wait(
+                waiters,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise TimeoutError
+            if stderr_task is not None and stderr_task in done:
+                stderr_task.result()
+                stderr_task = None
+                if stdout_task not in done:
+                    continue
+            raw = stdout_task.result()
+            stdout_task = None
+            retain(raw)
+            if not raw:
+                raise ValueError(f"Grok ACP stdout closed before {method}")
+            try:
+                item = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Grok ACP returned malformed JSON") from exc
+            if not isinstance(item, dict):
+                raise ValueError("Grok ACP response is not an object")
+            if "id" not in item:
+                if isinstance(item.get("method"), str):
+                    continue
+                raise ValueError("Grok ACP response has no identity")
+            if item.get("id") != ident:
+                raise ValueError("Grok ACP response identity differs")
+            if "error" in item:
+                raise ValueError(f"Grok ACP {method} returned an error")
+            if "result" not in item:
+                raise ValueError(f"Grok ACP {method} result is missing")
+            return item["result"]
+
+    stderr_task = asyncio.create_task(collect_stderr())
+    cleanup_result = "UNOBSERVED"
+    try:
+        await response_for(
+            1,
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "newsroom-graphiti-fallback", "version": "1"},
+            },
+            deadline=deadline,
+        )
+        created = await response_for(
+            2,
+            "session/new",
+            {
+                "cwd": workspace.cwd,
+                "mcpServers": [],
+                "_meta": {
+                    "source": "newsroom-graphiti-fallback",
+                    "sessionId": session_id,
+                    "sessionKind": "headless",
+                    "modelId": GROK_CHAT_MODEL_ID,
+                },
+            },
+            deadline=deadline,
+        )
+        if not isinstance(created, dict) or created.get("sessionId") != session_id:
+            raise ValueError("Grok ACP returned a different session identity")
+        renamed = await response_for(
+            3,
+            "_x.ai/session/rename",
+            {
+                "sessionId": session_id,
+                "title": "newsroom-graphiti-fallback",
+                "cwd": workspace.cwd,
+            },
+            deadline=deadline,
+        )
+        if not isinstance(renamed, dict) or renamed.get("success") is not True:
+            raise ValueError("Grok ACP session rename was not confirmed")
+        closed = await response_for(
+            4,
+            "session/close",
+            {"sessionId": session_id},
+            deadline=deadline,
+        )
+        if (
+            not isinstance(closed, dict)
+            or not isinstance(closed.get("_meta"), dict)
+            or closed["_meta"].get("x.ai/closeOutcome") != "closed"
+        ):
+            raise ValueError("Grok ACP session close was not confirmed")
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError as exc:
+        raise CliPredispatchRefusal("Grok ACP preparation timed out") from exc
+    except (CliOutputBoundExceeded, ValueError, ConnectionError) as exc:
+        raise CliPredispatchRefusal("Grok ACP preparation failed") from exc
+    finally:
+        readers = tuple(
+            task
+            for task in (stdout_task, stderr_task)
+            if task is not None
+        )
+        cleanup_result = await stop_process_async(
+            process,
+            process_group_id=process.pid,
+            readers=readers,
+        )
+    if cleanup_result == "PROCESS_CLEANUP_TIMEOUT":
+        raise CliPredispatchRefusal("Grok ACP preparation cleanup timed out")
+    return session_id
+
+
+def _prepare_grok_resume_session(workspace: _GraphitiCliWorkspace) -> str:
+    return asyncio.run(_prepare_grok_resume_session_async(workspace))
 
 
 def _hermetic_cli_workspace(root: str, *, binary: str) -> _GraphitiCliWorkspace:
@@ -559,6 +763,7 @@ def run_grok_llm(
             required_controls=_GROK_REQUIRED_CLI_CONTROLS,
             workspace=workspace,
         )
+        session_id = _prepare_grok_resume_session(workspace)
         if dispatch_started is not None:
             dispatch_started()
         return parse_grok_stream_output(
@@ -567,6 +772,7 @@ def run_grok_llm(
                     prompt=prompt,
                     schema=schema,
                     request_dir=workspace.request_dir,
+                    session_id=session_id,
                 ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,
@@ -592,6 +798,7 @@ async def run_grok_llm_async(
             required_controls=_GROK_REQUIRED_CLI_CONTROLS,
             workspace=workspace,
         )
+        session_id = await _prepare_grok_resume_session_async(workspace)
         if dispatch_started is not None:
             dispatch_started()
         return parse_grok_stream_output(
@@ -600,6 +807,7 @@ async def run_grok_llm_async(
                     prompt=prompt,
                     schema=schema,
                     request_dir=workspace.request_dir,
+                    session_id=session_id,
                 ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,

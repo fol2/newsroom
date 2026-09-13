@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:be91e4500d95089b4c4e5994c143ae745c97333244f1c14d691c2e6ef38491e5",
+  "canonical_digest": "sha256:e125f1d8320c2c7b507e5926b3f89aceb546d7f03ba75ecd479abcfeda1432fd",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-981-grok-build-fallback-v1",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -66,9 +66,13 @@
       "route": "GRAPHITI_CHAT_FALLBACK",
       "model": "grok-4.6",
       "reasoning": "medium",
-      "config_identity": "graphiti-grok-hermetic-user-config-v1",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v7",
+      "config_identity": "graphiti-grok-hermetic-user-config-v2",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v8",
       "command_flags": [
+        "ACP_COMMAND=--cwd=EMPTY_NON_GIT,--model=grok-4.6,--reasoning-effort=medium,agent,--no-leader,stdio",
+        "ACP_SEQUENCE=initialize,session/new,_x.ai/session/rename,session/close",
+        "ACP_SESSION=CALLER_UUID,headless,mcpServers=EMPTY,manual-title,closed",
+        "ACP_INFERENCE_REQUESTS=0",
         "--prompt-file",
         "--model=grok-4.6",
         "--disable-web-search",
@@ -85,8 +89,10 @@
         "--reasoning-effort=medium",
         "--verbatim",
         "USER_CONFIG_TITLE_REFRESH=FALSE",
+        "USER_CONFIG_TURN_SUMMARY=FALSE",
         "USER_CONFIG_MAX_RETRIES=0",
         "--output-format=streaming-json",
+        "--resume=ACP_SESSION_UUID",
         "CONTROLLER_STDOUT_CONTRACT=grok-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
         "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v2",
         "PREDISPATCH_TIMEOUT_DIAGNOSTICS=HELP_PROBE",
@@ -383,7 +389,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:930e9310a378d6e2f87b26064683bee718227670f81898f031cc32b1b335761b",
+  "evidence_digest": "sha256:7b8b4ae71a400c9d856e851426811ec6d54875ff136b37ffebbda7504116d032",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

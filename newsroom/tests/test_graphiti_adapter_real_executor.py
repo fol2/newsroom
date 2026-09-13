@@ -4203,6 +4203,11 @@ def test_grok_cli_runs_outside_repository_cwd(
 
     monkeypatch.setattr(cli_client, "run_cli", capture_grok)
     monkeypatch.setattr(cli_client, "_prove_cli_controls", lambda **_values: None)
+    monkeypatch.setattr(
+        cli_client,
+        "_prepare_grok_resume_session",
+        lambda _workspace: "fixture-session",
+    )
     monkeypatch.setattr(cli_client, "GROK_AUTH_PATH", "/fixture/grok/auth.json")
     grok_execution = cli_client.run_grok_llm("untrusted source", None, max_tokens=512)
     assert grok_execution.text == "{}"
@@ -4216,6 +4221,7 @@ def test_grok_cli_runs_outside_repository_cwd(
     assert observed["config"] == (
         "[features]\n"
         "title_refresh = false\n"
+        "turn_summary = false\n"
         "[models]\n"
         "max_retries = 0\n"
         '[model."grok-4.6"]\n'
@@ -4227,6 +4233,7 @@ def test_grok_cli_runs_outside_repository_cwd(
     )
     assert observed["max_output_bytes"] == cli_client.grok_stdout_limit(512)
     assert observed["inventory"] == []
+    assert observed["command"][-2:] == ("--resume", "fixture-session")
 
 
 def test_subscription_cli_deadline_reserves_only_cleanup_budget() -> None:
