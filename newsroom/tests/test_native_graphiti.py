@@ -12,11 +12,23 @@ from newsroom.control_plane import native_graphiti as n
 from newsroom.control_plane import cycle
 from newsroom.control_plane.store import connect, insert_graphiti_ingest
 from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
+from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
+from newsroom.projection.models import ProjectionGenerationState
 from newsroom.tests.test_graphiti_operational_readiness import _unit
 
 
-def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}):
+def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}, active_generation=True):
     connection = connect(str(tmp_path / "private.sqlite3"))
+    authority_path = tmp_path / "authority.sqlite3"
+    metadata = sqlite3.connect(authority_path)
+    metadata.execute("CREATE TABLE projection_generations(generation_id TEXT PRIMARY KEY, family_id TEXT, state TEXT)")
+    if active_generation:
+        metadata.execute(
+            "INSERT INTO projection_generations VALUES(?,?,?)",
+            ("00000000-0000-4000-8000-000000008201", INCREMENT4_ADMITTED_FAMILY_ID, "ACTIVE"),
+        )
+    metadata.commit()
+    metadata.close()
     calls = []
     admission = SimpleNamespace(
         enqueue_complete_receipts=lambda **kw: calls.append(("enqueue", kw)),
@@ -32,10 +44,25 @@ def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}):
         calls.append(("fence", {}))
         yield
     system = SimpleNamespace(**dict.fromkeys(("graphiti", "extraction", "objects", "entities", "relations", "increment4")))
+    system.authority_store_path = authority_path
     def build_current(request, **kw):
         calls.append(("empty-cohort-build", {"request": request}))
-        pytest.fail("zero proposals must not build a full-history generation")
-    system.increment4 = SimpleNamespace(build_current_and_promote=build_current)
+        metadata = sqlite3.connect(authority_path)
+        metadata.execute(
+            "INSERT INTO projection_generations VALUES(?,?,?)",
+            (str(request.generation_id), INCREMENT4_ADMITTED_FAMILY_ID, "ACTIVE"),
+        )
+        metadata.commit()
+        metadata.close()
+        return SimpleNamespace(generation=SimpleNamespace(
+            generation_id=request.generation_id, state=ProjectionGenerationState.ACTIVE,
+        ))
+    def status(generation_id, **kw):
+        calls.append(("generation-status", {"generation_id": generation_id}))
+        return SimpleNamespace(generation=SimpleNamespace(
+            generation_id=generation_id, state=ProjectionGenerationState.ACTIVE,
+        ))
+    system.increment4 = SimpleNamespace(build_current_and_promote=build_current, generation_status=status)
     system.graphiti = SimpleNamespace(attempt_history=lambda *args, **kwargs: ())
     processor = n.NativeGraphitiProcessor(
         system=system, connection=connection, usage=None, proof=None,
@@ -105,7 +132,7 @@ def test_native_cohort_finalises_once_and_replays_without_new_ingests(tmp_path, 
 
 
 @pytest.mark.parametrize("generation_id", (None, "00000000-0000-4000-8000-000000008201"))
-def test_successive_zero_proposal_cohorts_need_no_graph_generation(
+def test_successive_zero_proposal_cohorts_bootstrap_only_without_active_generation(
     tmp_path, monkeypatch, generation_id
 ):
     from newsroom.tests.test_graphiti_admission_consumer import (
@@ -116,15 +143,14 @@ def test_successive_zero_proposal_cohorts_need_no_graph_generation(
         for unit in kwargs["units"]:
             _seed_receipt(connection, ingest_id=unit.ingest_id)
 
-    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=complete)
+    processor, connection, calls = _open(
+        tmp_path, monkeypatch, ingest=complete, active_generation=generation_id is not None,
+    )
     projector = _Projector()
     authority = _Authority({})
     processor._admission = _consumer(
         connection, authority, projector, _Rights(),
         projection_generation_id=generation_id,
-    )
-    processor._system.increment4.generation_status = lambda *a, **kw: pytest.fail(
-        "zero proposals do not require an active graph"
     )
     processor._system.increment4.reconcile_active = lambda *a, **kw: pytest.fail(
         "zero proposals do not change the active graph"
@@ -140,12 +166,57 @@ def test_successive_zero_proposal_cohorts_need_no_graph_generation(
         assert not authority.calls
         assert not projector.generation_calls
         assert not projector.generation_effects
-        assert not any(name == "empty-cohort-build" for name, _ in calls)
-        # Completion is revision coverage only, including a fresh installation
-        # with no configured generation; it does not assert graph readiness.
+        assert sum(name == "empty-cohort-build" for name, _ in calls) == (
+            1 if generation_id is None else 0
+        )
+        assert sum(name == "generation-status" for name, _ in calls) == (
+            1 if generation_id is None else 2
+        )
+        # Zero proposals add no admitted entity/relation effects. A fresh native
+        # pipeline nevertheless needs its first real generation for retrieval.
         assert connection.execute(
             "SELECT count(*) FROM unpublished_graphiti_admission_queue"
         ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("mismatch", ("duplicate", "identity", "state", "first_build"))
+def test_zero_proposal_bootstrap_keeps_generation_metadata_fail_closed(
+    tmp_path, monkeypatch, mismatch
+):
+    processor, connection, calls = _open(
+        tmp_path, monkeypatch, ingest=_complete,
+        active_generation=mismatch != "first_build",
+    )
+    if mismatch == "duplicate":
+        metadata = sqlite3.connect(processor._system.authority_store_path)
+        metadata.execute(
+            "INSERT INTO projection_generations VALUES(?,?,?)",
+            ("00000000-0000-4000-8000-000000008202", INCREMENT4_ADMITTED_FAMILY_ID, "ACTIVE"),
+        )
+        metadata.commit()
+        metadata.close()
+    elif mismatch == "first_build":
+        processor._system.increment4.build_current_and_promote = (
+            lambda *a, **kw: SimpleNamespace(generation=SimpleNamespace(state=None))
+        )
+    else:
+        processor._system.increment4.generation_status = (
+            lambda generation_id, **kw: SimpleNamespace(generation=SimpleNamespace(
+                generation_id=None if mismatch == "identity" else generation_id,
+                state=None if mismatch == "state" else ProjectionGenerationState.ACTIVE,
+            ))
+        )
+    try:
+        outcome, = processor.advance((_native(),), cycle_id="bad-generation")
+        assert outcome.state == "ADMISSION_HOLD"
+        assert outcome.reason == (
+            "native empty-cohort graph is not active" if mismatch == "first_build"
+            else "native active graph metadata differs"
+        )
+        assert not processor._completed
+        assert not any(name == "empty-cohort-build" for name, _ in calls)
     finally:
         connection.close()
 
