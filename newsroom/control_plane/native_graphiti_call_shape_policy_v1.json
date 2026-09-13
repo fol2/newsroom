@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:e125f1d8320c2c7b507e5926b3f89aceb546d7f03ba75ecd479abcfeda1432fd",
+  "canonical_digest": "sha256:7362fe7ffede8c5ade4079e75a869d5d31ccac7170784e703ed66a603d4c1d3f",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-981-grok-build-fallback-v1",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -69,7 +69,7 @@
       "config_identity": "graphiti-grok-hermetic-user-config-v2",
       "command_semantic_version": "newsroom.graphiti-provider-dispatch.v8",
       "command_flags": [
-        "ACP_COMMAND=--cwd=EMPTY_NON_GIT,--model=grok-4.6,--reasoning-effort=medium,agent,--no-leader,stdio",
+        "ACP_COMMAND=--sandbox=read-only,--cwd=EMPTY_NON_GIT,--model=grok-4.6,--reasoning-effort=medium,agent,--no-leader,stdio",
         "ACP_SEQUENCE=initialize,session/new,_x.ai/session/rename,session/close",
         "ACP_SESSION=CALLER_UUID,headless,mcpServers=EMPTY,manual-title,closed",
         "ACP_INFERENCE_REQUESTS=0",
@@ -389,7 +389,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:7b8b4ae71a400c9d856e851426811ec6d54875ff136b37ffebbda7504116d032",
+  "evidence_digest": "sha256:72334e8dc2216422633869641306a61d39bb5ae466ecea73d1b01547bc9ab465",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

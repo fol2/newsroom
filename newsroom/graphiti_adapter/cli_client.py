@@ -335,6 +335,8 @@ class _GraphitiCliWorkspace:
 def _grok_acp_command(workspace: _GraphitiCliWorkspace) -> tuple[str, ...]:
     return (
         GROK_BIN,
+        "--sandbox",
+        "read-only",
         "--cwd",
         workspace.cwd,
         "--model",

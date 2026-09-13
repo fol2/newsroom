@@ -102,6 +102,8 @@ def test_grok_acp_preparation_awaits_create_rename_and_close(
 
     records = [json.loads(line) for line in record.read_text().splitlines()]
     assert records[0]["argv"] == [
+        "--sandbox",
+        "read-only",
         "--cwd",
         workspace.cwd,
         "--model",
@@ -112,6 +114,12 @@ def test_grok_acp_preparation_awaits_create_rename_and_close(
         "--no-leader",
         "stdio",
     ]
+    resumed = cli_client._grok_command(
+        prompt="fixture", schema=None, request_dir=workspace.request_dir,
+        session_id=session_id,
+    )
+    # Grok rejects resume when the saved and requested sandbox profiles differ.
+    assert resumed[resumed.index("--sandbox") + 1] == records[0]["argv"][1]
     requests = records[1:]
     assert [item["method"] for item in requests] == [
         "initialize",
