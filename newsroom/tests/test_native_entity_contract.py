@@ -257,6 +257,58 @@ def test_declared_immigration_part_title_can_prefix_ordinary_claim_prose():
     ) == frozenset({(term, "OFFICIAL_TERM")})
 
 
+def test_official_immigration_rules_page_types_bounded_inline_part_reference():
+    term = "Part 14: stateless persons"
+    claim = (
+        "A Stateless person previously granted permission under "
+        f"{term} applying on or after 11 November 2025 will be considered."
+    )
+    source = f"Immigration Rules Appendix Statelessness\n\n{claim}"
+
+    assert evidence.bounded_named_entities(
+        claim, source_context=source,
+    ) == frozenset({(term, "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize(
+    ("claim", "source"),
+    (
+        (
+            "Permission under Part 14: stateless persons applying on or after today.",
+            "Immigration Rules Appendix Statelessness\n\nPermission under Part 13: "
+            "stateless persons applying on or after today.",
+        ),
+        (
+            "Permission under Part 14: stateless persons applying on or after today.",
+            "A handbook says permission under Part 14: stateless persons applying "
+            "on or after today.",
+        ),
+        (
+            "Permission under Part 14: ordinary copied prose applying on or after "
+            "today.",
+            "Immigration Rules Appendix Statelessness\n\nPermission under Part 14: "
+            "ordinary copied prose applying on or after today.",
+        ),
+    ),
+)
+def test_inline_part_reference_rejects_mutation_unrelated_source_and_prose(
+    claim, source,
+):
+    assert evidence.bounded_named_entities(claim, source_context=source) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", ("X", "/related", "_related", ".related"))
+def test_inline_part_reference_rejects_attached_suffix_mutation(suffix):
+    term = "Part 14: stateless persons"
+    source = (
+        "Immigration Rules Appendix Statelessness\n\nPermission under "
+        f"{term} applying on or after today."
+    )
+    claim = f"Permission under {term}{suffix} applying on or after today."
+
+    assert evidence.bounded_named_entities(claim, source_context=source) == frozenset()
+
+
 @pytest.mark.parametrize(
     ("claim_term", "declaration"),
     (
