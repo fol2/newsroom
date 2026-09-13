@@ -4191,11 +4191,19 @@ def test_grok_cli_runs_outside_repository_cwd(
             environment=environment,
             max_output_bytes=max_output_bytes,
             inventory=([] if cwd is None else list(Path(cwd).iterdir())),
+            config=(
+                None
+                if environment is None
+                else (
+                    Path(environment["HOME"]) / ".grok" / "config.toml"
+                ).read_text(encoding="utf-8")
+            ),
         )
         return "{}"
 
     monkeypatch.setattr(cli_client, "run_cli", capture_grok)
     monkeypatch.setattr(cli_client, "_prove_cli_controls", lambda **_values: None)
+    monkeypatch.setattr(cli_client, "GROK_AUTH_PATH", "/fixture/grok/auth.json")
     grok_execution = cli_client.run_grok_llm("untrusted source", None, max_tokens=512)
     assert grok_execution.text == "{}"
     assert grok_execution.usage["usage_basis"] == "UNREPORTED"
@@ -4204,7 +4212,19 @@ def test_grok_cli_runs_outside_repository_cwd(
     assert Path(grok_cwd) != _REPOSITORY_ROOT
     assert "newsroom-grok-graphiti-" in grok_cwd
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
-    assert "--max-output-tokens" in observed["command"]
+    assert "--max-output-tokens" not in observed["command"]
+    assert observed["config"] == (
+        "[features]\n"
+        "title_refresh = false\n"
+        "[models]\n"
+        "max_retries = 0\n"
+        '[model."grok-4.6"]\n'
+        "max_completion_tokens = 512\n"
+        "max_retries = 0\n"
+    )
+    assert observed["environment"]["GROK_AUTH_PATH"] == (
+        "/fixture/grok/auth.json"
+    )
     assert observed["max_output_bytes"] == cli_client.grok_stdout_limit(512)
     assert observed["inventory"] == []
 

@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-816-v2"
+    assert policy.version == "issue-981-grok-build-fallback-v1"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -147,6 +147,20 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     assert "AUTHENTICATION_BRIDGE=" not in " ".join(primary.command_flags)
     assert "cursor-agent" not in " ".join(primary.command_flags)
     fallback = call_shape.route_for(GraphitiLeafClass.FALLBACK)
+    assert fallback.config_identity == "graphiti-grok-hermetic-user-config-v1"
+    assert "--max-output-tokens=REQUEST_MAX_TOKENS" not in fallback.command_flags
+    assert (
+        "USER_CONFIG_MODEL_MAX_COMPLETION_TOKENS=REQUEST_MAX_TOKENS"
+        in fallback.command_flags
+    )
+    assert cli_client.GROK_COMPLETION_LIMIT_IDENTITY.endswith(
+        'model."grok-4.6".max_completion_tokens=REQUEST_MAX_TOKENS'
+    )
+    assert "USER_CONFIG_SCOPE=ISOLATED_HOME" in fallback.command_flags
+    assert "AUTH_STORAGE=GROK_AUTH_PATH" in fallback.command_flags
+    assert "--verbatim" in fallback.command_flags
+    assert "USER_CONFIG_TITLE_REFRESH=FALSE" in fallback.command_flags
+    assert "USER_CONFIG_MAX_RETRIES=0" in fallback.command_flags
     assert "CONTROLLER_TIMEOUT_MS=160000" in fallback.command_flags
     assert (
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"

@@ -687,7 +687,9 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         connection.commit()
 
     monkeypatch.setattr(usage, "disposition_native_unreported_subscription_usage", settle, raising=False)
-    monkeypatch.setattr(n, "graphiti_required_route_holds", lambda _: ())
+    monkeypatch.setattr(
+        n, "graphiti_required_route_holds", lambda _, **_values: ()
+    )
     processor._usage = usage
     outcomes = processor.advance((unit,), cycle_id="native-settlement")
     assert order == (["settle", "ingest"] if retained else ["ingest", "settle"])

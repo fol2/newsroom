@@ -58,6 +58,10 @@ from newsroom.graphiti_adapter.usage_meter import (
 )
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
+GROK_AUTH_PATH = os.environ.get(
+    "NEWSROOM_GROK_AUTH_PATH",
+    os.path.join(os.path.expanduser("~"), ".grok", "auth.json"),
+)
 GROK_PREFLIGHT_TIMEOUT_SECONDS = 20
 GROK_PREFLIGHT_MAX_BYTES = 64 * 1024
 GROK_STDOUT_BASE_BYTES = 64 * 1024
@@ -65,6 +69,24 @@ GROK_STDOUT_BYTES_PER_TOKEN = 64
 GROK_STDOUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
 GROK_STDOUT_LIMIT_IDENTITY = (
     "grok-controller-stdout-v1:" + GROK_STDOUT_LIMIT_FORMULA
+)
+GROK_COMPLETION_LIMIT_IDENTITY = (
+    'grok-user-config-v1:model."grok-4.6".max_completion_tokens='
+    "REQUEST_MAX_TOKENS"
+)
+_GROK_REQUIRED_CLI_CONTROLS = (
+    "--prompt-file",
+    "--disable-web-search",
+    "--sandbox",
+    "--permission-mode",
+    "--tools",
+    "--deny",
+    "--no-plan",
+    "--max-turns",
+    "--no-subagents",
+    "--reasoning-effort",
+    "--output-format",
+    "--verbatim",
 )
 CLI_CALL_TIMEOUT_SECONDS = (
     GRAPHITI_EXTRACTION_TIMEOUT_MS - GRAPHITI_MAX_CLEANUP_TIMEOUT_MS
@@ -242,7 +264,7 @@ async def run_cli_async(
 
 
 def _grok_command(
-    *, prompt: str, schema: str | None, request_dir: str, max_tokens: int
+    *, prompt: str, schema: str | None, request_dir: str
 ) -> tuple[str, ...]:
     path = os.path.join(request_dir, "prompt.txt")
     with open(path, "w", encoding="utf-8") as handle:
@@ -265,16 +287,36 @@ def _grok_command(
         "--no-plan",
         "--max-turns",
         "1",
-        "--max-output-tokens",
-        str(max_tokens),
         "--no-subagents",
         "--reasoning-effort",
         GROK_CHAT_REASONING,
+        "--verbatim",
     ]
     if schema:
         command.extend(["--json-schema", schema])
     command.extend(["--output-format", "streaming-json"])
     return tuple(command)
+
+
+def _write_grok_completion_limit(
+    workspace: _GraphitiCliWorkspace, *, max_tokens: int
+) -> None:
+    """Bind Grok's provider completion limit inside the isolated HOME."""
+
+    _require_positive_max_tokens(max_tokens)
+    config_dir = os.path.join(workspace.environment["HOME"], ".grok")
+    os.mkdir(config_dir, mode=0o700)
+    config_path = os.path.join(config_dir, "config.toml")
+    with open(config_path, "x", encoding="utf-8") as handle:
+        handle.write(
+            "[features]\n"
+            "title_refresh = false\n"
+            "[models]\n"
+            "max_retries = 0\n"
+            f'[model."{GROK_CHAT_MODEL_ID}"]\n'
+            f"max_completion_tokens = {max_tokens}\n"
+            "max_retries = 0\n"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +345,7 @@ def _hermetic_cli_workspace(root: str, *, binary: str) -> _GraphitiCliWorkspace:
         )
     )
     environment = {
+        "GROK_AUTH_PATH": GROK_AUTH_PATH,
         "HOME": paths["home"],
         "LANG": "en_GB.UTF-8",
         "LC_ALL": "en_GB.UTF-8",
@@ -508,9 +551,10 @@ def run_grok_llm(
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=GROK_BIN)
+        _write_grok_completion_limit(workspace, max_tokens=max_tokens)
         _prove_cli_controls(
             binary=GROK_BIN,
-            required_controls=("--max-output-tokens",),
+            required_controls=_GROK_REQUIRED_CLI_CONTROLS,
             workspace=workspace,
         )
         if dispatch_started is not None:
@@ -521,7 +565,6 @@ def run_grok_llm(
                     prompt=prompt,
                     schema=schema,
                     request_dir=workspace.request_dir,
-                    max_tokens=max_tokens,
                 ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,
@@ -541,9 +584,10 @@ async def run_grok_llm_async(
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=GROK_BIN)
+        _write_grok_completion_limit(workspace, max_tokens=max_tokens)
         await _prove_cli_controls_async(
             binary=GROK_BIN,
-            required_controls=("--max-output-tokens",),
+            required_controls=_GROK_REQUIRED_CLI_CONTROLS,
             workspace=workspace,
         )
         if dispatch_started is not None:
@@ -554,7 +598,6 @@ async def run_grok_llm_async(
                     prompt=prompt,
                     schema=schema,
                     request_dir=workspace.request_dir,
-                    max_tokens=max_tokens,
                 ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,
@@ -834,6 +877,241 @@ def _mark_observed_transport_dispatch(
         method(token)
 
 
+async def _run_grok_fallback(
+    *,
+    prompt: str,
+    schema: str | None,
+    grok_runner: GrokRunner | AsyncGrokRunner,
+    invocations: list[dict[str, object]],
+    invocation_observer: CliInvocationObserver | None,
+    semantic_request_class: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    def observe(
+        token: object, *, outcome: str, usage: dict[str, object]
+    ) -> Mapping[str, str] | None:
+        if invocation_observer is None:
+            return None
+        return invocation_observer.after_cli_invocation(
+            token, outcome=outcome, usage=usage
+        )
+
+    grok_token = (
+        None
+        if invocation_observer is None
+        else _before_observed_cli_invocation(
+            invocation_observer,
+            provider="grok-build-cli",
+            model=GROK_CHAT_MODEL_ID,
+            prompt=prompt,
+            schema=schema,
+            semantic_request_class=semantic_request_class,
+            max_tokens=max_tokens,
+        )
+    )
+    grok_transport_started = False
+    grok_started = time.monotonic()
+
+    def mark_grok_transport_started() -> None:
+        nonlocal grok_transport_started
+        if grok_transport_started:
+            raise RuntimeError("Grok Graphiti transport dispatch repeated")
+        try:
+            _mark_observed_transport_dispatch(invocation_observer, grok_token)
+        except Exception as exc:
+            raise CliDispatchMarkerError(
+                "Grok durable dispatch observation failed"
+            ) from exc
+        grok_transport_started = True
+    try:
+        if inspect.iscoroutinefunction(grok_runner):
+            if _runner_accepts_dispatch_marker(grok_runner):
+                raw = await grok_runner(
+                    prompt,
+                    schema,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_grok_transport_started,
+                )
+            else:
+                mark_grok_transport_started()
+                raw = await grok_runner(prompt, schema, max_tokens=max_tokens)
+        else:
+            if _runner_accepts_dispatch_marker(grok_runner):
+                raw = await asyncio.to_thread(
+                    grok_runner,
+                    prompt,
+                    schema,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_grok_transport_started,
+                )
+            else:
+                mark_grok_transport_started()
+                raw = await asyncio.to_thread(
+                    grok_runner, prompt, schema, max_tokens=max_tokens
+                )
+    except CliDispatchMarkerError as exc:
+        grok_usage = no_provider_call_cli_usage()
+        binding = observe(
+            grok_token,
+            outcome="DISPATCH_FENCE_REFUSED",
+            usage=grok_usage,
+        )
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="DISPATCH_FENCE_REFUSED",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc.__cause__ or exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        if isinstance(exc.__cause__, Exception):
+            raise exc.__cause__
+        raise
+    except asyncio.CancelledError as exc:
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(grok_token, outcome="CANCELLED", usage=grok_usage)
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="CANCELLED",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+                transport_diagnostic=timeout_diagnostic(
+                    boundary="CALLER_CANCELLATION",
+                    phase="FALLBACK_TRANSPORT",
+                    cause="CALLER_CANCELLED",
+                    configured_timeout_ms=CLI_CALL_TIMEOUT_SECONDS * 1_000,
+                    elapsed_ms=round((time.monotonic() - grok_started) * 1_000),
+                    deadline_at=None,
+                    last_progress=(
+                        "DISPATCH_STARTED"
+                        if grok_transport_started
+                        else "PREDISPATCH"
+                    ),
+                    termination="TASK_CANCELLED",
+                ),
+            )
+        )
+        raise
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(grok_token, outcome="TIMEOUT", usage=grok_usage)
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="TIMEOUT",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+                transport_diagnostic=_retained_timeout_diagnostic(
+                    exc,
+                    phase="FALLBACK_TRANSPORT",
+                    started=grok_started,
+                    transport_started=grok_transport_started,
+                ),
+            )
+        )
+        raise CliResponseError("Graphiti fallback CLI timed out") from exc
+    except (FileNotFoundError, CliPredispatchRefusal) as exc:
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
+        refusal_outcome = (
+            "EXECUTABLE_NOT_FOUND"
+            if isinstance(exc, FileNotFoundError)
+            else "PREDISPATCH_REFUSED"
+        )
+        binding = observe(
+            grok_token, outcome=refusal_outcome, usage=grok_usage
+        )
+        invocation = _invocation(
+            provider="grok-build-cli",
+            model=GROK_CHAT_MODEL_ID,
+            outcome=refusal_outcome,
+            execution=CliExecution(text="", usage=grok_usage),
+            failure=type(exc).__name__,
+            requested_max_tokens=max_tokens,
+            receipt_binding=binding,
+        )
+        if isinstance(exc, CliPredispatchRefusal):
+            retained_qualification = _retained_refusal_qualification(exc)
+            if retained_qualification is not None:
+                invocation["transport_qualification"] = retained_qualification
+        invocations.append(invocation)
+        raise CliResponseError("Graphiti fallback CLI executable not found") from exc
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(grok_token, outcome="FAILED", usage=grok_usage)
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="FAILED",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        if isinstance(exc, (TypeError, ValueError)):
+            raise
+        raise CliResponseError("Graphiti fallback CLI failed") from exc
+    grok_execution = _execution(cast(CliOutput, raw))
+    payload = _parsed_object(grok_execution.text)
+    if payload is not None and not _payload_matches_response_schema(payload, schema):
+        payload = None
+    output_limit_exceeded = _output_limit_exceeded(
+        grok_execution, max_tokens=max_tokens
+    )
+    grok_outcome = (
+        "OUTPUT_LIMIT_EXCEEDED"
+        if output_limit_exceeded
+        else "COMPLETE"
+        if payload is not None
+        else "MALFORMED_OUTPUT"
+    )
+    binding = observe(
+        grok_token,
+        outcome=grok_outcome,
+        usage=dict(grok_execution.usage),
+    )
+    invocations.append(
+        _invocation(
+            provider="grok-build-cli",
+            model=GROK_CHAT_MODEL_ID,
+            outcome=grok_outcome,
+            execution=grok_execution,
+            requested_max_tokens=max_tokens,
+            receipt_binding=binding,
+        )
+    )
+    if output_limit_exceeded:
+        raise CliResponseError("Grok Graphiti response exceeded requested max_tokens")
+    if payload is None:
+        raise CliResponseError("Graphiti CLI JSON was not an object")
+    return payload
 async def run_cli_chain(
     *,
     prompt: str,
@@ -852,6 +1130,30 @@ async def run_cli_chain(
     if not isinstance(fallback_permitted, bool):
         raise TypeError("Graphiti fallback permission must be boolean")
     prompt = _bind_requested_max_tokens(prompt, max_tokens)
+    direct_fallback = False
+    if fallback_permitted and invocation_observer is not None:
+        select_direct_fallback = getattr(
+            invocation_observer, "use_direct_fallback", None
+        )
+        if callable(select_direct_fallback):
+            direct_fallback = bool(
+                select_direct_fallback(
+                    prompt=prompt,
+                    schema=schema,
+                    semantic_request_class=semantic_request_class,
+                    max_tokens=max_tokens,
+                )
+            )
+    if direct_fallback:
+        return await _run_grok_fallback(
+            prompt=prompt,
+            schema=schema,
+            grok_runner=grok_runner,
+            invocations=invocations,
+            invocation_observer=invocation_observer,
+            semantic_request_class=semantic_request_class,
+            max_tokens=max_tokens,
+        )
     cursor_selected_model = CURSOR_AGENT_MODEL_ID
     if invocation_observer is not None:
         try:
@@ -1211,223 +1513,15 @@ async def run_cli_chain(
             f"Cursor Graphiti outcome {cursor_outcome} is ineligible for fallback"
         )
 
-    grok_token = (
-        None
-        if invocation_observer is None
-        else _before_observed_cli_invocation(
-            invocation_observer,
-            provider="grok-build-cli",
-            model=GROK_CHAT_MODEL_ID,
-            prompt=prompt,
-            schema=schema,
-            semantic_request_class=semantic_request_class,
-            max_tokens=max_tokens,
-        )
+    return await _run_grok_fallback(
+        prompt=prompt,
+        schema=schema,
+        grok_runner=grok_runner,
+        invocations=invocations,
+        invocation_observer=invocation_observer,
+        semantic_request_class=semantic_request_class,
+        max_tokens=max_tokens,
     )
-    grok_transport_started = False
-    grok_started = time.monotonic()
-
-    def mark_grok_transport_started() -> None:
-        nonlocal grok_transport_started
-        if grok_transport_started:
-            raise RuntimeError("Grok Graphiti transport dispatch repeated")
-        try:
-            _mark_observed_transport_dispatch(invocation_observer, grok_token)
-        except Exception as exc:
-            raise CliDispatchMarkerError(
-                "Grok durable dispatch observation failed"
-            ) from exc
-        grok_transport_started = True
-    try:
-        if inspect.iscoroutinefunction(grok_runner):
-            if _runner_accepts_dispatch_marker(grok_runner):
-                raw = await grok_runner(
-                    prompt,
-                    schema,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_grok_transport_started,
-                )
-            else:
-                mark_grok_transport_started()
-                raw = await grok_runner(prompt, schema, max_tokens=max_tokens)
-        else:
-            if _runner_accepts_dispatch_marker(grok_runner):
-                raw = await asyncio.to_thread(
-                    grok_runner,
-                    prompt,
-                    schema,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_grok_transport_started,
-                )
-            else:
-                mark_grok_transport_started()
-                raw = await asyncio.to_thread(
-                    grok_runner, prompt, schema, max_tokens=max_tokens
-                )
-    except CliDispatchMarkerError as exc:
-        grok_usage = no_provider_call_cli_usage()
-        binding = observe(
-            grok_token,
-            outcome="DISPATCH_FENCE_REFUSED",
-            usage=grok_usage,
-        )
-        invocations.append(
-            _invocation(
-                provider="grok-build-cli",
-                model=GROK_CHAT_MODEL_ID,
-                outcome="DISPATCH_FENCE_REFUSED",
-                execution=CliExecution(text="", usage=grok_usage),
-                failure=type(exc.__cause__ or exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-            )
-        )
-        if isinstance(exc.__cause__, Exception):
-            raise exc.__cause__
-        raise
-    except asyncio.CancelledError as exc:
-        grok_usage = (
-            unreported_cli_usage()
-            if grok_transport_started
-            else no_provider_call_cli_usage()
-        )
-        binding = observe(grok_token, outcome="CANCELLED", usage=grok_usage)
-        invocations.append(
-            _invocation(
-                provider="grok-build-cli",
-                model=GROK_CHAT_MODEL_ID,
-                outcome="CANCELLED",
-                execution=CliExecution(text="", usage=grok_usage),
-                failure=type(exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-                transport_diagnostic=timeout_diagnostic(
-                    boundary="CALLER_CANCELLATION",
-                    phase="FALLBACK_TRANSPORT",
-                    cause="CALLER_CANCELLED",
-                    configured_timeout_ms=CLI_CALL_TIMEOUT_SECONDS * 1_000,
-                    elapsed_ms=round((time.monotonic() - grok_started) * 1_000),
-                    deadline_at=None,
-                    last_progress=(
-                        "DISPATCH_STARTED"
-                        if grok_transport_started
-                        else "PREDISPATCH"
-                    ),
-                    termination="TASK_CANCELLED",
-                ),
-            )
-        )
-        raise
-    except (TimeoutError, subprocess.TimeoutExpired) as exc:
-        grok_usage = (
-            unreported_cli_usage()
-            if grok_transport_started
-            else no_provider_call_cli_usage()
-        )
-        binding = observe(grok_token, outcome="TIMEOUT", usage=grok_usage)
-        invocations.append(
-            _invocation(
-                provider="grok-build-cli",
-                model=GROK_CHAT_MODEL_ID,
-                outcome="TIMEOUT",
-                execution=CliExecution(text="", usage=grok_usage),
-                failure=type(exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-                transport_diagnostic=_retained_timeout_diagnostic(
-                    exc,
-                    phase="FALLBACK_TRANSPORT",
-                    started=grok_started,
-                    transport_started=grok_transport_started,
-                ),
-            )
-        )
-        raise CliResponseError("Graphiti fallback CLI timed out") from exc
-    except (FileNotFoundError, CliPredispatchRefusal) as exc:
-        grok_usage = (
-            unreported_cli_usage()
-            if grok_transport_started
-            else no_provider_call_cli_usage()
-        )
-        refusal_outcome = (
-            "EXECUTABLE_NOT_FOUND"
-            if isinstance(exc, FileNotFoundError)
-            else "PREDISPATCH_REFUSED"
-        )
-        binding = observe(
-            grok_token, outcome=refusal_outcome, usage=grok_usage
-        )
-        invocation = _invocation(
-            provider="grok-build-cli",
-            model=GROK_CHAT_MODEL_ID,
-            outcome=refusal_outcome,
-            execution=CliExecution(text="", usage=grok_usage),
-            failure=type(exc).__name__,
-            requested_max_tokens=max_tokens,
-            receipt_binding=binding,
-        )
-        if isinstance(exc, CliPredispatchRefusal):
-            retained_qualification = _retained_refusal_qualification(exc)
-            if retained_qualification is not None:
-                invocation["transport_qualification"] = retained_qualification
-        invocations.append(invocation)
-        raise CliResponseError("Graphiti fallback CLI executable not found") from exc
-    except (TypeError, ValueError, RuntimeError, OSError) as exc:
-        grok_usage = (
-            unreported_cli_usage()
-            if grok_transport_started
-            else no_provider_call_cli_usage()
-        )
-        binding = observe(grok_token, outcome="FAILED", usage=grok_usage)
-        invocations.append(
-            _invocation(
-                provider="grok-build-cli",
-                model=GROK_CHAT_MODEL_ID,
-                outcome="FAILED",
-                execution=CliExecution(text="", usage=grok_usage),
-                failure=type(exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-            )
-        )
-        if isinstance(exc, (TypeError, ValueError)):
-            raise
-        raise CliResponseError("Graphiti fallback CLI failed") from exc
-    grok_execution = _execution(cast(CliOutput, raw))
-    payload = _parsed_object(grok_execution.text)
-    if payload is not None and not _payload_matches_response_schema(payload, schema):
-        payload = None
-    output_limit_exceeded = _output_limit_exceeded(
-        grok_execution, max_tokens=max_tokens
-    )
-    grok_outcome = (
-        "OUTPUT_LIMIT_EXCEEDED"
-        if output_limit_exceeded
-        else "COMPLETE"
-        if payload is not None
-        else "MALFORMED_OUTPUT"
-    )
-    binding = observe(
-        grok_token,
-        outcome=grok_outcome,
-        usage=dict(grok_execution.usage),
-    )
-    invocations.append(
-        _invocation(
-            provider="grok-build-cli",
-            model=GROK_CHAT_MODEL_ID,
-            outcome=grok_outcome,
-            execution=grok_execution,
-            requested_max_tokens=max_tokens,
-            receipt_binding=binding,
-        )
-    )
-    if output_limit_exceeded:
-        raise CliResponseError("Grok Graphiti response exceeded requested max_tokens")
-    if payload is None:
-        raise CliResponseError("Graphiti CLI JSON was not an object")
-    return payload
-
 
 def build_cli_llm_client(
     *,

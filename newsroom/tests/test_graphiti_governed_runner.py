@@ -305,7 +305,10 @@ def _governed_dependencies(
     return adapter, extraction, proof, calls, retained
 
 
-def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
+@pytest.mark.parametrize("fallback_permitted", (False, True))
+def test_governed_runner_uses_exact_4d_and_4a_authority(
+    monkeypatch, fallback_permitted: bool
+) -> None:
     adapter, extraction, proof, calls, retained = _governed_dependencies()
 
     class DirectAdapter:
@@ -324,7 +327,8 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
         proposal_adapter=adapter,
         extraction_records=extraction,
         proof=proof,
-        fallback_permitted=False,
+        fallback_permitted=fallback_permitted,
+        governed_fallback_permitted=fallback_permitted,
     )._ingest(_unit(), deadline=deadline, invocation_observer=observer)
 
     raw = retained["raw"]
@@ -335,7 +339,7 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
     assert result.proposal_count == 1
     assert retained["execution_controls"] == {
         "execution_deadline": deadline,
-        "fallback_permitted": False,
+        "fallback_permitted": fallback_permitted,
         "invocation_observer": observer,
     }
 

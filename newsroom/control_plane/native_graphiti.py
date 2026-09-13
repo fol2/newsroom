@@ -81,7 +81,8 @@ class NativeGraphitiProcessor:
             elif value["state"] != "STARTED":
                 raise ValueError("native Graphiti cohort state differs")
         self._runner = EvaluationGraphitiRunner(
-            clock=clock, fallback_permitted=False,
+            clock=clock, fallback_permitted=True,
+            governed_fallback_permitted=True,
             proposal_adapter=system.graphiti, extraction_records=system.extraction,
             proof=proof,
         )
@@ -197,7 +198,11 @@ class NativeGraphitiProcessor:
         self._settle_missing_subscription_usage(units)
         if self._operator_drain_requested():
             raise OperatorDrainRequested
-        route_held = bool(graphiti_required_route_holds(self._usage))
+        route_held = bool(
+            graphiti_required_route_holds(
+                self._usage, fallback_permitted=True
+            )
+        )
         outcomes = []
         complete = []
         for ingest_id in units_by_ingest:

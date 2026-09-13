@@ -2726,6 +2726,12 @@ class ModelUsageService:
                 []
                 if allocation.workload_class is WorkloadClass.GRAPHITI_EMBEDDING
                 else [
+                    *(
+                        ["GROK_AUTH_PATH"]
+                        if allocation.workload_class
+                        is WorkloadClass.GRAPHITI_CHAT_FALLBACK
+                        else []
+                    ),
                     "HOME",
                     "LANG",
                     "LC_ALL",
@@ -2746,6 +2752,47 @@ class ModelUsageService:
                 raise ModelUsageAdmissionError(
                     "Graphiti hermetic workspace proof differs from policy"
                 )
+
+            unavailable_event_digest = identity.primary_unavailable_event_digest
+            if unavailable_event_digest is not None:
+                event_row = connection.execute(
+                    "SELECT route,state,reason,invocation_id,recorded_at,record_json "
+                    "FROM model_usage_route_circuit_events WHERE event_digest=?",
+                    (unavailable_event_digest,),
+                ).fetchone()
+                if event_row is None:
+                    raise ModelUsageAdmissionError(
+                        "Graphiti direct fallback primary authority is absent"
+                    )
+                event_record = _object(event_row[5])
+                event_unsigned = dict(event_record)
+                retained_event_digest = event_unsigned.pop("event_digest", None)
+                current_primary = self._route_state(
+                    connection, "GRAPHITI_CHAT_PRIMARY"
+                )
+                if (
+                    identity.leaf_class is not GraphitiLeafClass.FALLBACK
+                    or identity.parent_invocation_id is not None
+                    or tuple(event_row[:5])
+                    != (
+                        "GRAPHITI_CHAT_PRIMARY",
+                        "OPEN",
+                        event_record.get("reason"),
+                        event_record.get("invocation_id"),
+                        event_record.get("recorded_at"),
+                    )
+                    or event_record.get("route") != "GRAPHITI_CHAT_PRIMARY"
+                    or event_record.get("state") != "OPEN"
+                    or event_record.get("schema_version") != MODEL_USAGE_SCHEMA_VERSION
+                    or retained_event_digest != unavailable_event_digest
+                    or digest_canonical(event_unsigned) != unavailable_event_digest
+                    or current_primary.get("state") != "OPEN"
+                    or current_primary.get("event_digest")
+                    != unavailable_event_digest
+                ):
+                    raise ModelUsageAdmissionError(
+                        "Graphiti direct fallback primary authority differs"
+                    )
 
             semantic_state_digest = str(record["semantic_state_digest"])
             reused_attempt_identity = connection.execute(
@@ -5210,7 +5257,7 @@ class ModelUsageService:
                     "authority": "UNPUBLISHED_ROUTE_CIRCUIT",
                 }
         row = connection.execute(
-            "SELECT state,reason,invocation_id,recorded_at "
+            "SELECT state,reason,invocation_id,recorded_at,event_digest "
             "FROM model_usage_route_circuit_events WHERE route=? "
             "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
             (canonical_route,),
@@ -5241,6 +5288,7 @@ class ModelUsageService:
             ),
             "invocation_id": row[2],
             "recorded_at": str(row[3]),
+            "event_digest": str(row[4]),
         }
 
     def _append_route_state(

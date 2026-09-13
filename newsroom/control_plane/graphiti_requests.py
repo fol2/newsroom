@@ -548,6 +548,7 @@ class GraphitiInternalRequestIdentity:
     dispatch_deadline_at: str | None
     owner_stop_clear: bool
     route_circuit_state: str
+    primary_unavailable_event_digest: str | None
     semantic_state_digest: str
     canonical_digest: str
 
@@ -555,6 +556,7 @@ class GraphitiInternalRequestIdentity:
     def create(cls, **values: object) -> GraphitiInternalRequestIdentity:
         values.pop("semantic_state_digest", None)
         values.pop("canonical_digest", None)
+        values.setdefault("primary_unavailable_event_digest", None)
         leaf_class = values.get("leaf_class")
         if not isinstance(leaf_class, GraphitiLeafClass):
             raise GraphitiRequestContractError("Graphiti leaf class must be typed")
@@ -621,11 +623,21 @@ class GraphitiInternalRequestIdentity:
         if self.route_circuit_state != "CLOSED":
             raise GraphitiRequestContractError("route circuit is not proved closed")
         if self.leaf_class is GraphitiLeafClass.FALLBACK:
-            if self.parent_invocation_id is None:
+            if (self.parent_invocation_id is None) == (
+                self.primary_unavailable_event_digest is None
+            ):
                 raise GraphitiRequestContractError(
-                    "fallback Graphiti request lacks its parent invocation"
+                    "fallback Graphiti request requires one primary authority"
                 )
-        elif self.parent_invocation_id is not None:
+            if self.primary_unavailable_event_digest is not None:
+                _digest(
+                    self.primary_unavailable_event_digest,
+                    field="primary unavailable event digest",
+                )
+        elif (
+            self.parent_invocation_id is not None
+            or self.primary_unavailable_event_digest is not None
+        ):
             raise GraphitiRequestContractError(
                 "only fallback Graphiti requests may bind a parent invocation"
             )
@@ -658,7 +670,7 @@ def _identity_record(
     canonical_digest: str,
 ) -> dict[str, object]:
     leaf_class = values["leaf_class"]
-    return {
+    record = {
         "schema_version": GRAPHITI_INTERNAL_REQUEST_SCHEMA_VERSION,
         "canonical_digest": canonical_digest,
         "effective_revision_digest": values["effective_revision_digest"],
@@ -696,6 +708,14 @@ def _identity_record(
         "route_circuit_state": values["route_circuit_state"],
         "semantic_state_digest": semantic_state_digest,
     }
+    primary_unavailable_event_digest = values.get(
+        "primary_unavailable_event_digest"
+    )
+    if primary_unavailable_event_digest is not None:
+        record["primary_unavailable_event_digest"] = (
+            primary_unavailable_event_digest
+        )
+    return record
 
 
 def graphiti_semantic_state_digest(
