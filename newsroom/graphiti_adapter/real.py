@@ -718,8 +718,10 @@ async def _add_episode(
                     prior_raw = await prior_guard.completed_raw_or_none()
                     if prior_raw is not None:
                         try:
+                            # The provider attempt is leaf-local; retries bind the
+                            # authenticated outer Graphiti attempt identity.
                             prior_attempt_number = int(
-                                prior_raw["provider_attempt_number"]
+                                prior_raw["attempt_number"]
                             )
                         except (KeyError, TypeError, ValueError):
                             prior_attempt_number = 0

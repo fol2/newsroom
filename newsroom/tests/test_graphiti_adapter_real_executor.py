@@ -2725,7 +2725,7 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             return (
                 self.settled
                 and episode_uuid == "episode-id"
-                and attempt_number > 3
+                and attempt_number > 2
                 and prior_attempt_number == attempt_number - 1
             )
 
@@ -2749,6 +2749,34 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             retry_snapshot_is_failed=lambda raw: "failure" in raw,
         )
 
+    complete_attempt_2 = {
+        "attempt_number": 2,
+        "provider_attempt_number": 1,
+        "failure": "attempt-2",
+    }
+    markers["episode-id"] = complete_attempt_2
+    asyncio.run(run(3, allowed=False, settled=False))
+    assert restored == [complete_attempt_2]
+    assert provider_calls == 0
+    asyncio.run(run(3, allowed=False, settled=True))
+    assert provider_calls == 1
+    assert markers["episode-id"] == complete_attempt_2
+    assert markers["episode-id:attempt:3"] == {"success": "attempt-3"}
+
+    del markers["episode-id:attempt:3"]
+    markers["episode-id"] = {
+        "attempt_number": 1,
+        "provider_attempt_number": 1,
+        "failure": "attempt-1",
+    }
+    restored.clear()
+    provider_calls = 0
+    asyncio.run(run(3, allowed=False, settled=True))
+    assert provider_calls == 0
+    assert restored == [markers["episode-id"]]
+
+    markers["episode-id"] = {"failure": "attempt-1"}
+    restored.clear()
     asyncio.run(run(2, allowed=False))
     assert restored == [{"failure": "attempt-1"}]
     asyncio.run(run(3, allowed=True))
@@ -2778,6 +2806,7 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
 
     markers["episode-id:attempt:4"] = {
         "failure": "attempt-4",
+        "attempt_number": 4,
         "provider_attempt_number": 4,
     }
     asyncio.run(run(5, allowed=False, settled=True))
