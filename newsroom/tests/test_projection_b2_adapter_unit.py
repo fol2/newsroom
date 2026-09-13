@@ -110,3 +110,208 @@ def test_relation_reads_cannot_return_future_endpoint_nodes() -> None:
     )
     with pytest.raises(Neo4jReadError, match="watermark"):
         _require_node_within_watermark(node, 10)
+
+
+def _state_rows(batch):
+    from newsroom.projection.neo4j._state import (
+        _delivery_properties, _relation_identity_properties,
+    )
+
+    nodes = [
+        {"labels": ["NewsroomProjectionNode"], "properties": _node_properties(batch, node)}
+        for node in batch.nodes
+    ]
+    nodes.append({"labels": ["NewsroomProjectionDelivery"], "properties": _delivery_properties(batch)})
+    by_id = {row["properties"]["canonical_id"]: row["properties"] for row in nodes[:-1]}
+    relationships = []
+    for relation in batch.relations:
+        nodes.append({
+            "labels": ["NewsroomProjectionRelationIdentity"],
+            "properties": _relation_identity_properties(batch, relation),
+        })
+        relationships.append({
+            "source_labels": ["NewsroomProjectionNode"],
+            "source_properties": by_id[relation.source_canonical_id],
+            "relation_type": relation.relation_type.value,
+            "relation_properties": _relation_properties(batch, relation),
+            "target_labels": ["NewsroomProjectionNode"],
+            "target_properties": by_id[relation.target_canonical_id],
+        })
+    return nodes, relationships
+
+
+class _RetryStateRead(Exception):
+    pass
+
+
+class _StreamingStateTransaction:
+    """Driver records must be decoded before advancing or leaving the callback."""
+
+    def __init__(self, nodes, relationships, *, fail_after_relationship=False):
+        self.nodes, self.relationships = nodes, relationships
+        self.fail_after_relationship = fail_after_relationship
+        self.active = False
+        self.result_open = False
+        self.queries = []
+        self.decoded_rows = 0
+
+    def run(self, statement, parameters):
+        from newsroom.projection.neo4j._adapter import (
+            _STATE_NODES_QUERY, _STATE_RELATIONSHIPS_QUERY,
+        )
+
+        assert self.active
+        assert not self.result_open, "a second query would buffer the unfinished result"
+        assert statement in (_STATE_NODES_QUERY, _STATE_RELATIONSHIPS_QUERY)
+        self.queries.append(statement)
+        self.result_open = True
+        owner = self
+        values = self.nodes if statement == _STATE_NODES_QUERY else self.relationships
+
+        class Record(dict):
+            def __init__(self, value):
+                super().__init__(value)
+                self.read_keys = set()
+
+            def __getitem__(self, key):
+                assert owner.active, "raw record escaped the managed transaction"
+                self.read_keys.add(key)
+                return super().__getitem__(key)
+
+        class Result:
+            def __len__(self):
+                raise AssertionError("raw results must not be materialised")
+
+            def __iter__(self):
+                for value in values:
+                    record = Record(value)
+                    yield record
+                    assert record.read_keys == set(record), "decode each row before advancing"
+                    owner.decoded_rows += 1
+                if statement == _STATE_RELATIONSHIPS_QUERY and owner.fail_after_relationship:
+                    raise _RetryStateRead("late transport failure")
+                owner.result_open = False
+
+        return Result()
+
+
+class _StateDriver:
+    def __init__(self, *transactions):
+        self.transactions = transactions
+        self.returned = []
+
+    def session(self, *, database):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute_read(self, callback, *args):
+        for index, transaction in enumerate(self.transactions):
+            transaction.active = True
+            try:
+                value = callback(transaction, *args)
+                self.returned.append(value)
+                return value
+            except _RetryStateRead:
+                if index == len(self.transactions) - 1:
+                    raise
+            finally:
+                transaction.active = False
+
+
+def _state_adapter(driver):
+    from newsroom.projection.neo4j import Neo4jProjectorConfig
+
+    return _Neo4jAdapter(
+        driver=driver,
+        config=Neo4jProjectorConfig(
+            uri="bolt://localhost:7687", database="neo4j",
+            username="fixture", password="fixture",
+        ),
+        driver_version="fixture", unit_of_work_factory=lambda **_: lambda callback: callback,
+    )
+
+
+@pytest.mark.parametrize("empty", (False, True))
+def test_generation_state_streams_raw_rows_inside_one_managed_transaction(empty):
+    from newsroom.projection.neo4j._state import _expected_projection_state_digest
+    from newsroom.projection.neo4j._adapter import _STATE_NODES_QUERY, _STATE_RELATIONSHIPS_QUERY
+
+    batch = structural_batch()
+    nodes, relationships = ([], []) if empty else _state_rows(batch)
+    transaction = _StreamingStateTransaction(list(reversed(nodes)), relationships)
+    driver = _StateDriver(transaction)
+    batches = () if empty else (batch,)
+    expected = _expected_projection_state_digest(str(batch.generation_id), batches)
+    assert _state_adapter(driver).reconcile_generation(
+        generation_id=str(batch.generation_id), expected_batches=batches,
+    ) == expected
+    assert driver.returned == [expected]
+    assert transaction.decoded_rows == len(nodes) + len(relationships)
+    assert transaction.queries == [_STATE_NODES_QUERY, _STATE_RELATIONSHIPS_QUERY]
+    assert not transaction.active and not transaction.result_open
+
+
+@pytest.mark.parametrize("tamper, error, match", [
+    ("late_labels", Neo4jReadError, "reconciliation failed"),
+    ("late_properties", Neo4jReadError, "reconciliation failed"),
+    ("duplicate_node", Neo4jIdentityConflict, "duplicate structural identity"),
+    ("duplicate_delivery", Neo4jIdentityConflict, "duplicate structural identity"),
+    ("duplicate_relation_identity", Neo4jIdentityConflict, "duplicate structural identity"),
+    ("duplicate_relationship", Neo4jIdentityConflict, "duplicate relationship identity"),
+    ("wrong_generation", Neo4jIdentityConflict, "another generation"),
+    ("wrong_endpoint", Neo4jIdentityConflict, "endpoints differ"),
+    ("endpoint_state", Neo4jIdentityConflict, "endpoint state differs"),
+    ("digest_mismatch", Neo4jIdentityConflict, "state differs from retained authority"),
+])
+def test_streamed_generation_state_rejects_late_corruption(tamper, error, match):
+    from copy import deepcopy
+
+    batch = structural_batch()
+    nodes, relationships = deepcopy(_state_rows(batch))
+    if tamper == "late_labels":
+        nodes.append({"labels": "not-labels", "properties": {}})
+    elif tamper == "late_properties":
+        relationships.append({**relationships[0], "target_properties": None})
+    elif tamper.startswith("duplicate_"):
+        if tamper == "duplicate_relationship":
+            relationships.append(deepcopy(relationships[0]))
+        else:
+            index = {"duplicate_node": 0, "duplicate_delivery": 2, "duplicate_relation_identity": 3}[tamper]
+            nodes.append(deepcopy(nodes[index]))
+    elif tamper == "wrong_generation":
+        nodes[-1]["properties"]["generation_id"] = "another-generation"
+    elif tamper == "wrong_endpoint":
+        relationships[0]["relation_properties"]["target_canonical_id"] = "another-endpoint"
+    elif tamper == "endpoint_state":
+        relationships[0]["target_properties"] = {
+            **relationships[0]["target_properties"], "identity_source": "different",
+        }
+    else:
+        relationships[0]["relation_properties"]["principal_id"] = "different"
+    driver = _StateDriver(_StreamingStateTransaction(nodes, relationships))
+    with pytest.raises(error, match=match):
+        _state_adapter(driver).reconcile_generation(
+            generation_id=str(batch.generation_id), expected_batches=(batch,),
+        )
+
+
+def test_streamed_generation_retry_discards_partially_decoded_attempt():
+    from newsroom.projection.neo4j._state import _expected_projection_state_digest
+
+    batch = structural_batch()
+    nodes, relationships = _state_rows(batch)
+    first = _StreamingStateTransaction(nodes, relationships, fail_after_relationship=True)
+    second = _StreamingStateTransaction(list(reversed(nodes)), relationships)
+    driver = _StateDriver(first, second)
+    expected = _expected_projection_state_digest(str(batch.generation_id), (batch,))
+    assert _state_adapter(driver).reconcile_generation(
+        generation_id=str(batch.generation_id), expected_batches=(batch,),
+    ) == expected
+    assert first.decoded_rows == second.decoded_rows == len(nodes) + len(relationships)
+    assert driver.returned == [expected]
+    assert not first.active and not second.active
