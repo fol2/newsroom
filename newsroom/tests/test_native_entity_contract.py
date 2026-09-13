@@ -147,7 +147,7 @@ def test_immigration_rule_references_require_exact_declared_source_context(
     ) == frozenset()
 
 
-@pytest.mark.parametrize("suffix", ("/4.", ".4.", "_extra.", "X."))
+@pytest.mark.parametrize("suffix", ("/4.", ".4.", "_extra.", "X.", ".foo", "-extra"))
 def test_immigration_citation_source_prefix_is_not_an_exact_token(suffix):
     assert evidence.bounded_named_entities(
         "The code is ST8.1/2/3",
@@ -162,11 +162,35 @@ def test_immigration_citation_allows_sentence_ending_punctuation():
     ) == frozenset({("ST8.1/2/3", "OFFICIAL_TERM")})
 
 
-@pytest.mark.parametrize("suffix", (" and related persons.", "-related."))
+@pytest.mark.parametrize("suffix", (" and related persons.", "-related.", "/related.", "_related.", ".related.", "X."))
 def test_immigration_part_source_prefix_is_not_an_exact_title(suffix):
     assert evidence.bounded_named_entities(
         "Permission under Part 14: stateless persons",
         source_context="Immigration Rules Part 14: stateless persons" + suffix,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", (" today.", " Today.", " 2.", "\ttoday."))
+def test_immigration_part_word_limit_does_not_truncate_source_title(suffix):
+    term = "Part 14: stateless persons and related people"
+    assert evidence.bounded_named_entities(
+        term, source_context="Immigration Rules " + term + suffix,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", (".", ",", ";", ":", ")", "\nThe rules apply."))
+def test_immigration_part_title_allows_real_end_delimiters(suffix):
+    term = "Part 14: stateless persons"
+    assert evidence.bounded_named_entities(
+        term, source_context="Immigration Rules " + term + suffix,
+    ) == frozenset({(term, "OFFICIAL_TERM")})
+
+
+def test_immigration_part_short_reference_does_not_bind_longer_declaration():
+    term = "Part 14: stateless persons"
+    assert evidence.bounded_named_entities(
+        term,
+        source_context="Immigration Rules " + term + " and related persons. " + term + ".",
     ) == frozenset()
 
 

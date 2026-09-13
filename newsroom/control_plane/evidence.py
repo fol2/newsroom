@@ -301,11 +301,14 @@ _SOURCE_BOUND_TECHNICAL_FRAMEWORK = re.compile(
 _SOURCE_BOUND_LEVEL_CODE = re.compile(r"\blevel\s+([A-C][12])\b")
 _SOURCE_BOUND_IMMIGRATION_RULE_CITATION = re.compile(
     r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d{1,3}\.\d{1,3}(?:/\d{1,3}){1,4})"
-    r"(?![A-Za-z0-9_/]|\.\d)"
+    r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])"
+)
+_SOURCE_BOUND_IMMIGRATION_PART_END = (
+    r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_]|[ \t]+[A-Za-z0-9_])"
 )
 _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE = re.compile(
-    r"\b(Part\s+\d{1,3}:\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,4})"
-    r"(?![A-Za-z-])"
+    r"\b(Part\s+\d{1,3}:\s+[a-z][a-z-]*(?:[ \t]+[a-z][a-z-]*){0,4})"
+    + _SOURCE_BOUND_IMMIGRATION_PART_END
 )
 
 
@@ -353,7 +356,8 @@ def _source_bound_official_terms(
             )
         elif reference_pattern is _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE:
             declared = re.search(
-                rf"\bImmigration Rules\s+{re.escape(term)}\b",
+                rf"\bImmigration Rules\s+{re.escape(term)}"
+                + _SOURCE_BOUND_IMMIGRATION_PART_END,
                 source_context,
                 flags=re.IGNORECASE,
             )
