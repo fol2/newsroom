@@ -13,6 +13,9 @@ from newsroom.authority import (
     canonical_json_bytes,
 )
 from newsroom.authority._event_store import _EventAuthorityStore
+from newsroom.authority.authorization_request_storage_migrations import (
+    authorization_request_residual_from_v37_row,
+)
 from newsroom.authority.canonical import digest_bytes
 
 from .authority_helpers import FIXED_NOW, command, make_service, proof
@@ -80,11 +83,15 @@ def _insert_authentication(
 
 
 def _insert_request(store: _EventAuthorityStore, request: object) -> None:
-    data = canonical_json_bytes(request.canonical_value())  # type: ignore[attr-defined]
+    value = request.canonical_value()  # type: ignore[attr-defined]
+    data = canonical_json_bytes(value)
+    residual = authorization_request_residual_from_v37_row({
+        **value, "canonical_bytes": data, "canonical_record_digest": digest_bytes(data),
+    })
     store._execute_test_sql(
         "INSERT INTO authorization_requests("
         "request_digest,authentication_context_id,principal_id,authority_domain,"
-        "operation_type,required_scope,canonical_bytes,canonical_record_digest,"
+        "operation_type,required_scope,storage_request_residual,canonical_record_digest,"
         "recorded_at) VALUES(?,?,?,?,?,?,?,?,?)",
         (
             request.request_digest,  # type: ignore[attr-defined]
@@ -93,7 +100,7 @@ def _insert_request(store: _EventAuthorityStore, request: object) -> None:
             request.authority_domain,  # type: ignore[attr-defined]
             request.operation_type,  # type: ignore[attr-defined]
             request.required_scope,  # type: ignore[attr-defined]
-            data,
+            residual,
             request.digest,  # type: ignore[attr-defined]
             FIXED_NOW.to_text(),
         ),
