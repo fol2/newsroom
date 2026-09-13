@@ -46,7 +46,7 @@ from newsroom.increment6.work_items import RetrievalContextAuthority
 _REQUIRE_DISPOSITION = ProposalDispositionStore.require_current_in_transaction
 _AUTHENTICATE_DISPOSITION = ProposalDispositionStore._authenticate
 _VERIFY_DISPOSITION_INTEGRITY = (
-    ProposalDispositionStore.verify_retained_integrity_in_transaction
+    ProposalDispositionStore._verified_dispositions_in_transaction
 )
 _CREATE_ROUTES = {
     HypothesisRelationship.NO_ADEQUATE_PRIOR_MATCH,
@@ -1046,7 +1046,7 @@ class _HypothesisStore:
             self._lock.release()
 
     def _verify(self) -> dict[str, EventHypothesisVersion]:
-        _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
+        dispositions_by_id = _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
         tables = {
             str(row[0])
             for row in self._connection.execute(
@@ -1074,6 +1074,7 @@ class _HypothesisStore:
                 raise HypothesisContractError("retained Hypothesis identity differs")
             identities[value.hypothesis_id] = value
         chains: dict[str, list[EventHypothesisVersion]] = {}
+        versions_by_id: dict[str, EventHypothesisVersion] = {}
         semantic: set[tuple[str, str]] = set()
         for row in self._connection.execute(
             "SELECT version_id,hypothesis_id,ordinal,previous_version_id,previous_version_digest,proposal_id,proposal_local_id,proposal_content_identity,proposal_canonical_digest,proposal_canonical_bytes,proposed_relationship,proposed_target_hypothesis_id,target_version_id,target_version_digest,work_item_id,work_item_version_id,work_item_version_digest,retrieval_context_id,retrieval_context_digest,actor_identity_digest,authority_event_id,canonical_bytes,canonical_digest,recorded_at FROM event_hypothesis_versions_v2 ORDER BY hypothesis_id,ordinal"
@@ -1096,32 +1097,16 @@ class _HypothesisStore:
             _require_exact_proposal_provenance(value, proposal)
             retained_dispositions = []
             for binding in value.source_bindings:
-                disposition_row = self._connection.execute(
-                    "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
-                    (binding.disposition_id,),
-                ).fetchone()
-                if disposition_row is None:
+                disposition = dispositions_by_id.get(binding.disposition_id)
+                if disposition is None:
                     raise HypothesisContractError(
                         "retained source disposition is absent"
                     )
-                retained_dispositions.append(
-                    ProposalDisposition.from_canonical_bytes(
-                        bytes(disposition_row[0])
-                    )
-                )
+                retained_dispositions.append(disposition)
             self._require_version_source_closure(
                 value, proposal, tuple(retained_dispositions)
             )
             if value.proposed_target_hypothesis_id is not None:
-                target_row = self._connection.execute(
-                    "SELECT hypothesis_id,canonical_digest FROM event_hypothesis_versions_v2 WHERE version_id=?",
-                    (value.target_version_id,),
-                ).fetchone()
-                if target_row is None or tuple(target_row) != (
-                    value.proposed_target_hypothesis_id,
-                    value.target_version_digest,
-                ):
-                    raise HypothesisContractError("retained target Version pin differs")
                 if value.proposed_relationship in _APPEND_ROUTES and (
                     value.previous_version_id != value.target_version_id
                     or value.previous_version_digest != value.target_version_digest
@@ -1133,6 +1118,16 @@ class _HypothesisStore:
                 raise HypothesisContractError("duplicate semantic source")
             semantic.add((value.proposal_id, value.proposal_local_id))
             chains.setdefault(value.hypothesis_id, []).append(value)
+            versions_by_id[value.version_id] = value
+        # Target hypotheses may sort after their dependants. Resolve pins only
+        # after every Version has been decoded in this same transaction.
+        for value in versions_by_id.values():
+            if value.proposed_target_hypothesis_id is not None:
+                target = versions_by_id.get(value.target_version_id)
+                if target is None or (
+                    target.hypothesis_id, target.canonical_digest
+                ) != (value.proposed_target_hypothesis_id, value.target_version_digest):
+                    raise HypothesisContractError("retained target Version pin differs")
         if set(chains) != set(identities):
             raise HypothesisContractError(
                 "Hypothesis identity/version coverage differs"
@@ -1176,11 +1171,7 @@ class _HypothesisStore:
                 f'PRAGMA foreign_key_check("{table}")'
             ).fetchone() is not None:
                 raise HypothesisContractError("Hypothesis foreign keys differ")
-        return {
-            version.version_id: version
-            for versions in chains.values()
-            for version in versions
-        }
+        return versions_by_id
 
 
 _AUTHORITY_TOKEN = object()

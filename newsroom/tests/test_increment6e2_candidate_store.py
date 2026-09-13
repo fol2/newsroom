@@ -1608,10 +1608,10 @@ def test_candidate_read_verifies_shared_upstream_once_for_all_relationships(
         original_dispositions = system._VERIFY_DISPOSITION_INTEGRITY
         original_retrieval = disposition_system._RETRIEVAL_VERIFY_RETAINED
 
-        def counted_dispositions(store) -> None:
+        def counted_dispositions(store):
             nonlocal disposition_calls
             disposition_calls += 1
-            original_dispositions(store)
+            return original_dispositions(store)
 
         def counted_retrieval(*args: object) -> None:
             nonlocal retrieval_calls
