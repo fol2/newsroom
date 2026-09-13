@@ -2655,10 +2655,11 @@ class TriageWorkItemStore:
                 "ON d.decision_id=h.current_decision_id WHERE h.lead_id=?",
                 (lead.lead_id,),
             ).fetchone()
+            retained_disposition = self._disposition_retained(lead)
             if (
                 disp is None
                 or disp[0] != lead.disposition_id
-                or not self._disposition_retained(lead)
+                or not retained_disposition
             ):
                 reasons.append(f"disposition:{lead.lead_id}")
         for lead in v.context_leads:
@@ -2898,17 +2899,18 @@ class TriageWorkItemStore:
                 "SELECT DISTINCT work_item_id FROM triage_work_item_versions"
             )
         }
-        head_ids = {
-            str(row[0])
-            for row in self._connection.execute(
-                "SELECT work_item_id FROM triage_work_item_heads"
-            )
-        }
+        retained_heads = tuple(self._connection.execute(
+            "SELECT work_item_id,current_version_id,current_ordinal,current_version_digest "
+            "FROM triage_work_item_heads"
+        ))
+        head_ids = {str(row[0]) for row in retained_heads}
+        head_version_ids = {str(row[1]) for row in retained_heads}
         if item_ids != version_item_ids or item_ids != head_ids:
             raise WorkItemContractError("Work Item chain coverage differs")
         previous_by_item: dict[str, tuple[int, str]] = {}
         versions: dict[str, TriageWorkItemVersion] = {}
         maximum_by_item: dict[str, int] = {}
+        current_reasons: dict[str, list[str]] = {}
         for row in self._connection.execute(
             "SELECT version_id,work_item_id,ordinal,previous_version_id,"
             "decision_scope_digest,retrieval_outcome,watch_condition_id,"
@@ -2957,15 +2959,24 @@ class TriageWorkItemStore:
             )
             versions[version.version_id] = version
             maximum_by_item[version.work_item_id] = version.ordinal
-            missing = self._immutable_lineage_reasons(version)
+            current_usable = (
+                version.version_id in head_version_ids and version.retrieval.usable
+                and self._retrieval_authority is not None
+            )
+            # Currentness already verifies retained retrieval integrity. Keep
+            # source corruption fatal even when a current head is merely stale.
+            missing = (
+                self._immutable_source_reasons(version) if current_usable
+                else self._immutable_lineage_reasons(version)
+            )
             if missing:
                 raise WorkItemContractError(
                     "Version immutable lineage differs: " + ",".join(missing)
                 )
+            if current_usable:
+                current_reasons[version.version_id] = self._upstream_reasons(version)
         heads: dict[str, TriageWorkItemVersion] = {}
-        for row in self._connection.execute(
-            "SELECT work_item_id,current_version_id,current_ordinal,current_version_digest FROM triage_work_item_heads"
-        ):
+        for row in retained_heads:
             version = versions.get(str(row[1]))
             if (
                 version is None
@@ -2979,7 +2990,7 @@ class TriageWorkItemStore:
         active_leads: dict[str, str] = {}
         for work_item_id, item in sorted(items.items()):
             version = heads[work_item_id]
-            if not self._is_active_usable(version):
+            if not version.retrieval.usable or current_reasons[version.version_id]:
                 continue
             for lead in item.decision_leads:
                 owner = active_leads.setdefault(lead.lead_id, item.work_item_id)
@@ -2989,6 +3000,19 @@ class TriageWorkItemStore:
                     )
 
     def _immutable_lineage_reasons(self, version: TriageWorkItemVersion) -> list[str]:
+        reasons = self._immutable_source_reasons(version)
+        if self._retrieval_authority is not None:
+            try:
+                self._retrieval_authority.verify_retained_integrity(
+                    self._connection, version.retrieval
+                )
+            except WorkItemContractError:
+                reasons.append("retrieval")
+        elif version.retrieval.state is RetrievalBindingState.RECEIPT:
+            reasons.append("retrieval")
+        return reasons
+
+    def _immutable_source_reasons(self, version: TriageWorkItemVersion) -> list[str]:
         reasons: list[str] = []
         for lead in version.decision_leads:
             if not self._lead_retained(lead):
@@ -3001,15 +3025,6 @@ class TriageWorkItemStore:
         if version.watch is not None:
             if not self._watch_retained(version.watch):
                 reasons.append("watch")
-        if self._retrieval_authority is not None:
-            try:
-                self._retrieval_authority.verify_retained_integrity(
-                    self._connection, version.retrieval
-                )
-            except WorkItemContractError:
-                reasons.append("retrieval")
-        elif version.retrieval.state is RetrievalBindingState.RECEIPT:
-            reasons.append("retrieval")
         if version.supplemental_reentry is not None:
             reasons.extend(self._supplemental_reasons(version.supplemental_reentry))
         return reasons
