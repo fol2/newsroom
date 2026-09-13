@@ -539,6 +539,22 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
                 localised_factual_expressions=((source_fact, rendered_fact),),
             )
 
+    year_source = "The applicant will be granted permission for 5 years."
+    year_claim = replace(
+        evidence.retained.package.governed_claims[0],
+        claim=year_source,
+        supporting_excerpt=year_source,
+        rendered_assertion_zh_hant_hk="申請人會獲批為期5年的許可。",
+        localised_factual_expressions=(("5 years", "5年"),),
+    )
+    assert year_claim.localised_factual_expressions == (("5 years", "5年"),)
+    for wrong_unit in ("60個月", "1825日", "2628000分鐘"):
+        with pytest.raises(ValueError, match="equivalent exact claim facts"):
+            replace(
+                year_claim,
+                localised_factual_expressions=(("5 years", wrong_unit),),
+            )
+
     published = publisher.advance(
         evidence.retained.package_admission_id,
         evidence.editorial_decision,

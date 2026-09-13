@@ -80,7 +80,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v10"
+VERSION = "newsroom.native-evidence-assessor.v11"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -138,7 +138,8 @@ SYSTEM = (
     "do not invent a translation. A sparse inventory is not a publication gate. "
     "Translate ordinary English prose outside these source-bound items. Being official "
     "rule text does not make a whole sentence or generic legal wording an official "
-    "name. General guidance text, status or layout labels, generic roles, and a "
+    "name. Ordinary unit and process nouns must be translated rather than retained "
+    "as official terms. General guidance text, status or layout labels, generic roles, and a "
     "deletion marker such as DELETED are not automatically official names. A first observation of "
     "an old clause or deletion marker does not by itself establish a newly confirmed "
     "development; do not invent a recent change or effective date. "
@@ -149,6 +150,8 @@ SYSTEM = (
     "with at least 60 minutes where used as qualification evidence; "
     "numeric calendar-month durations and equivalent Chinese durations in 個月, "
     "preserving calendar months as months without converting them to fixed minutes; "
+    "numeric calendar-year durations and equivalent Chinese durations in 年, "
+    "preserving calendar years as years without converting them to days or minutes; "
     "or counts of schools, hospitals, clinics, buses or roads in those number forms. "
     "For every claim, return semantic_relation exactly as source_modality ASSERTED, "
     "rendered_modality ASSERTED, source_polarity AFFIRMED, rendered_polarity "
@@ -758,13 +761,14 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?,?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v7"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v8"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v9"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v10"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
@@ -1312,7 +1316,10 @@ class AutonomousNativeEvidenceAssessor:
                         "retrieval_time": result.retrieval_time,
                         "body": result.body.decode("utf-8"),
                         "recognised_named_entities": sorted(
-                            bounded_named_entities(result.body.decode("utf-8"))
+                            bounded_named_entities(
+                                result.body.decode("utf-8"),
+                                source_context=result.body.decode("utf-8"),
+                            )
                         ),
                     }
                     for source, result in zip(sources, acquired, strict=True)
@@ -1494,8 +1501,18 @@ class AutonomousNativeEvidenceAssessor:
             supporting_excerpt = raw_claim.get("supporting_excerpt")
             if type(supporting_excerpt) is not str:
                 raise EvidencePackageError("assessment supporting excerpt differs")
-            claim_entities = bounded_named_entities(claim_text)
-            excerpt_entities = bounded_named_entities(supporting_excerpt)
+            source_contexts = tuple(
+                acquired_by_source[item].body.decode("utf-8")
+                for item in claim_source_ids
+            )
+            claim_entities = frozenset().union(*(
+                bounded_named_entities(claim_text, source_context=context)
+                for context in source_contexts
+            ))
+            excerpt_entities = frozenset().union(*(
+                bounded_named_entities(supporting_excerpt, source_context=context)
+                for context in source_contexts
+            ))
             if not claim_entities <= excerpt_entities:
                 raise EvidencePackageError(
                     "assessment named entities differ from source evidence"

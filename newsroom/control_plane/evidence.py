@@ -291,6 +291,48 @@ _ENGLISH_OFFICIAL_REFERENCE = re.compile(
     r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
 )
 _BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA"})
+_SOURCE_BOUND_ROUTE_TERM = re.compile(
+    r"\b([A-Z]{2,5}(?:\s+[A-Z][A-Za-z-]+){1,5})(?=\s+route\b)"
+)
+_SOURCE_BOUND_TECHNICAL_FRAMEWORK = re.compile(
+    r"\b([A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,4}\s+Framework"
+    r"\s+of\s+Reference\s+for\s+[A-Z][A-Za-z-]+)\b"
+)
+_SOURCE_BOUND_LEVEL_CODE = re.compile(r"\blevel\s+([A-C][12])\b")
+
+
+def _contextual_official_term_shapes(
+    text: str,
+) -> tuple[tuple[int, int, str], ...]:
+    matches: list[tuple[int, int, str]] = []
+    for pattern in (
+        _SOURCE_BOUND_ROUTE_TERM,
+        _SOURCE_BOUND_TECHNICAL_FRAMEWORK,
+        _SOURCE_BOUND_LEVEL_CODE,
+    ):
+        matches.extend(
+            (match.start(1), match.end(1), match.group(1))
+            for match in pattern.finditer(text)
+        )
+    return tuple(matches)
+
+
+def _source_bound_official_terms(
+    text: str,
+    source_context: str,
+) -> tuple[tuple[int, int, str], ...]:
+    return tuple(
+        (start, end, term)
+        for start, end, term in _contextual_official_term_shapes(text)
+        if (
+            not re.search(rf"\b{re.escape(term)}\s+route\b", text)
+            or re.search(
+                rf"\b{re.escape(term)}\s+route\b",
+                source_context,
+            )
+        )
+        and re.search(_entity_pattern(term), source_context)
+    )
 
 
 def _is_bounded_english_organisation(text: str) -> bool:
@@ -300,7 +342,12 @@ def _is_bounded_english_organisation(text: str) -> bool:
     )
 
 
-def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
+def _has_bounded_named_entity_shape(
+    text: str,
+    entity_type: str,
+    *,
+    source_context: str = "",
+) -> bool:
     if text in _OWNER_APPROVED_ENTITY_REGISTRY:
         return entity_type == _OWNER_APPROVED_ENTITY_REGISTRY[text]
     if re.search(r"[A-Za-z]", text):
@@ -309,6 +356,12 @@ def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
                 _ENGLISH_OFFICIAL_TERM.fullmatch(text)
                 or _ENGLISH_OFFICIAL_REFERENCE.fullmatch(text)
                 or text in _BOUNDED_OFFICIAL_ABBREVIATIONS
+                or any(
+                    candidate == text
+                    for _start, _end, candidate in _contextual_official_term_shapes(
+                        source_context
+                    )
+                )
             )
         if entity_type == "ORGANISATION":
             return _is_bounded_english_organisation(text)
@@ -394,7 +447,11 @@ def rendered_named_entities(
     return frozenset(retained) | bounded_named_entities(text)
 
 
-def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
+def bounded_named_entities(
+    text: str,
+    *,
+    source_context: str | None = None,
+) -> frozenset[tuple[str, str]]:
     """Extract only closed, structurally recognisable entity spans."""
 
     candidates: list[tuple[int, int, str, str]] = []
@@ -422,6 +479,9 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
             candidates.append(
                 (match.start(), match.end(), abbreviation, "OFFICIAL_TERM")
             )
+    if source_context is not None:
+        for start, end, term in _source_bound_official_terms(text, source_context):
+            candidates.append((start, end, term, "OFFICIAL_TERM"))
     titled_chinese_person = re.compile(
         r"(行政長官|財政司司長|政務司司長|律政司司長|特首|司長|局長|署長)"
         r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
@@ -741,6 +801,18 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
         number = _chinese_integer(chinese_calendar_months.group(1))
         if number is not None:
             return ("DURATION_CALENDAR_MONTHS", number)
+    english_calendar_years = re.fullmatch(
+        r"(\d+)\s+years?", value, flags=re.IGNORECASE,
+    )
+    if english_calendar_years:
+        return ("DURATION_CALENDAR_YEARS", int(english_calendar_years.group(1)))
+    chinese_calendar_years = re.fullmatch(
+        r"([零〇一二三四五六七八九十百千兩两\d]+)年", value,
+    )
+    if chinese_calendar_years:
+        number = _chinese_integer(chinese_calendar_years.group(1))
+        if number is not None:
+            return ("DURATION_CALENDAR_YEARS", number)
     english_duration = re.fullmatch(
         r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
         r"(hours?|minutes?)",
@@ -955,7 +1027,11 @@ class GovernedClaimEvidence:
                 text in {self.claim, self.supporting_excerpt}
                 or len(text) > 80
                 or re.search(r"[\n。！？!?；;：:]", text)
-                or not _has_bounded_named_entity_shape(text, entity_type)
+                or not _has_bounded_named_entity_shape(
+                    text,
+                    entity_type,
+                    source_context=self.claim,
+                )
                 for text, entity_type, _record_id in self.named_entity_evidence
             )
             or any(

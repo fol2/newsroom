@@ -23,6 +23,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.admission import (
+    _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
     _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
@@ -1416,15 +1417,22 @@ def test_material_duration_classifier_must_be_exact_in_retained_fact() -> None:
 
 
 def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
-    assert _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION == (
+    assert _EARLIER_WRITE_ADMISSION_POLICY_VERSION == (
         "newsroom.write-admission.v3+newsroom.evid-012.v7+"
         "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
         "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
         "newsroom.named-entity.v8+newsroom.cont-originality.v3+"
         "newsroom.zh-hant-hk-shape.v13"
     )
-    assert WRITE_ADMISSION_POLICY_VERSION == (
+    assert _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION == (
         "newsroom.write-admission.v4+"
+        "newsroom.evid-012.v7+newsroom.evidence-approval.v8+"
+        "newsroom.evidence-gates.v2+newsroom.governed-claim.v7+"
+        "newsroom.governed-input.v10+newsroom.named-entity.v8+"
+        "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
+    )
+    assert WRITE_ADMISSION_POLICY_VERSION == (
+        "newsroom.write-admission.v5+"
         f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -1511,6 +1519,16 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         **values,
     )
     assert WriteAdmissionDecision.from_record(legacy.as_record()) == legacy
+    earlier_values = {
+        **values,
+        "policy_version": _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
+    }
+    earlier = WriteAdmissionDecision(
+        decision_id=_decision_id(**earlier_values),
+        decided_at="2026-09-10T12:00:00Z",
+        **earlier_values,
+    )
+    assert WriteAdmissionDecision.from_record(earlier.as_record()) == earlier
     with pytest.raises(ValueError, match="policy is not current"):
         select_write_ready(
             ((candidate, legacy_package, legacy),),
@@ -1519,6 +1537,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         )
 
     connection = connect(str(tmp_path / "write-admission-policy-replay.sqlite3"))
+    retain_write_admission_decision(connection, earlier)
     retain_write_admission_decision(connection, legacy)
     retain_write_admission_decision(connection, legacy)
     retain_write_admission_decision(connection, current)
@@ -1526,6 +1545,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         "SELECT policy_version,decision FROM unpublished_write_admission_decisions "
         "ORDER BY policy_version"
     ).fetchall() == [
+        (_EARLIER_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
     ]
