@@ -1254,12 +1254,21 @@ class AutonomousNativeEvidenceAssessor:
 
     def __call__(self, candidate, base, sources, acquired):
         return self.assess_with_boundary(
-            candidate, base, sources, acquired, before_dispatch=None,
+            candidate, base, sources, acquired,
+            before_dispatch=None, cached_only=False,
         )
 
     def assess_with_boundary(
         self, candidate, base, sources, acquired, *, before_dispatch,
+        cached_only: bool = False,
     ):
+        if type(cached_only) is not bool:
+            raise NativeEvidenceError("native assessment cache mode differs")
+        source_id = sources[0].unit.source_id if sources else candidate.candidate_id
+        if cached_only and self._usage is None:
+            raise NativeEvidenceHold(
+                "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+            )
         for source, result in zip(sources, acquired, strict=True):
             if (
                 result.currentness_basis
@@ -1281,12 +1290,30 @@ class AutonomousNativeEvidenceAssessor:
                 )
         if self._usage is not None:
             retained = self._usage.retained_assessments(candidate, base)
-            source_id = sources[0].unit.source_id if sources else candidate.candidate_id
             if retained is None:
                 raise NativeEvidenceHold("ASSESSOR_REVALIDATION_UNRESOLVED_HOLD", source_id)
             if retained:
                 if any(item.base_digest != base.digest for item in retained):
                     raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
+                if cached_only:
+                    current = tuple(
+                        item for item in retained
+                        if item.contract_version == VERSION
+                        and item.execution is not None
+                    )
+                    if not current:
+                        raise NativeEvidenceHold(
+                            "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+                        )
+                    latest = max(current, key=lambda item: item.completed_at)
+                    try:
+                        return self._validated_execution(
+                            latest.execution, candidate, base, sources, acquired,
+                        )
+                    except EvidencePackageError as exc:
+                        raise NativeEvidenceHold(
+                            _contract_hold_reason(exc), source_id
+                        ) from exc
                 latest = max(retained, key=lambda item: (item.completed_at, item.contract_version == VERSION))
                 if latest.execution is not None:
                     try:
@@ -1302,6 +1329,10 @@ class AutonomousNativeEvidenceAssessor:
                     raise NativeEvidenceHold("ASSESSOR_RESULT_NOT_RETAINED_HOLD", source_id)
                 # A changed, settled producer contract owns one fresh envelope.
                 # Retained accounting and the journal prevent unchanged retries.
+            if cached_only:
+                raise NativeEvidenceHold(
+                    "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+                )
         prompt = canonical_json_bytes(
             {
                 "contract": VERSION,

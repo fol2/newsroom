@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from importlib.resources import files
 
-ZH_HANT_HK_SHAPE_POLICY_VERSION = "newsroom.zh-hant-hk-shape.v13"
+ZH_HANT_HK_SHAPE_POLICY_VERSION = "newsroom.zh-hant-hk-shape.v14"
 _DISCOURSE_FILLER = re.compile(
     r"(?:^|[，,；;。])\s*(?:(?:整體|總體|簡單|簡要|概括|總括)(?:而言|來說)|"
     r"簡而言之)|"
@@ -58,9 +58,6 @@ _HK_ACCEPTED_S2T_LEXEMES = (
     "批准",
     "公布",
     "才",
-    "群組",
-    "群體",
-    "社群",
     "了解",
     "核查",
     "平台",
@@ -92,7 +89,7 @@ _HK_ACCEPTED_S2T_LEXEMES = (
     "查核",
     "控制程序",
 )
-_HK_ACCEPTED_AMBIGUOUS_CHARACTERS = frozenset("峰布家")
+_HK_ACCEPTED_AMBIGUOUS_CHARACTERS = frozenset("峰布家群")
 _SIMPLIFIED_EXCLUSIVE_CHARACTERS = frozenset(
     source
     for line in (

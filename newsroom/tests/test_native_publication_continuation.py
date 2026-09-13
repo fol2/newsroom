@@ -387,11 +387,13 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
         "package_admission_id": old_package, "editorial_decision": {"decision_id": "old-decision"},
         "acquisition_attempt_count": 3, "acquisition_retryable": False,
         "publication_applied_at": "old-time", "publication_observed_at": "old-time",
+        "assessment_contract_version": "newsroom.native-evidence-assessor.v12",
     })
     calls = []
 
     def acquire(_self, **request):
         calls.append(request["intake_receipt_id"])
+        assert request["assessment_cached_only"] is True
         assert "package_admission_id" not in journal.progress[unit.revision_id]["facts"]
         raise NativeEvidenceHold("NO_QUALIFYING_NEW_INFORMATION", unit.source_id)
 
@@ -403,7 +405,9 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
                                 proof=proof(), policies=SimpleNamespace(publication=object())),
         evidence_controller=object.__new__(NativeEvidenceController),
         sources={unit.revision_id: (_source(unit),)},
-        assessment_contract_version="new-contract",
+        assessment_contract_version=(
+            "newsroom.native-evidence-assessor.v12+consumer-contract"
+        ),
         clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
     )
     try:
@@ -412,11 +416,174 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
             assert result.reason == "NO_QUALIFYING_NEW_INFORMATION"
         facts = journal.progress[unit.revision_id]["facts"]
         assert facts["assessment_superseded"]["package_admission_id"] == old_package
-        assert facts["assessment_contract_version"] == "new-contract"
+        assert facts["assessment_contract_version"] == (
+            "newsroom.native-evidence-assessor.v12+consumer-contract"
+        )
         assert calls == ["already-acknowledged"]
         assert authority.receives == publication.calls == 0
     finally:
         connection.close()
+
+
+def test_producer_contract_revalidation_keeps_the_normal_assessment_path(
+    tmp_path, monkeypatch,
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="EVIDENCE_HOLD", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+        "intake_receipt_id": "already-acknowledged",
+        "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        "assessment_contract_version": "newsroom.native-evidence-assessor.v11",
+        "acquisition_attempt_count": 1, "acquisition_retryable": False,
+    })
+    calls = []
+
+    def acquire(_self, **request):
+        calls.append(request["assessment_cached_only"])
+        raise NativeEvidenceHold("NO_QUALIFYING_NEW_INFORMATION", unit.source_id)
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        assessment_contract_version=(
+            "newsroom.native-evidence-assessor.v12+consumer-contract"
+        ),
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+    try:
+        result = continuation.advance(
+            revision_id=unit.revision_id,
+            candidate_version_id="candidate-version",
+        )
+        assert result.reason == "NO_QUALIFYING_NEW_INFORMATION"
+        assert calls == [False]
+    finally:
+        connection.close()
+
+
+def test_consumer_only_cache_mode_survives_transport_retry_and_reopen(
+    tmp_path, monkeypatch,
+) -> None:
+    unit = _native()
+    path = tmp_path / "private.sqlite3"
+    connection = connect(str(path))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="EVIDENCE_HOLD", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+        "intake_receipt_id": "already-acknowledged",
+        "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        "assessment_contract_version": "newsroom.native-evidence-assessor.v12",
+        "acquisition_attempt_count": 0, "acquisition_retryable": False,
+    })
+    cached_modes = []
+
+    def acquire(_self, **request):
+        cached_modes.append(request["assessment_cached_only"])
+        raise OSError("transport unavailable")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+
+    def continuation(retained_journal):
+        return NativePublicationContinuation(
+            journal=retained_journal,
+            runtime=SimpleNamespace(
+                authority=_Authority(), ingress=object(), publication=_Publication(),
+                proof=proof(), policies=SimpleNamespace(publication=object()),
+            ),
+            evidence_controller=object.__new__(NativeEvidenceController),
+            sources={unit.revision_id: (_source(unit),)},
+            assessment_contract_version=(
+                "newsroom.native-evidence-assessor.v12+consumer-contract"
+            ),
+            clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+        )
+
+    first = continuation(journal).advance(
+        revision_id=unit.revision_id,
+        candidate_version_id="candidate-version",
+    )
+    assert first.reason == "ACQUISITION_TRANSPORT_RETRY"
+    connection.close()
+
+    reopened_connection = connect(str(path))
+    reopened_journal = NativeRevisionJournal(reopened_connection)
+    try:
+        second = continuation(reopened_journal).advance(
+            revision_id=unit.revision_id,
+            candidate_version_id="candidate-version",
+        )
+        assert second.reason == "ACQUISITION_TRANSPORT_RETRY"
+        assert cached_modes == [True, True]
+    finally:
+        reopened_connection.close()
+
+
+def test_consumer_only_cache_mode_survives_reopen_from_acquisition_started(
+    tmp_path, monkeypatch,
+) -> None:
+    unit = _native()
+    path = tmp_path / "private.sqlite3"
+    connection = connect(str(path))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="ACQUISITION_STARTED", facts={
+        "candidate_version_id": "candidate-version", "candidate_id": "candidate",
+        "graphiti_receipts": [{}], "intake_receipt_id": "already-acknowledged",
+        "assessment_contract_version": (
+            "newsroom.native-evidence-assessor.v12+consumer-contract"
+        ),
+        "assessment_superseded": {
+            "contract_version": "newsroom.native-evidence-assessor.v12",
+            "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+            "package_admission_id": None,
+            "editorial_decision_id": None,
+            "acquisition_attempt_count": 0,
+        },
+        "acquisition_attempt_count": 1,
+        "acquisition_started_at": "2026-09-08T12:00:00.000000Z",
+    })
+    connection.close()
+    cached_modes = []
+
+    def acquire(_self, **request):
+        cached_modes.append(request["assessment_cached_only"])
+        raise NativeEvidenceHold("NO_QUALIFYING_NEW_INFORMATION", unit.source_id)
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    reopened_connection = connect(str(path))
+    reopened_journal = NativeRevisionJournal(reopened_connection)
+    continuation = NativePublicationContinuation(
+        journal=reopened_journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        assessment_contract_version=(
+            "newsroom.native-evidence-assessor.v12+consumer-contract"
+        ),
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+    try:
+        result = continuation.advance(
+            revision_id=unit.revision_id,
+            candidate_version_id="candidate-version",
+        )
+        assert result.reason == "NO_QUALIFYING_NEW_INFORMATION"
+        assert cached_modes == [True]
+    finally:
+        reopened_connection.close()
 
 
 def test_post_assessment_dispatch_ambiguity_is_not_redispatched(

@@ -23,6 +23,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.admission import (
+    _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION,
     _OLDEST_WRITE_ADMISSION_POLICY_VERSION,
     _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
     _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
@@ -201,6 +202,8 @@ def test_non_controller_children_do_not_receive_evidence_approval_key(
     (
         "官方說明最新安排",
         "衛生署與群組公佈安排",
+        "人群聚集",
+        "群眾散去",
         "衞生署公佈安排",
         "了解安排",
         "高峯期安排",
@@ -381,6 +384,8 @@ def test_unambiguous_simplified_shape_is_rejected() -> None:
         "几乎全部完成",
         "夸大影響",
         "願景成為愿望",
+        "群众散去",
+        "警方驱散群众",
     ):
         assert contains_simplified_variant(text)
 
@@ -1439,8 +1444,15 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
         "newsroom.governed-input.v10+newsroom.named-entity.v8+"
         "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
     )
-    assert WRITE_ADMISSION_POLICY_VERSION == (
+    assert _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION == (
         "newsroom.write-admission.v6+"
+        "newsroom.evid-012.v7+newsroom.evidence-approval.v8+"
+        "newsroom.evidence-gates.v2+newsroom.governed-claim.v7+"
+        "newsroom.governed-input.v10+newsroom.named-entity.v8+"
+        "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
+    )
+    assert WRITE_ADMISSION_POLICY_VERSION == (
+        "newsroom.write-admission.v7+"
         f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -1527,6 +1539,22 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         **values,
     )
     assert WriteAdmissionDecision.from_record(legacy.as_record()) == legacy
+    latest_legacy_values = {
+        **values,
+        "policy_version": _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION,
+    }
+    latest_legacy = WriteAdmissionDecision(
+        decision_id=_decision_id(**latest_legacy_values),
+        decided_at="2026-09-11T18:00:00Z",
+        **latest_legacy_values,
+    )
+    assert WriteAdmissionDecision.from_record(latest_legacy.as_record()) == latest_legacy
+    with pytest.raises(ValueError, match="policy is not current"):
+        select_write_ready(
+            ((candidate, legacy_package, latest_legacy),),
+            limit=1,
+            selected_at="2026-09-12T12:00:00Z",
+        )
     earlier_values = {
         **values,
         "policy_version": _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
@@ -1558,6 +1586,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
     retain_write_admission_decision(connection, oldest)
     retain_write_admission_decision(connection, earlier)
     retain_write_admission_decision(connection, legacy)
+    retain_write_admission_decision(connection, latest_legacy)
     retain_write_admission_decision(connection, legacy)
     retain_write_admission_decision(connection, current)
     assert connection.execute(
@@ -1567,6 +1596,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         (_OLDEST_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_EARLIER_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
+        (_LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
     ]
 
@@ -1574,6 +1604,10 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
     relabelled["policy_version"] = WRITE_ADMISSION_POLICY_VERSION
     with pytest.raises(ValueError, match="identity is not canonical"):
         WriteAdmissionDecision.from_record(relabelled)
+    relabelled_latest = latest_legacy.as_record()
+    relabelled_latest["policy_version"] = WRITE_ADMISSION_POLICY_VERSION
+    with pytest.raises(ValueError, match="identity is not canonical"):
+        WriteAdmissionDecision.from_record(relabelled_latest)
     forged = legacy.as_record()
     forged["decision"] = "REJECT"
     with pytest.raises(ValueError, match="identity is not canonical"):

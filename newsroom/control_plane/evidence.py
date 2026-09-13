@@ -25,7 +25,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v8"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v9"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -279,6 +279,11 @@ _ENGLISH_ORGANISATION = re.compile(
     r"(?:Authority|Directorate|Department|Ministry|Agency|Council|Commission|"
     r"Service|Police|University|Hospital|Bank)\b"
 )
+_ENGLISH_UNIVERSITY_OF = re.compile(
+    r"(?<![A-Za-z0-9_.-])(University of [A-Z][a-z]+)"
+    r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9_]|/[A-Za-z0-9_]|"
+    r"[ \t]+[A-Z][A-Za-z-]*\b)"
+)
 _ENGLISH_OFFICIAL_TERM = re.compile(
     r"\b(?:[A-Z][A-Za-z-]+(?:\s+(?:and|of|the|for|[A-Z][A-Za-z-]+)){1,7}"
     r"\s+Act|(?:[A-Z][A-Za-z-]+\s+){1,5}"
@@ -373,9 +378,19 @@ def _source_bound_official_terms(
 
 
 def _is_bounded_english_organisation(text: str) -> bool:
-    return bool(_ENGLISH_ORGANISATION.fullmatch(text)) and not any(
-        token.casefold() in _ENGLISH_ORGANISATION_ACTION_WORDS
-        for token in re.findall(r"[A-Za-z]+", text)
+    if _ENGLISH_UNIVERSITY_OF.fullmatch(text):
+        return True
+    return (
+        not re.fullmatch(
+            r"(?:The|A|An) (?:Authority|Directorate|Department|Ministry|Agency|"
+            r"Council|Commission|Service|Police|University|Hospital|Bank)",
+            text,
+        )
+        and bool(_ENGLISH_ORGANISATION.fullmatch(text))
+        and not any(
+            token.casefold() in _ENGLISH_ORGANISATION_ACTION_WORDS
+            for token in re.findall(r"[A-Za-z]+", text)
+        )
     )
 
 
@@ -509,6 +524,10 @@ def bounded_named_entities(
             candidates.append(
                 (match.start(), match.end(), organisation, "ORGANISATION")
             )
+    for match in _ENGLISH_UNIVERSITY_OF.finditer(text):
+        candidates.append(
+            (match.start(1), match.end(1), match.group(1), "ORGANISATION")
+        )
     for match in _ENGLISH_OFFICIAL_TERM.finditer(text):
         candidates.append((match.start(), match.end(), match.group(0), "OFFICIAL_TERM"))
     for match in _ENGLISH_OFFICIAL_REFERENCE.finditer(text):

@@ -330,14 +330,23 @@ class EvidenceAssessor:
         sources: tuple[NativeEvidenceSource, ...],
         acquired: tuple[AcquiredEvidence, ...],
         before_assessment: Callable[[], None] | None = None,
+        cached_only: bool = False,
     ) -> IndependentEvidenceAssessment:
         bounded = getattr(self._assess, "assess_with_boundary", None)
         if callable(bounded):
             result = bounded(
                 candidate, package, sources, acquired,
                 before_dispatch=before_assessment,
+                cached_only=cached_only,
             )
         else:
+            if cached_only:
+                source_id = (
+                    sources[0].unit.source_id if sources else candidate.candidate_id
+                )
+                raise NativeEvidenceHold(
+                    "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+                )
             if before_assessment is not None:
                 before_assessment()
             result = self._assess(candidate, package, sources, acquired)
@@ -412,10 +421,12 @@ class NativeEvidenceController:
         sources: tuple[NativeEvidenceSource, ...],
         evaluated_at: str | None = None,
         before_assessment: Callable[[], None] | None = None,
+        assessment_cached_only: bool = False,
         proof: AuthenticationProof,
     ) -> NativeEvidenceResult:
         if (
-            type(sources) is not tuple
+            type(assessment_cached_only) is not bool
+            or type(sources) is not tuple
             or not sources
             or any(type(item) is not NativeEvidenceSource for item in sources)
         ):
@@ -447,6 +458,7 @@ class NativeEvidenceController:
         assessment = self._assessor.assess(
             version, base, sources, acquired,
             before_assessment=before_assessment,
+            cached_only=assessment_cached_only,
         )
         source_assessments = self._validated_source_assessments(
             sources, acquired, assessment.source_assessments

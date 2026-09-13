@@ -721,11 +721,24 @@ class NativePublicationContinuation:
                 )
 
             try:
+                superseded = facts.get("assessment_superseded", {})
+                prior_contract = (
+                    superseded.get("contract_version")
+                    if isinstance(superseded, dict)
+                    else None
+                )
+                consumer_only_revalidation = (
+                    type(prior_contract) is str
+                    and self._assessment_contract_version is not None
+                    and prior_contract.split("+", 1)[0]
+                    == self._assessment_contract_version.split("+", 1)[0]
+                )
                 evidence = self._evidence.acquire_and_retain(
                     candidate_version_id=candidate_version_id,
                     intake_receipt_id=str(facts["intake_receipt_id"]),
                     sources=self._sources[revision_id],
                     before_assessment=before_assessment,
+                    assessment_cached_only=consumer_only_revalidation,
                     proof=self._runtime.proof,
                 )
             except VetoError:

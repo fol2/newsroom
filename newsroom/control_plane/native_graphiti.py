@@ -124,7 +124,10 @@ class NativeGraphitiProcessor:
     ) -> tuple[NativeGraphitiOutcome, ...]:
         if not units:
             return ()
-        if len({unit.ingest_id for unit in units}) != len(units):
+        # Deriving an ingest identity hashes the full source body. Keep the
+        # exact keys for this operation only, including unchanged terminal holds.
+        units_by_ingest = {unit.ingest_id: unit for unit in units}
+        if len(units_by_ingest) != len(units):
             raise ValueError("native Graphiti cohort repeats an ingest")
         for unit in units:
             if type(unit) is not CorpusIngestUnit or unit.authority is None:
@@ -134,39 +137,40 @@ class NativeGraphitiProcessor:
             validate_sha256_digest(unit.proving_run_id.removeprefix("native-source:"))
             if unit.proving_run_id != "native-source:" + unit.observation_digest:
                 raise ValueError("native Graphiti observation provenance differs")
-        revisions: dict[str, list[CorpusIngestUnit]] = {}
-        for unit in units:
-            revisions.setdefault(unit.revision_id, []).append(unit)
+        revisions: dict[str, list[str]] = {}
+        for ingest_id, unit in units_by_ingest.items():
+            revisions.setdefault(unit.revision_id, []).append(ingest_id)
         for members in revisions.values():
-            members.sort(key=lambda unit: unit.chunk_ordinal)
-            if (tuple(unit.chunk_ordinal for unit in members) != tuple(range(1, members[0].chunk_count + 1))
-                    or any(unit.chunk_count != members[0].chunk_count for unit in members)):
+            members.sort(key=lambda ingest_id: units_by_ingest[ingest_id].chunk_ordinal)
+            chunk_count = units_by_ingest[members[0]].chunk_count
+            if (tuple(units_by_ingest[ingest_id].chunk_ordinal for ingest_id in members) != tuple(range(1, chunk_count + 1))
+                    or any(units_by_ingest[ingest_id].chunk_count != chunk_count for ingest_id in members)):
                 raise ValueError("native Graphiti revision chunk coverage differs")
         self._stop_check()
         # Resolve retained accounting before considering another provider call.
         self._settle_missing_subscription_usage(units)
         terminal_holds = {}
-        for unit in units:
+        for ingest_id in units_by_ingest:
             # The authority commits before the private receipt/failure journal.
             # Inspect it even if a crash left no local failure row.
             if self._connection.execute(
                 "SELECT 1 FROM unpublished_graphiti_ingest WHERE ingest_id=? AND outcome='COMPLETE'",
-                (unit.ingest_id,),
+                (ingest_id,),
             ).fetchone() is not None:
                 continue
             try:
                 history = self._system.graphiti.attempt_history(
-                    typed_id(ExtractionRunId, "run", unit.ingest_id),
+                    typed_id(ExtractionRunId, "run", ingest_id),
                     limit=1, proof=self._proof,
                 )
             except GraphitiAdapterRightsDenied:
-                terminal_holds[unit.ingest_id] = "CURRENT_SOURCE_RIGHTS_HOLD"
+                terminal_holds[ingest_id] = "CURRENT_SOURCE_RIGHTS_HOLD"
                 continue
             if history and history[0].outcome.terminal:
                 head = history[0]
                 # A settled terminal adapter result is not a new retryable
                 # provider failure. Keep the original cause and its accounting.
-                terminal_holds[unit.ingest_id] = (
+                terminal_holds[ingest_id] = (
                     "RETAINED_COMPLETE_RECONCILIATION_REQUIRED"
                     if head.outcome is GraphitiAdapterOutcome.COMPLETE else
                     f"{head.outcome.value}:{head.failure_code}"
@@ -182,7 +186,7 @@ class NativeGraphitiProcessor:
 
         _ingest(
             self._connection, graphiti=self._runner,
-            units=tuple(unit for unit in units if unit.ingest_id not in terminal_holds),
+            units=tuple(unit for ingest_id, unit in units_by_ingest.items() if ingest_id not in terminal_holds),
             max_graphiti=len(units), rights_check=self._rights,
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
@@ -196,40 +200,40 @@ class NativeGraphitiProcessor:
         route_held = bool(graphiti_required_route_holds(self._usage))
         outcomes = []
         complete = []
-        for unit in units:
+        for ingest_id in units_by_ingest:
             row = self._connection.execute(
                 "SELECT outcome,receipt_digest FROM unpublished_graphiti_ingest "
-                "WHERE ingest_id=?", (unit.ingest_id,),
+                "WHERE ingest_id=?", (ingest_id,),
             ).fetchone()
             if row is not None and row[0] == "COMPLETE":
-                complete.append(unit.ingest_id)
-                outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "EXTRACTION_COMPLETE", str(row[1]), None))
-            elif unit.ingest_id in deferred:
+                complete.append(ingest_id)
+                outcomes.append(NativeGraphitiOutcome(ingest_id, "EXTRACTION_COMPLETE", str(row[1]), None))
+            elif ingest_id in deferred:
                 outcomes.append(NativeGraphitiOutcome(
-                    unit.ingest_id, "GRAPHITI_DEFERRED", None,
+                    ingest_id, "GRAPHITI_DEFERRED", None,
                     "WORK_QUANTUM_EXHAUSTED",
                 ))
             else:
-                failures, dead = graphiti_failure_state(self._connection, unit.ingest_id)
+                failures, dead = graphiti_failure_state(self._connection, ingest_id)
                 reason = (
-                    terminal_holds[unit.ingest_id] if unit.ingest_id in terminal_holds else
+                    terminal_holds[ingest_id] if ingest_id in terminal_holds else
                     "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN" if route_held else
                     "PARTIAL_EXTRACTION" if row is not None else
                     "DEAD_LETTER" if dead else "RETRY_PENDING" if failures else
                     "RIGHTS_OR_PREDECESSOR_HOLD"
                 )
-                outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "GRAPHITI_HOLD", None, reason))
+                outcomes.append(NativeGraphitiOutcome(ingest_id, "GRAPHITI_HOLD", None, reason))
         # Never project a prefix of a multi-chunk revision. An independently
         # complete revision may still advance while another revision is held.
         complete_set = set(complete)
         eligible = set()
         for members in revisions.values():
-            if all(unit.ingest_id in complete_set for unit in members):
-                eligible.update(unit.ingest_id for unit in members)
+            if all(ingest_id in complete_set for ingest_id in members):
+                eligible.update(members)
         statuses = {item.ingest_id: item for item in outcomes}
         assigned = {ingest for exact in self._cohorts.values() for ingest in exact}
         for members in revisions.values():
-            exact = tuple(sorted(unit.ingest_id for unit in members))
+            exact = tuple(sorted(members))
             if set(exact) <= eligible and set(exact).isdisjoint(assigned):
                 # Durable admission units follow revision atomicity. Projection
                 # still batches every ready unit once below.
@@ -285,7 +289,7 @@ class NativeGraphitiProcessor:
                 )
             )
             if not combined:
-                return tuple(statuses[unit.ingest_id] for unit in units)
+                return tuple(statuses[ingest_id] for ingest_id in units_by_ingest)
             self._admission.drain(
                 worker_id=cycle_id,
                 limit=max(1, sum(queued.values())),
@@ -294,7 +298,6 @@ class NativeGraphitiProcessor:
             if self._operator_drain_requested():
                 raise OperatorDrainRequested
             ready = []
-            units_by_ingest = {unit.ingest_id: unit for unit in units}
             with self._dispatch_fence():
                 for cohort_id, exact in admission_ready:
                     if all(
@@ -382,7 +385,7 @@ class NativeGraphitiProcessor:
                     )
             if self._operator_drain_requested():
                 raise OperatorDrainRequested
-        return tuple(statuses[unit.ingest_id] for unit in units)
+        return tuple(statuses[ingest_id] for ingest_id in units_by_ingest)
 
     def _has_active_generation(self) -> bool:
         # Select metadata only to decide whether first bootstrap is needed.
