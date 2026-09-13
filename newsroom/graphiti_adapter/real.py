@@ -718,8 +718,10 @@ async def _add_episode(
                     prior_raw = await prior_guard.completed_raw_or_none()
                     if prior_raw is not None:
                         try:
+                            # The provider attempt is leaf-local; retries bind the
+                            # authenticated outer Graphiti attempt identity.
                             prior_attempt_number = int(
-                                prior_raw["provider_attempt_number"]
+                                prior_raw["attempt_number"]
                             )
                         except (KeyError, TypeError, ValueError):
                             prior_attempt_number = 0
@@ -1364,9 +1366,7 @@ class RealGraphitiAdapter:
                 if isinstance(embedding_usage, dict)
                 else _no_embedding_usage()
             )
-            current_telemetry.provider_attempt_number = int(
-                combined_receipt.get("provider_attempt_number", 1)
-            )
+            current_telemetry.provider_attempt_number = attempt.attempt_number
             raw = _raw_receipt(
                 attempt,
                 started_at=started_at,

@@ -7039,6 +7039,88 @@ def test_evaluation_runner_reads_provider_attempt_after_adapter_execution(
     assert result.provider_attempt_number == 1
 
 
+def test_attempt_two_combined_failure_binds_new_execution_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.graphiti_adapter import real
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    terminal_digest = digest_bytes(b"attempt-two-terminal")
+
+    async def completed_failure(**values: object) -> object:
+        observer = values["invocation_observer"]
+        observer._allocations.append(object())
+        values["validate_failure"](
+            {
+                "failure_code": "PIPELINE_FAILED",
+                "provider_attempt_number": 1,
+                "pipeline_chat_invocations": [
+                    {
+                        "provider": "grok-build-cli",
+                        "outcome": "FAILED",
+                        "producer_failure": "RuntimeError",
+                        "model_invocation_terminal_digest": terminal_digest,
+                    }
+                ],
+                "embedding_usage": {
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                    "request_count": 0,
+                    "embedding_tokens": 0,
+                    "cost_usd_microunits": 0,
+                    "requests": [],
+                },
+            },
+            values["telemetry"],
+        )
+        raise real.ExtractionContractError("combined-temporal leaf failed")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(
+        real, "neo4j_community_password", lambda: "fixture-password"
+    )
+    monkeypatch.setattr(real, "_add_episode", completed_failure)
+    adapter_type = real.RealGraphitiAdapter
+    monkeypatch.setattr(
+        real,
+        "RealGraphitiAdapter",
+        lambda **values: adapter_type(
+            clock=lambda: UtcTimestamp.parse("2026-08-20T00:00:00Z"),
+            **values,
+        ),
+    )
+    unit = replace(_unit(item_key="attempt-two-failure"), attempt_number=2)
+
+    result = EvaluationGraphitiRunner(
+        clock=lambda: datetime(2026, 8, 20, tzinfo=UTC),
+        fallback_permitted=False,
+    ).ingest_with_usage(
+        unit,
+        model_usage=ModelUsageService(str(tmp_path / "usage.sqlite3")),
+        cycle_id="attempt-two-failure",
+        dispatch_authority={"current": True},
+        owner_stop_check=lambda: None,
+    )
+
+    assert result.attempt_number == result.provider_attempt_number == 2
+    assert result.raw_receipt is not None
+    assert result.raw_receipt["attempt_number"] == 2
+    assert result.raw_receipt["provider_attempt_number"] == 2
+    assert result.receipt_digest == result.raw_receipt["raw_output_digest"]
+    assert result.raw_receipt["combined_temporal_receipt"][
+        "provider_attempt_number"
+    ] == 1
+    assert result.chat_invocations == (
+        {
+            "provider": "grok-build-cli",
+            "outcome": "FAILED",
+            "producer_failure": "RuntimeError",
+            "model_invocation_terminal_digest": terminal_digest,
+        },
+    )
+
+
 def test_evaluation_runner_labels_cycle_result_construction_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

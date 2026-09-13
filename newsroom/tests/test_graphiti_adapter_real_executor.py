@@ -2478,8 +2478,15 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
     instant = UtcTimestamp(datetime(2026, 8, 20, tzinfo=UTC))
+    first = _real_attempt(tmp_path)
     attempt = replace(
-        _real_attempt(tmp_path),
+        first,
+        attempt_id=GraphitiAttemptId.parse(
+            "00000000-0000-4000-8000-000000004935"
+        ),
+        attempt_number=2,
+        expected_previous_attempt_id=first.attempt_id,
+        idempotency_key="evaluation-real-attempt-v2",
         reference_time=instant,
         temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
     )
@@ -2493,7 +2500,7 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
         attempt,
         started_at=instant,
         telemetry=_EpisodeTelemetry(
-            provider_attempt_number=1,
+            provider_attempt_number=2,
             chat_invocations=[{"process_exit_diagnostic": diagnostic}],
         ),
         result=None,
@@ -2514,6 +2521,7 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
     assert restored.produced.validation is None
     assert restored.produced.raw_output_value is None
     assert restored.produced.attempt_receipt_value == raw
+    assert restored.provider_attempt_number == 2
     assert restored.chat_invocations[0]["process_exit_diagnostic"] == diagnostic
 
     malformed = copy.deepcopy(raw)
@@ -2717,7 +2725,7 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             return (
                 self.settled
                 and episode_uuid == "episode-id"
-                and attempt_number > 3
+                and attempt_number > 2
                 and prior_attempt_number == attempt_number - 1
             )
 
@@ -2741,6 +2749,34 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             retry_snapshot_is_failed=lambda raw: "failure" in raw,
         )
 
+    complete_attempt_2 = {
+        "attempt_number": 2,
+        "provider_attempt_number": 1,
+        "failure": "attempt-2",
+    }
+    markers["episode-id"] = complete_attempt_2
+    asyncio.run(run(3, allowed=False, settled=False))
+    assert restored == [complete_attempt_2]
+    assert provider_calls == 0
+    asyncio.run(run(3, allowed=False, settled=True))
+    assert provider_calls == 1
+    assert markers["episode-id"] == complete_attempt_2
+    assert markers["episode-id:attempt:3"] == {"success": "attempt-3"}
+
+    del markers["episode-id:attempt:3"]
+    markers["episode-id"] = {
+        "attempt_number": 1,
+        "provider_attempt_number": 1,
+        "failure": "attempt-1",
+    }
+    restored.clear()
+    provider_calls = 0
+    asyncio.run(run(3, allowed=False, settled=True))
+    assert provider_calls == 0
+    assert restored == [markers["episode-id"]]
+
+    markers["episode-id"] = {"failure": "attempt-1"}
+    restored.clear()
     asyncio.run(run(2, allowed=False))
     assert restored == [{"failure": "attempt-1"}]
     asyncio.run(run(3, allowed=True))
@@ -2770,6 +2806,7 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
 
     markers["episode-id:attempt:4"] = {
         "failure": "attempt-4",
+        "attempt_number": 4,
         "provider_attempt_number": 4,
     }
     asyncio.run(run(5, allowed=False, settled=True))
@@ -3167,6 +3204,8 @@ def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
 ) -> None:
     import newsroom.graphiti_adapter.real as real
 
+    terminal_digest = digest_bytes(b"attempt-two-terminal")
+
     async def completed_failure(**values: object) -> object:
         validate_failure = values["validate_failure"]
         assert callable(validate_failure)
@@ -3174,7 +3213,12 @@ def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
             {
                 "failure_code": CombinedTemporalFailureCode.PIPELINE_FAILED,
                 "provider_attempt_number": 1,
-                "pipeline_chat_invocations": [],
+                "pipeline_chat_invocations": [
+                    {
+                        "provider": "grok-build-cli",
+                        "model_invocation_terminal_digest": terminal_digest,
+                    }
+                ],
                 "embedding_usage": {
                     "usage_basis": "NO_EMBEDDING_CALL",
                     "request_count": 0,
@@ -3192,8 +3236,18 @@ def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
     monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
     monkeypatch.setattr(real, "_add_episode", completed_failure)
 
+    first = evaluation_attempt_for(("A retained source passage.",))
+    attempt = replace(
+        first,
+        attempt_id=GraphitiAttemptId.parse(
+            "00000000-0000-4000-8000-000000004935"
+        ),
+        attempt_number=2,
+        expected_previous_attempt_id=first.attempt_id,
+        idempotency_key="evaluation-real-attempt-v2",
+    )
     produced = RealGraphitiAdapter()._produce(
-        evaluation_attempt_for(("A retained source passage.",)),
+        attempt,
         UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
     )
 
@@ -3205,6 +3259,16 @@ def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
     assert produced.attempt_receipt_value["combined_temporal_failure_code"] == (
         "PIPELINE_FAILED"
     )
+    assert produced.attempt_receipt_value["provider_attempt_number"] == 2
+    assert produced.attempt_receipt_value["combined_temporal_receipt"][
+        "provider_attempt_number"
+    ] == 1
+    assert produced.attempt_receipt_value["chat_invocations"] == [
+        {
+            "provider": "grok-build-cli",
+            "model_invocation_terminal_digest": terminal_digest,
+        }
+    ]
 
 
 def test_unmarked_ambiguity_after_empty_success_returns_validated_success(

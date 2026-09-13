@@ -763,11 +763,35 @@ def _valid_native_disposition(
         return None
     policy = _policy_for_allocation(connection, allocation)
     if authority_scope == NATIVE_AUTONOMOUS_USAGE_SCOPE:
+        envelope = validated_native_envelope or _native_envelope(
+            connection, allocation
+        )
+        leaf_class = _native_conservative_subscription_leaf(allocation)
+        if leaf_class is None:
+            raise ModelUsageIntegrityError(
+                "native conservative disposition target is ineligible"
+            )
+        if leaf_class is GraphitiLeafClass.FALLBACK:
+            identity = _retained_graphiti_request_identity(connection, allocation)
+            if (
+                identity is None
+                or identity.leaf_class is not GraphitiLeafClass.FALLBACK
+                or identity.primary_unavailable_event_digest is None
+            ):
+                raise ModelUsageIntegrityError(
+                    "native fallback request authority differs"
+                )
+            _require_native_fallback_failure_receipt(
+                connection,
+                allocation=allocation,
+                terminal=terminal,
+                envelope=envelope,
+            )
         expected_scope = _native_disposition_authority(
             allocation=allocation,
             terminal=terminal,
             policy=policy,
-            envelope=validated_native_envelope or _native_envelope(connection, allocation),
+            envelope=envelope,
         )
         conservative_total = policy.max_total_tokens
     elif authority_scope == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
@@ -1012,6 +1036,85 @@ def _native_envelope(
             "native conservative disposition lacks a landed source observation"
         )
     return envelope
+
+
+def _native_conservative_subscription_leaf(
+    allocation: InvocationAllocation,
+) -> GraphitiLeafClass | None:
+    return {
+        (
+            WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            WorkloadClass.GRAPHITI_CHAT_PRIMARY.value,
+            "cursor-agent-cli",
+        ): GraphitiLeafClass.PRIMARY,
+        (
+            WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+            WorkloadClass.GRAPHITI_CHAT_FALLBACK.value,
+            "grok-build-cli",
+        ): GraphitiLeafClass.FALLBACK,
+    }.get((allocation.workload_class, allocation.route, allocation.provider))
+
+
+def _require_native_fallback_failure_receipt(
+    connection: sqlite3.Connection,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    envelope: WorkEnvelope,
+) -> None:
+    outcome_row = connection.execute(
+        "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+        "FROM model_work_outcomes WHERE envelope_id=?",
+        (envelope.envelope_id,),
+    ).fetchone()
+    if outcome_row is None:
+        raise ModelUsageIntegrityError("native fallback work outcome is absent")
+    outcome = _object(outcome_row[4])
+    unsigned_outcome = dict(outcome)
+    outcome_digest = unsigned_outcome.pop("outcome_digest", None)
+    attempt = int(str(envelope.graphiti_attempt_id).rpartition(":")[2])
+    receipt_row = connection.execute(
+        "SELECT ingest_id,attempt_number,outcome,receipt_digest,receipt_json FROM "
+        "unpublished_graphiti_attempt_receipts "
+        "WHERE ingest_id=? AND attempt_number=?",
+        (envelope.ingest_id, attempt),
+    ).fetchone()
+    if receipt_row is None:
+        raise ModelUsageIntegrityError("native fallback attempt receipt is absent")
+    receipt = _object(receipt_row[4])
+    unsigned_receipt = dict(receipt)
+    receipt_digest = unsigned_receipt.pop("receipt_digest", None)
+    invocations = receipt.get("chat_invocations")
+    if (
+        outcome_digest != outcome_row[0]
+        or digest_canonical(unsigned_outcome) != outcome_digest
+        or tuple(outcome_row[1:4])
+        != (
+            outcome.get("envelope_id"),
+            outcome.get("outcome"),
+            outcome.get("terminal_at"),
+        )
+        or outcome.get("envelope_id") != envelope.envelope_id
+        or outcome.get("outcome") not in {"GRAPHITI_FAILED", "GRAPHITI_REJECTED_BINDING"}
+        or _instant(str(outcome.get("terminal_at"))) < terminal.observed_at
+        or outcome.get("outcome_record_id") != receipt_digest
+        or tuple(receipt_row[:3]) != (envelope.ingest_id, attempt, "FAILED")
+        or (receipt.get("ingest_id"), receipt.get("attempt_number"), receipt.get("outcome"))
+        != (envelope.ingest_id, attempt, "FAILED")
+        or receipt_digest != receipt_row[3]
+        or digest_bytes(canonical_json_bytes(unsigned_receipt)) != receipt_digest
+        or not isinstance(invocations, list)
+        # The native result boundary can fail after retaining the request and
+        # terminal but before returning leaf pointers. Their independent exact
+        # bindings remain authoritative; missing outer telemetry is not zero.
+        or (invocations and not any(
+            isinstance(item, dict)
+            and item.get("model_invocation_id") == allocation.invocation_id
+            and item.get("model_invocation_terminal_digest") == terminal.terminal_digest
+            for item in invocations
+        ))
+    ):
+        raise ModelUsageIntegrityError("native fallback failure receipt differs")
 
 
 def _retained_graphiti_request_identity(
@@ -4331,11 +4434,9 @@ class ModelUsageService:
 
             policy = _policy_for_allocation(connection, allocation)
             envelope = _native_envelope(connection, allocation)
+            leaf_class = _native_conservative_subscription_leaf(allocation)
             if (
-                allocation.workload_class
-                is not WorkloadClass.GRAPHITI_CHAT_PRIMARY
-                or allocation.route != WorkloadClass.GRAPHITI_CHAT_PRIMARY.value
-                or allocation.provider != "cursor-agent-cli"
+                leaf_class is None
                 or not policy.qualified
                 or terminal.usage_status is not UsageStatus.UNREPORTED
                 or terminal.outcome not in {"FAILED", "TIMEOUT"}
@@ -4348,6 +4449,24 @@ class ModelUsageService:
             ):
                 raise ModelUsageIntegrityError(
                     "native conservative disposition target is ineligible"
+                )
+            if leaf_class is GraphitiLeafClass.FALLBACK:
+                identity = _retained_graphiti_request_identity(
+                    connection, allocation
+                )
+                if (
+                    identity is None
+                    or identity.leaf_class is not GraphitiLeafClass.FALLBACK
+                    or identity.primary_unavailable_event_digest is None
+                ):
+                    raise ModelUsageIntegrityError(
+                        "native fallback request authority differs"
+                    )
+                _require_native_fallback_failure_receipt(
+                    connection,
+                    allocation=allocation,
+                    terminal=terminal,
+                    envelope=envelope,
                 )
             if observed_at < terminal.observed_at:
                 raise ModelUsageIntegrityError(
