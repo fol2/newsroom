@@ -282,7 +282,7 @@ class ExistingGovernedGraphitiRightsAuthority:
                     or length <= 0
                 ):
                     return False
-                hydrated = self._objects.hydrate(
+                hydrated = self._objects.rehydrate(
                     HydrationRequest(
                         admission_id=ObjectAdmissionId.parse(
                             str(raw["admission_id"])
