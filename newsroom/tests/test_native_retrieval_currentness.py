@@ -45,7 +45,7 @@ def native_work_item(tmp_path):
         connection.close()
 
 
-@pytest.mark.parametrize(("operation", "expected_reads"), (("restart", 2), ("current", 1)))
+@pytest.mark.parametrize(("operation", "expected_reads"), (("restart", 1), ("current", 1)))
 def test_native_context_is_not_reread_for_identical_currentness_check(
     native_work_item, operation, expected_reads
 ):
@@ -64,8 +64,8 @@ def test_native_context_is_not_reread_for_identical_currentness_check(
             TriageWorkItemStore(connection, authority)
         else:
             assert store.require_usable_current(version.work_item_id) == version
-        # Opening also checks immutable lineage; ordinary currentness only
-        # needs its one identical native retained/current verification.
+        # Both operations authenticate immutable retrieval and currentness
+        # through one same-snapshot read; neither reuses the preceding call.
         assert reads == [receipt] * expected_reads
 
 
