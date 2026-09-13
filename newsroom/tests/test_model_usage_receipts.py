@@ -2374,6 +2374,38 @@ def test_native_landing_revision_hint_cannot_select_another_unit(
     connection.close()
 
 
+def test_native_landing_revision_hint_binds_the_selected_chunk(
+    tmp_path: Path,
+) -> None:
+    connection = connect_unpublished_store(str(tmp_path / "unpublished.sqlite3"))
+    first = replace(_native("selected"), chunk_count=2)
+    second = replace(
+        first,
+        chunk_ordinal=2,
+        predecessor_ingest_id=first.ingest_id,
+    )
+    altered_first = replace(
+        first,
+        effective_revision=replace(
+            first.effective_revision,
+            first_observed_at="2026-09-02T12:00:01.000000Z",
+        ),
+    )
+    NativeRevisionJournal(connection).land((altered_first, second))
+
+    assert model_usage_module._native_landed_source_unit(
+        connection,
+        ingest_id=altered_first.ingest_id,
+        effective_revision_digest=_digest(asdict(second.effective_revision)),
+    ) is None
+    assert model_usage_module._native_landed_source_unit(
+        connection,
+        ingest_id=second.ingest_id,
+        effective_revision_digest=_digest(asdict(second.effective_revision)),
+    ) == second
+    connection.close()
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     (

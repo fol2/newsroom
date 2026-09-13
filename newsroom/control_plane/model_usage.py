@@ -1205,6 +1205,11 @@ def _native_landed_source_unit(
             unit
             for unit in retained_units or ()
             if unit.ingest_id == ingest_id
+            and (
+                effective_revision_digest is None
+                or digest_canonical(asdict(unit.effective_revision))
+                == effective_revision_digest
+            )
         )
     if len(matches) != 1:
         return None
