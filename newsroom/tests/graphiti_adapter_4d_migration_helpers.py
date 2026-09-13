@@ -309,6 +309,7 @@ def _drop_v38_authorization_request_storage(
 ) -> None:
     """Restore exact v37 request bytes for retained-prefix fixtures."""
 
+    _drop_v39_recovered_ambiguous_guards(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 38:
         return
     from newsroom.authority._event_store import _EventAuthorityStore
@@ -368,6 +369,64 @@ def _drop_v38_authorization_request_storage(
         connection.execute("RELEASE SAVEPOINT checked_request_downgrade")
         raise
     connection.execute("RELEASE SAVEPOINT checked_request_downgrade")
+
+
+def _drop_v39_recovered_ambiguous_guards(
+    connection: sqlite3.Connection,
+) -> None:
+    """Restore the exact v38 Graphiti progression triggers."""
+
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 39:
+        return
+    from newsroom.authority.graphiti_accounted_zero_migrations import (
+        GRAPHITI_ACCOUNTED_ZERO_MIGRATION_STATEMENTS,
+    )
+    from newsroom.authority.graphiti_adapter_migrations import (
+        GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
+    )
+    from newsroom.authority.graphiti_recovered_ambiguous_migrations import (
+        GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_CHECKSUM,
+        GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_NAME,
+    )
+
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=39"
+    ).fetchone() != (
+        GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_NAME,
+        GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_CHECKSUM,
+    ):
+        raise sqlite3.DatabaseError("downgrade requires exact v39 Graphiti guards")
+    connection.execute("SAVEPOINT checked_graphiti_guard_downgrade")
+    try:
+        connection.execute("DROP TRIGGER graphiti_attempt_chain_guard")
+        connection.execute("DROP TRIGGER graphiti_attempt_head_update_guard")
+        connection.execute(
+            next(
+                sql
+                for sql in GRAPHITI_ACCOUNTED_ZERO_MIGRATION_STATEMENTS
+                if sql.startswith("CREATE TRIGGER graphiti_attempt_chain_guard")
+            )
+        )
+        connection.execute(
+            next(
+                sql
+                for sql in GRAPHITI_ADAPTER_MIGRATION_STATEMENTS
+                if sql.startswith("CREATE TRIGGER graphiti_attempt_head_update_guard")
+            )
+        )
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        connection.execute("DELETE FROM authority_migrations WHERE version=39")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=38")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT checked_graphiti_guard_downgrade")
+        connection.execute("RELEASE SAVEPOINT checked_graphiti_guard_downgrade")
+        raise
+    connection.execute("RELEASE SAVEPOINT checked_graphiti_guard_downgrade")
 
 
 def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:

@@ -44,6 +44,7 @@ from .models import (
     GraphitiWorkspacePolicy,
     REAL_GRAPHITI_RUNTIME_ENABLED,
     RealGraphitiRuntimeAuthority,
+    RecoveredAmbiguousProgressionProof,
 )
 from .producer import GraphitiProposalProducerBridge
 from .replay import ApprovedReplayGraphitiAdapter
@@ -151,6 +152,7 @@ __all__ = [
     "REAL_GRAPHITI_RUNTIME_ENABLED",
     "REPLAY_WORKSPACE_POLICY",
     "RealGraphitiRuntimeAuthority",
+    "RecoveredAmbiguousProgressionProof",
     "admit_graphiti_proposals_for_projectors",
     "increment4_batches_for_admitted_graphiti",
     "qualification_configuration",

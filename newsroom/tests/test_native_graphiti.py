@@ -795,6 +795,323 @@ def test_terminal_authority_outcome_is_not_retried_as_an_internal_error(
         connection.close()
 
 
+@pytest.mark.parametrize(
+    ("settled_provider_attempts", "expected_state"),
+    [((3,), "GRAPHITI_COMPLETE"), ((1, 2, 3), "GRAPHITI_HOLD")],
+)
+def test_native_recovered_ambiguous_attempt_crosses_private_attempt_gap_once(
+    tmp_path, monkeypatch, settled_provider_attempts, expected_state,
+):
+    """Exact regression: authority attempt 3, rejected private 4, successor 5."""
+    from newsroom.control_plane.store import (
+        insert_graphiti_attempt_receipt,
+        record_graphiti_failure,
+        reserve_graphiti_spend,
+    )
+    from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+    from newsroom.control_plane.model_usage import GraphitiIngestRetryEvidence
+    from newsroom.authority.canonical import digest_canonical
+    from newsroom.authority.types import UtcTimestamp
+    from newsroom.graphiti_adapter import RecoveredAmbiguousProgressionProof
+    from newsroom.graphiti_adapter.evaluation_attempt import (
+        evaluation_attempt_for_body,
+    )
+    from newsroom.tests.test_graphiti_corpus_ingest import (
+        _complete as completed_result,
+    )
+
+    prepared = []
+    attempts = []
+
+    class Runner:
+        requires_canonical_control_plane_stores = True
+
+        def prepare_recovered_ambiguous_successor(self, **values):
+            prepared.append(values)
+            current = values["unit"]
+            third = self._attempt(current, number=3)
+            instant = UtcTimestamp.parse("2026-09-09T10:41:27.849076Z")
+            self.recovery = RecoveredAmbiguousProgressionProof(
+                authoritative_attempt_id=third.attempt_id,
+                authoritative_attempt_digest=digest_canonical({"attempt": 3}),
+                authoritative_attempt_number=3,
+                authoritative_run_version_id=third.extraction_request.run_version_id,
+                authoritative_recorded_at=instant,
+                skipped_attempt_number=4,
+                skipped_receipt_digest=digest_canonical({"receipt": 4}),
+                skipped_ledger_sequence=4,
+                skipped_ledger_digest=digest_canonical({"ledger": 4}),
+                skipped_recorded_at=instant,
+                settled_usage_evidence_digest=digest_canonical({"usage": 3}),
+                recovery_marker_digest=digest_canonical({"marker": 3}),
+                marker_attempt_number=3,
+                marker_workspace_id=third.workspace_id,
+                marker_input_digest=digest_canonical({"marker-input": 3}),
+                input_binding_digest=third.extraction_request.input_binding.digest,
+                ingest_id=current.ingest_id,
+            )
+            return True
+
+        @staticmethod
+        def _attempt(current, *, number, recovery=None):
+            authority = current.authority
+            assert authority is not None
+            return evaluation_attempt_for_body(
+                episode_body=current.episode_body,
+                ingest_id=current.ingest_id,
+                proving_run_id=current.proving_run_id,
+                source_id=current.source_id,
+                item_key=current.item_key,
+                observation_digest=current.observation_digest,
+                published_at=current.published_at,
+                updated_at=current.updated_at,
+                effective_revision=current.effective_revision,
+                canonical_url=current.canonical_url,
+                revision_digest=current.revision_digest,
+                representation_digest=current.representation_digest,
+                authority_ids=(
+                    authority.admission_id,
+                    authority.access_decision_id,
+                    authority.definition_id,
+                    authority.definition_version_id,
+                    authority.item_id,
+                    authority.revision_id,
+                    authority.representation_id,
+                ),
+                attempt_number=number,
+                recovered_ambiguous_progression=recovery,
+                extraction_previous_version_number=3 if recovery else None,
+                extraction_previous_run_version_id=(
+                    recovery.authoritative_run_version_id if recovery else None
+                ),
+            )
+
+        def ingest_with_usage(self, current, **_values):
+            attempt = self._attempt(current, number=5, recovery=self.recovery)
+            attempts.append(attempt)
+            return completed_result(
+                current, proposal_count=0, entity_count=0, relation_count=0
+            )
+
+        def ingest(self, current):
+            return self.ingest_with_usage(current)
+
+        def ingest_until(self, current, **_values):
+            return self.ingest_with_usage(current)
+
+        def finalise_usage(self, *_args, **_values):
+            return None
+
+    monkeypatch.setattr(n, "EvaluationGraphitiRunner", lambda **_values: Runner())
+
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    unit = _native("recovered-gap")
+    prior = SimpleNamespace(
+        attempt_number=3,
+        outcome=GraphitiAdapterOutcome.AMBIGUOUS_EFFECT,
+        failure_code="AMBIGUOUS_EFFECT",
+        canonical_digest="sha256:" + "3" * 64,
+    )
+    processor._system.graphiti = SimpleNamespace(
+        attempt_history=lambda *_args, **_values: (prior,),
+    )
+    processor._runner = Runner()
+    processor._usage = SimpleNamespace(
+        native_graphiti_ingest_retry_evidence_many=lambda **_values: {
+            unit.ingest_id: GraphitiIngestRetryEvidence(
+                attempt_numbers=(1, 2, 3, 4),
+                zero_dispatch_attempts=(
+                    (1, 2) if settled_provider_attempts == (3,) else ()
+                ),
+                settled_provider_attempts=settled_provider_attempts,
+                latest_settled_provider_attempt=settled_provider_attempts[-1],
+                unresolved_attempts=(4,),
+            )
+        }
+    )
+    processor._settle_missing_subscription_usage = lambda _units: None
+    monkeypatch.setattr(
+        n, "graphiti_required_route_holds", lambda _usage, **_values: ()
+    )
+    monkeypatch.setattr(
+        cycle, "graphiti_required_route_holds", lambda _usage, **_values: ()
+    )
+    try:
+        for number in range(1, 5):
+            reserve_graphiti_spend(
+                connection,
+                spend_id=f"{unit.ingest_id}:{number}",
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                proving_run_id=unit.proving_run_id,
+                generation_id="test-generation",
+                reserved_gbp_microunits=500_000,
+                ceiling_gbp_microunits=None,
+            )
+            record_graphiti_failure(
+                connection,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
+                outcome=("AMBIGUOUS_EFFECT" if number == 3 else "FAILED"),
+                failure_code=(
+                    "AMBIGUOUS_EFFECT" if number == 3 else "PRODUCER_INTERNAL_ERROR"
+                ),
+            )
+            insert_graphiti_attempt_receipt(
+                connection,
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                outcome=("AMBIGUOUS_EFFECT" if number == 3 else "FAILED"),
+                receipt={
+                    "attempt_number": number,
+                    "ingest_id": unit.ingest_id,
+                    "outcome": "AMBIGUOUS_EFFECT" if number == 3 else "FAILED",
+                    **(
+                        {
+                            "binding_failure": "RESULT_CONTRACT_REJECTED",
+                            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+                            "binding_failure_type": "GraphitiAdapterVersionConflict",
+                            "chat_invocation_count": 0,
+                        }
+                        if number == 4 else {}
+                    ),
+                },
+            )
+        connection.commit()
+
+        result, = processor.advance((unit,), cycle_id="recovered-gap")
+        assert result.state == expected_state
+        assert len(prepared) == 1
+        assert prepared[0]["unit"].ingest_id == unit.ingest_id
+        assert prepared[0]["authoritative_attempt"] is prior
+        assert prepared[0]["private_successor_attempt_number"] == 5
+        assert len(attempts) == int(expected_state == "GRAPHITI_COMPLETE")
+        if not attempts:
+            return
+        assert attempts[0].attempt_number == 5
+        assert attempts[0].expected_previous_attempt_id == (
+            attempts[0].recovered_ambiguous_progression.authoritative_attempt_id
+        )
+        assert attempts[0].extraction_request.version_number == 4
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("authenticated", "settled", "unresolved", "expected_state"),
+    [
+        (True, (3, 5), (4,), "GRAPHITI_COMPLETE"),
+        (False, (3, 5), (4,), "GRAPHITI_HOLD"),
+        (True, (3,), (4, 5), "GRAPHITI_HOLD"),
+    ],
+)
+def test_native_recovered_gap_allows_only_accounted_attempt_six(
+    tmp_path, monkeypatch, authenticated, settled, unresolved, expected_state,
+):
+    """Attempt 6 retains rejection 4 without hiding a second unresolved gap."""
+    from newsroom.control_plane.model_usage import GraphitiIngestRetryEvidence
+    from newsroom.control_plane.store import (
+        insert_graphiti_attempt_receipt,
+        record_graphiti_failure,
+        reserve_graphiti_spend,
+    )
+    from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete
+
+    calls = []
+
+    class Runner:
+        requires_canonical_control_plane_stores = True
+
+        def authenticate_retained_recovered_ambiguous_progression(self, **values):
+            calls.append(("authenticate", values["next_attempt_number"]))
+            return 4 if authenticated else None
+
+        def ingest_with_usage(self, unit, **_values):
+            calls.append(("ingest", unit.attempt_number))
+            return _complete(unit, proposal_count=0, entity_count=0, relation_count=0)
+
+        ingest = ingest_with_usage
+        ingest_until = ingest_with_usage
+
+        def finalise_usage(self, *_args, **_values):
+            return None
+
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=cycle._ingest)
+    unit = _native("recovered-gap-six")
+    recovery = object()
+    head = SimpleNamespace(
+        attempt_number=5,
+        outcome=GraphitiAdapterOutcome.FAILED,
+        recovered_ambiguous_progression=recovery,
+    )
+    third = SimpleNamespace(
+        attempt_number=3,
+        outcome=GraphitiAdapterOutcome.AMBIGUOUS_EFFECT,
+    )
+    processor._system.graphiti = SimpleNamespace(
+        attempt_history=lambda *_args, **_values: (head, third),
+    )
+    processor._runner = Runner()
+    processor._usage = SimpleNamespace(
+        native_graphiti_ingest_retry_evidence_many=lambda **_values: {
+            unit.ingest_id: GraphitiIngestRetryEvidence(
+                attempt_numbers=(1, 2, 3, 4, 5),
+                zero_dispatch_attempts=(1, 2),
+                settled_provider_attempts=settled,
+                latest_settled_provider_attempt=settled[-1],
+                unresolved_attempts=unresolved,
+            )
+        }
+    )
+    processor._settle_missing_subscription_usage = lambda _units: None
+    monkeypatch.setattr(n, "graphiti_required_route_holds", lambda *_args, **_values: ())
+    monkeypatch.setattr(cycle, "graphiti_required_route_holds", lambda *_args, **_values: ())
+    try:
+        for number in range(1, 6):
+            reserve_graphiti_spend(
+                connection,
+                spend_id=f"{unit.ingest_id}:{number}",
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                proving_run_id=unit.proving_run_id,
+                generation_id="test-generation",
+                reserved_gbp_microunits=500_000,
+                ceiling_gbp_microunits=None,
+            )
+            record_graphiti_failure(
+                connection,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
+                outcome="FAILED",
+                failure_code="PRODUCER_INTERNAL_ERROR",
+            )
+            insert_graphiti_attempt_receipt(
+                connection,
+                ingest_id=unit.ingest_id,
+                attempt_number=number,
+                outcome="FAILED",
+                receipt={
+                    "attempt_number": number,
+                    "ingest_id": unit.ingest_id,
+                    "outcome": "FAILED",
+                },
+            )
+        connection.commit()
+
+        result, = processor.advance((unit,), cycle_id="recovered-gap-six")
+        assert result.state == expected_state
+        assert calls[0] == ("authenticate", 6)
+        if expected_state == "GRAPHITI_COMPLETE":
+            assert ("ingest", 6) in calls
+        else:
+            assert len(calls) == 1
+    finally:
+        connection.close()
+
+
 def test_native_quantum_reports_exact_deferred_ids_and_never_projects_chunk_prefix(tmp_path, monkeypatch):
     from newsroom.tests.test_graphiti_corpus_ingest import _complete as completed_result
     from newsroom.control_plane.corpus import MAX_EPISODE_BYTES

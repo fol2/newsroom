@@ -32,6 +32,7 @@ from .models import (
     GraphitiReplayApprovalRequest,
     GraphitiWorkspacePolicy,
     RealGraphitiRuntimeAuthority,
+    RecoveredAmbiguousProgressionProof,
 )
 from .types import (
     GraphitiAdapterConfigurationId,
@@ -400,6 +401,9 @@ def _attempt_payload(value: Any) -> bytes:
             "predecessor_episode_uuid",
         }
     )
+    supplied_keys = frozenset(value) if isinstance(value, dict) else frozenset()
+    if "recovered_ambiguous_progression" in supplied_keys:
+        keys = keys | {"recovered_ambiguous_progression"}
     item = _object(value, field="graphiti_adapter_attempt", keys=keys)
     attempt_number = _integer(item["attempt_number"], field="attempt_number")
     if attempt_number <= 0 or attempt_number > 1_000_000:
@@ -472,6 +476,25 @@ def _attempt_payload(value: Any) -> bytes:
                 "episode predecessor cannot name the current episode"
             )
     _string(item["generation_id"], field="generation_id")
+    if "recovered_ambiguous_progression" in item:
+        try:
+            recovery = RecoveredAmbiguousProgressionProof.from_canonical_value(
+                item["recovered_ambiguous_progression"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise PayloadSchemaValidationError(
+                f"recovered_ambiguous_progression is invalid: {exc}"
+            ) from exc
+        if (
+            recovery.skipped_attempt_number + 1 != attempt_number
+            or str(recovery.authoritative_attempt_id)
+            != item["expected_previous_attempt_id"]
+            or recovery.authoritative_attempt_number + 1 != version_number
+            or recovery.ingest_id != episode_uuid
+        ):
+            raise PayloadSchemaValidationError(
+                "recovered ambiguous progression differs from the attempt"
+            )
     return canonical_json_bytes(item)
 
 

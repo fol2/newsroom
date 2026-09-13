@@ -58,6 +58,7 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     SUCCESSOR_LEDGER_SEQ,
 )
 from newsroom.control_plane.model_usage import (
+    GraphitiIngestRetryEvidence,
     InvocationAllocation,
     InvocationEfficiencyPolicy,
     InvocationTerminal,
@@ -68,6 +69,7 @@ from newsroom.control_plane.model_usage import (
     UsageStatus,
     WorkEnvelope,
     WorkloadClass,
+    native_graphiti_usage_cycle_id,
 )
 from newsroom.graphiti_adapter.cli_process import timeout_diagnostic
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
@@ -2124,6 +2126,161 @@ def test_graphiti_retry_evidence_batch_authenticates_history_once(tmp_path, monk
     assert sorted(decoded_envelopes) == sorted(decoded_allocations) == [
         "second-ingest", "selected-ingest", "unrelated-ingest",
     ]
+
+
+def test_recovered_ambiguous_usage_rejects_rehashed_outcome_rebinding(
+    tmp_path, monkeypatch,
+):
+    service = _service(tmp_path)
+    ingest_id = "recovered-ambiguous-ingest"
+
+    def envelope(number):
+        return WorkEnvelope.create(
+            cycle_id=native_graphiti_usage_cycle_id(
+                ingest_id=ingest_id, attempt_number=number
+            ),
+            workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            admitted_at=T0 + timedelta(seconds=number),
+            admission_decision_id=None,
+            candidate_id=None,
+            hypothesis_digest=None,
+            evidence_package_digest=None,
+            ingest_id=ingest_id,
+            graphiti_attempt_id=f"{ingest_id}:{number}",
+        )
+
+    third, fourth = envelope(3), envelope(4)
+    service.open_envelope(third)
+    service.open_envelope(fourth)
+    receipt_digest = _digest({"private": "receipt-4"})
+    service.record_work_outcome(
+        envelope_id=fourth.envelope_id,
+        outcome="GRAPHITI_REJECTED_BINDING",
+        outcome_record_id=receipt_digest,
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=4),
+        retained_proposal_count=0,
+    )
+    evidence = GraphitiIngestRetryEvidence(
+        attempt_numbers=(3, 4),
+        zero_dispatch_attempts=(),
+        settled_provider_attempts=(3,),
+        latest_settled_provider_attempt=3,
+        unresolved_attempts=(4,),
+    )
+    monkeypatch.setattr(
+        ModelUsageService,
+        "native_graphiti_ingest_retry_evidence_many",
+        lambda *_args, **_values: {ingest_id: evidence},
+    )
+    service.native_recovered_ambiguous_usage_evidence_digest(
+        ingest_id=ingest_id,
+        authoritative_attempt_number=3,
+        skipped_attempt_number=4,
+        skipped_receipt_digest=receipt_digest,
+        skipped_recorded_at=T0 + timedelta(seconds=5),
+    )
+
+    with sqlite3.connect(service.path) as connection:
+        record = json.loads(connection.execute(
+            "SELECT record_json FROM model_work_outcomes WHERE envelope_id=?",
+            (fourth.envelope_id,),
+        ).fetchone()[0])
+        record.pop("outcome_digest")
+        record["outcome_record_id"] = _digest({"private": "forged"})
+        forged_digest = digest_canonical(record)
+        record["outcome_digest"] = forged_digest
+        connection.execute(
+            "UPDATE model_work_outcomes SET outcome_digest=?,record_json=? "
+            "WHERE envelope_id=?",
+            (forged_digest, json.dumps(record), fourth.envelope_id),
+        )
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="skipped usage record differs",
+    ):
+        service.native_recovered_ambiguous_usage_evidence_digest(
+            ingest_id=ingest_id,
+            authoritative_attempt_number=3,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=receipt_digest,
+            skipped_recorded_at=T0 + timedelta(seconds=5),
+        )
+
+    fifth = envelope(5)
+    policy = _policy(workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY)
+    service.register_policy(policy)
+    service.open_envelope(fifth)
+    service.allocate(_allocation(fifth, policy), owner_emergency_stop=False)
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="later allocation is retained",
+    ):
+        service.native_recovered_ambiguous_usage_evidence_digest(
+            ingest_id=ingest_id,
+            authoritative_attempt_number=3,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=receipt_digest,
+            skipped_recorded_at=T0 + timedelta(seconds=5),
+        )
+
+
+def test_recovered_gap_observer_rebinds_usage_for_attempt_six() -> None:
+    digest = _digest({"usage": "attempt-3-and-rejection-4"})
+    proof = SimpleNamespace(
+        authoritative_attempt_number=3,
+        skipped_attempt_number=4,
+        skipped_receipt_digest=_digest({"receipt": 4}),
+        skipped_recorded_at=SimpleNamespace(value=T0 + timedelta(seconds=4)),
+        settled_usage_evidence_digest=digest,
+    )
+    envelope = WorkEnvelope.create(
+        cycle_id=native_graphiti_usage_cycle_id(
+            ingest_id="recovered-observer", attempt_number=6
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="recovered-observer",
+        graphiti_attempt_id="recovered-observer:6",
+    )
+    observer = object.__new__(GraphitiModelUsageObserver)
+    observer._service = SimpleNamespace(
+        native_recovered_ambiguous_usage_evidence_digest=lambda **values: (
+            digest if values["latest_allowed_attempt_number"] == 5 else "stale"
+        )
+    )
+    observer._ingest_obligation_id = "recovered-observer"
+    observer._provider_attempt_number = 6
+    observer._envelope = envelope
+    observer._recovered_ambiguous_progression = proof
+    observer._retry_evidence = GraphitiIngestRetryEvidence(
+        attempt_numbers=(1, 2, 3, 4, 5),
+        zero_dispatch_attempts=(1, 2),
+        settled_provider_attempts=(3, 5),
+        latest_settled_provider_attempt=5,
+        unresolved_attempts=(4,),
+    )
+
+    assert observer.allows_fresh_completed_rollback_retry(
+        episode_uuid="recovered-observer",
+        attempt_number=6,
+        prior_attempt_number=5,
+    )
+    observer._service = SimpleNamespace(
+        native_recovered_ambiguous_usage_evidence_digest=lambda **_values: (
+            _digest({"usage": "later-allocation"})
+        )
+    )
+    assert not observer.allows_fresh_completed_rollback_retry(
+        episode_uuid="recovered-observer",
+        attempt_number=6,
+        prior_attempt_number=5,
+    )
 
 
 @pytest.mark.parametrize("table,field", (

@@ -803,6 +803,8 @@ def _queue(
     *,
     model_usage: ModelUsageService | None = None,
     preserve_unit_order: bool = False,
+    recovered_ambiguous_attempts: Mapping[str, int] | None = None,
+    authenticated_rejected_attempts: Mapping[str, tuple[int, ...]] | None = None,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
     pending = []
@@ -817,7 +819,13 @@ def _queue(
         ):
             continue
         pending.append((unit, ingest_id, retries, dead))
-    failed_attempts = {ingest_id: retries for _, ingest_id, retries, dead in pending if dead}
+    recovered_ambiguous_attempts = recovered_ambiguous_attempts or {}
+    authenticated_rejected_attempts = authenticated_rejected_attempts or {}
+    failed_attempts = {
+        ingest_id: retries
+        for _, ingest_id, retries, dead in pending
+        if dead
+    }
     retry_evidence = (
         model_usage.native_graphiti_ingest_retry_evidence_many(
             failed_attempts=failed_attempts, max_attempts=2 * GRAPHITI_MAX_FAILURES,
@@ -826,20 +834,37 @@ def _queue(
     )
     for unit, ingest_id, retries, dead in pending:
         if dead:
+            recovered_attempt = recovered_ambiguous_attempts.get(ingest_id)
+            next_attempt = next_graphiti_attempt_number(unpublished, ingest_id)
+            if recovered_attempt is not None and next_attempt != recovered_attempt:
+                continue
             evidence = retry_evidence[ingest_id]
-            # Credit only proved local refusals in the original allowance.
-            # Later failures cannot mint further credits: at most three useful
-            # provider attempts and six total attempts, with history intact.
+            rejected = tuple(authenticated_rejected_attempts.get(ingest_id, ()))
+            if (
+                len(set(rejected)) != len(rejected)
+                or any(number not in evidence.unresolved_attempts for number in rejected)
+            ):
+                continue
+            unresolved = tuple(
+                number for number in evidence.unresolved_attempts
+                if number not in rejected
+            )
+            # Credit only proved local refusals in the original allowance.  The
+            # authenticated historical binding rejection is a separate credit;
+            # it remains unresolved and is never represented as zero usage.
             credits = sum(
                 number <= GRAPHITI_MAX_FAILURES
                 for number in evidence.zero_dispatch_attempts
+            ) + len(rejected)
+            limit = min(
+                2 * GRAPHITI_MAX_FAILURES,
+                GRAPHITI_MAX_FAILURES + credits,
             )
-            limit = GRAPHITI_MAX_FAILURES + credits
             if (
-                evidence.unresolved_attempts
+                unresolved
                 or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
                 or retries >= limit
-                or next_graphiti_attempt_number(unpublished, ingest_id) > limit
+                or next_attempt > limit
             ):
                 continue
         if (
@@ -1184,6 +1209,8 @@ def _ingest(
     defer_before_unit: Callable[[CorpusIngestUnit], bool] = lambda _: False,
     preserve_unit_order: bool = False,
     fallback_permitted: bool = False,
+    recovered_ambiguous_attempts: Mapping[str, int] | None = None,
+    authenticated_rejected_attempts: Mapping[str, tuple[int, ...]] | None = None,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1247,6 +1274,8 @@ def _ingest(
     ) in _queue(
         unpublished, units, model_usage=model_usage,
         preserve_unit_order=preserve_unit_order,
+        recovered_ambiguous_attempts=recovered_ambiguous_attempts,
+        authenticated_rejected_attempts=authenticated_rejected_attempts,
     ):
         # A routine operator drain is distinct from the signed owner stop.  It
         # is observed only here, between fully settled ingest attempts, so it

@@ -928,6 +928,203 @@ class GraphitiReplayApprovalRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveredAmbiguousProgressionProof:
+    """Authenticated evidence for one exact rolled-back ambiguous attempt gap."""
+
+    authoritative_attempt_id: GraphitiAttemptId
+    authoritative_attempt_digest: str
+    authoritative_attempt_number: int
+    authoritative_run_version_id: ExtractionRunVersionId
+    authoritative_recorded_at: UtcTimestamp
+    skipped_attempt_number: int
+    skipped_receipt_digest: str
+    skipped_ledger_sequence: int
+    skipped_ledger_digest: str
+    skipped_recorded_at: UtcTimestamp
+    settled_usage_evidence_digest: str
+    recovery_marker_digest: str
+    marker_attempt_number: int
+    marker_workspace_id: GraphitiWorkspaceId
+    marker_input_digest: str
+    input_binding_digest: str
+    ingest_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.authoritative_attempt_id, GraphitiAttemptId):
+            raise GraphitiAdapterContractError(
+                "recovery authority attempt identity must be typed"
+            )
+        if not isinstance(
+            self.authoritative_run_version_id, ExtractionRunVersionId
+        ):
+            raise GraphitiAdapterContractError(
+                "recovery authority run version must be typed"
+            )
+        if not isinstance(self.marker_workspace_id, GraphitiWorkspaceId):
+            raise GraphitiAdapterContractError(
+                "recovery marker workspace identity must be typed"
+            )
+        integer(
+            self.authoritative_attempt_number,
+            field="recovery_authoritative_attempt_number",
+            minimum=1,
+            maximum=999_998,
+        )
+        integer(
+            self.skipped_attempt_number,
+            field="recovery_skipped_attempt_number",
+            minimum=2,
+            maximum=999_999,
+        )
+        integer(
+            self.skipped_ledger_sequence,
+            field="recovery_skipped_ledger_sequence",
+            minimum=1,
+            maximum=9_223_372_036_854_775_807,
+        )
+        integer(
+            self.marker_attempt_number,
+            field="recovery_marker_attempt_number",
+            minimum=1,
+            maximum=999_998,
+        )
+        for name, value in (
+            ("authoritative_attempt_digest", self.authoritative_attempt_digest),
+            ("skipped_receipt_digest", self.skipped_receipt_digest),
+            ("skipped_ledger_digest", self.skipped_ledger_digest),
+            ("settled_usage_evidence_digest", self.settled_usage_evidence_digest),
+            ("recovery_marker_digest", self.recovery_marker_digest),
+            ("marker_input_digest", self.marker_input_digest),
+            ("input_binding_digest", self.input_binding_digest),
+        ):
+            digest(value, field=f"recovery_{name}")
+        if (
+            not isinstance(self.authoritative_recorded_at, UtcTimestamp)
+            or not isinstance(self.skipped_recorded_at, UtcTimestamp)
+        ):
+            raise GraphitiAdapterContractError("recovery evidence times must be typed")
+        if self.authoritative_recorded_at.value > self.skipped_recorded_at.value:
+            raise GraphitiAdapterContractError(
+                "rejected successor evidence predates ambiguous authority"
+            )
+        if (
+            self.skipped_attempt_number != self.authoritative_attempt_number + 1
+            or self.marker_attempt_number != self.authoritative_attempt_number
+        ):
+            raise GraphitiAdapterContractError(
+                "recovery evidence does not describe one exact attempt gap"
+            )
+        text(self.ingest_id, field="recovery_ingest_id", maximum_bytes=128)
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "authoritative_attempt_id": str(self.authoritative_attempt_id),
+            "authoritative_attempt_digest": self.authoritative_attempt_digest,
+            "authoritative_attempt_number": self.authoritative_attempt_number,
+            "authoritative_run_version_id": str(self.authoritative_run_version_id),
+            "authoritative_recorded_at": self.authoritative_recorded_at.to_text(),
+            "skipped_attempt_number": self.skipped_attempt_number,
+            "skipped_receipt_digest": self.skipped_receipt_digest,
+            "skipped_ledger_sequence": self.skipped_ledger_sequence,
+            "skipped_ledger_digest": self.skipped_ledger_digest,
+            "skipped_recorded_at": self.skipped_recorded_at.to_text(),
+            "settled_usage_evidence_digest": self.settled_usage_evidence_digest,
+            "recovery_marker_digest": self.recovery_marker_digest,
+            "marker_attempt_number": self.marker_attempt_number,
+            "marker_workspace_id": str(self.marker_workspace_id),
+            "marker_input_digest": self.marker_input_digest,
+            "input_binding_digest": self.input_binding_digest,
+            "ingest_id": self.ingest_id,
+        }
+
+    @classmethod
+    def from_canonical_value(
+        cls, value: object
+    ) -> RecoveredAmbiguousProgressionProof:
+        if not isinstance(value, dict) or set(value) != {
+            "authoritative_attempt_id",
+            "authoritative_attempt_digest",
+            "authoritative_attempt_number",
+            "authoritative_run_version_id",
+            "authoritative_recorded_at",
+            "skipped_attempt_number",
+            "skipped_receipt_digest",
+            "skipped_ledger_sequence",
+            "skipped_ledger_digest",
+            "skipped_recorded_at",
+            "settled_usage_evidence_digest",
+            "recovery_marker_digest",
+            "marker_attempt_number",
+            "marker_workspace_id",
+            "marker_input_digest",
+            "input_binding_digest",
+            "ingest_id",
+        }:
+            raise GraphitiAdapterContractError(
+                "ambiguous progression recovery proof is not canonical"
+            )
+        for key in (
+            "authoritative_attempt_number",
+            "skipped_attempt_number",
+            "skipped_ledger_sequence",
+            "marker_attempt_number",
+        ):
+            if type(value[key]) is not int:
+                raise GraphitiAdapterContractError(
+                    "ambiguous progression recovery proof is malformed"
+                )
+        for key in set(value) - {
+            "authoritative_attempt_number",
+            "skipped_attempt_number",
+            "skipped_ledger_sequence",
+            "marker_attempt_number",
+        }:
+            if not isinstance(value[key], str):
+                raise GraphitiAdapterContractError(
+                    "ambiguous progression recovery proof is malformed"
+                )
+        try:
+            proof = cls(
+                authoritative_attempt_id=GraphitiAttemptId.parse(
+                    value["authoritative_attempt_id"]
+                ),
+                authoritative_attempt_digest=value["authoritative_attempt_digest"],
+                authoritative_attempt_number=value["authoritative_attempt_number"],
+                authoritative_run_version_id=ExtractionRunVersionId.parse(
+                    value["authoritative_run_version_id"]
+                ),
+                authoritative_recorded_at=UtcTimestamp.parse(
+                    value["authoritative_recorded_at"]
+                ),
+                skipped_attempt_number=value["skipped_attempt_number"],
+                skipped_receipt_digest=value["skipped_receipt_digest"],
+                skipped_ledger_sequence=value["skipped_ledger_sequence"],
+                skipped_ledger_digest=value["skipped_ledger_digest"],
+                skipped_recorded_at=UtcTimestamp.parse(
+                    value["skipped_recorded_at"]
+                ),
+                settled_usage_evidence_digest=value["settled_usage_evidence_digest"],
+                recovery_marker_digest=value["recovery_marker_digest"],
+                marker_attempt_number=value["marker_attempt_number"],
+                marker_workspace_id=GraphitiWorkspaceId.parse(
+                    value["marker_workspace_id"]
+                ),
+                marker_input_digest=value["marker_input_digest"],
+                input_binding_digest=value["input_binding_digest"],
+                ingest_id=value["ingest_id"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GraphitiAdapterContractError(
+                "ambiguous progression recovery proof is malformed"
+            ) from exc
+        if proof.canonical_value() != value:
+            raise GraphitiAdapterContractError(
+                "ambiguous progression recovery proof is not canonical"
+            )
+        return proof
+
+
+@dataclass(frozen=True, slots=True)
 class GraphitiAdapterConfigurationRecord:
     configuration: GraphitiAdapterConfiguration
     authority_event_id: EventId
@@ -979,6 +1176,7 @@ class GraphitiAttemptRecord:
     cleanup_receipt: GraphitiCleanupReceipt
     authority_event_id: EventId
     recorded_at: UtcTimestamp
+    recovered_ambiguous_progression: RecoveredAmbiguousProgressionProof | None = None
     attempt_receipt: dict[str, Any] | None = None
     replayed: bool = False
 
@@ -1044,6 +1242,13 @@ class GraphitiAttemptRecord:
                 raise GraphitiAdapterContractError(
                     "retained attempt receipt cannot duplicate structured output"
                 )
+        if self.recovered_ambiguous_progression is not None and not isinstance(
+            self.recovered_ambiguous_progression,
+            RecoveredAmbiguousProgressionProof,
+        ):
+            raise GraphitiAdapterContractError(
+                "retained ambiguous progression recovery proof must be typed"
+            )
         if not isinstance(self.cleanup_receipt, GraphitiCleanupReceipt):
             raise GraphitiAdapterContractError(
                 "retained cleanup receipt must be typed"
@@ -1091,6 +1296,43 @@ class GraphitiAttemptRecord:
     @property
     def terminal(self) -> bool:
         return self.outcome.terminal
+
+    def canonical_value(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "attempt_id": str(self.attempt_id),
+            "run_id": str(self.run_id),
+            "run_version_id": str(self.run_version_id),
+            "attempt_number": self.attempt_number,
+            "previous_attempt_id": (
+                None
+                if self.previous_attempt_id is None
+                else str(self.previous_attempt_id)
+            ),
+            "configuration_id": str(self.configuration_id),
+            "configuration_digest": self.configuration_digest,
+            "workspace_id": str(self.workspace_id),
+            "manifest_id": str(self.manifest_id),
+            "outcome": self.outcome.value,
+            "failure_code": self.failure_code,
+            "started_at": self.started_at.to_text(),
+            "ended_at": self.ended_at.to_text(),
+            "usage": self.usage.canonical_value(),
+            "output_id": None if self.output_id is None else str(self.output_id),
+            "proposal_set_id": (
+                None if self.proposal_set_id is None else str(self.proposal_set_id)
+            ),
+            "cleanup_receipt_id": str(self.cleanup_receipt.receipt_id),
+            "cleanup_receipt_digest": self.cleanup_receipt.canonical_digest,
+        }
+        if self.recovered_ambiguous_progression is not None:
+            value["recovered_ambiguous_progression"] = (
+                self.recovered_ambiguous_progression.canonical_value()
+            )
+        return value
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_canonical(self.canonical_value())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1181,6 +1423,7 @@ class GraphitiAttemptRequest:
     episode_uuid: str | None = None
     generation_id: str = ""
     predecessor_episode_uuid: str | None = None
+    recovered_ambiguous_progression: RecoveredAmbiguousProgressionProof | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, GraphitiAttemptId):
@@ -1276,6 +1519,31 @@ class GraphitiAttemptRequest:
             maximum_bytes=128,
             allow_empty=True,
         )
+        recovery = self.recovered_ambiguous_progression
+        if recovery is not None:
+            if not isinstance(recovery, RecoveredAmbiguousProgressionProof):
+                raise GraphitiAdapterContractError(
+                    "ambiguous progression recovery proof must be typed"
+                )
+            if (
+                self.configuration.runtime_mode
+                is not GraphitiRuntimeMode.REAL_GRAPHITI
+                or self.configuration.execution_profile
+                is not GraphitiExecutionProfile.EVALUATION
+                or self.attempt_number != recovery.skipped_attempt_number + 1
+                or self.expected_previous_attempt_id
+                != recovery.authoritative_attempt_id
+                or self.extraction_request.version_number
+                != recovery.authoritative_attempt_number + 1
+                or self.extraction_request.expected_previous_version_id
+                != recovery.authoritative_run_version_id
+                or self.extraction_request.input_binding.digest
+                != recovery.input_binding_digest
+                or self.episode_uuid != recovery.ingest_id
+            ):
+                raise GraphitiAdapterContractError(
+                    "ambiguous progression recovery proof differs from the attempt"
+                )
 
     def canonical_value(self) -> dict[str, object]:
         value = {
@@ -1317,6 +1585,10 @@ class GraphitiAttemptRequest:
             "generation_id": self.generation_id,
             "predecessor_episode_uuid": self.predecessor_episode_uuid,
         }
+        if self.recovered_ambiguous_progression is not None:
+            value["recovered_ambiguous_progression"] = (
+                self.recovered_ambiguous_progression.canonical_value()
+            )
         reject_private_graph_state(value)
         return value
 

@@ -41,6 +41,82 @@ from ._graphiti_adapter_store_common import graphiti_event_digest
 
 
 class _GraphitiAdapterCommitMixin:
+    def _require_graphiti_attempt_progression(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        attempt: GraphitiAttemptRequest,
+        head: sqlite3.Row | None,
+        require_extraction_predecessor: bool,
+    ) -> None:
+        recovery = attempt.recovered_ambiguous_progression
+        if attempt.attempt_number == 1:
+            if head is not None or recovery is not None:
+                raise GraphitiAdapterVersionConflict(
+                    "initial adapter attempt already has a current head"
+                )
+            return
+        if recovery is None:
+            if (
+                head is None
+                or int(head["current_attempt_number"])
+                != attempt.attempt_number - 1
+                or str(head["current_attempt_id"])
+                != str(attempt.expected_previous_attempt_id)
+                or bool(head["terminal"])
+            ):
+                raise GraphitiAdapterVersionConflict(
+                    "adapter attempt does not extend the current non-terminal head"
+                )
+            return
+        if (
+            head is None
+            or int(head["current_attempt_number"])
+            != recovery.authoritative_attempt_number
+            or str(head["current_attempt_id"])
+            != str(recovery.authoritative_attempt_id)
+            or not bool(head["terminal"])
+        ):
+            raise GraphitiAdapterVersionConflict(
+                "recovered adapter attempt does not extend the exact ambiguous head"
+            )
+        row = self._graphiti_attempt_row(conn, recovery.authoritative_attempt_id)
+        retained = self._graphiti_attempt_from_row(conn, row, replayed=False)
+        retained_version = self._validate_graphiti_attempt_lineage(conn, retained)
+        if (
+            retained.outcome is not GraphitiAdapterOutcome.AMBIGUOUS_EFFECT
+            or retained.attempt_number != recovery.authoritative_attempt_number
+            or retained.run_id != attempt.extraction_request.run_id
+            or retained.run_version_id != recovery.authoritative_run_version_id
+            or retained.workspace_id != recovery.marker_workspace_id
+            or retained.canonical_digest != recovery.authoritative_attempt_digest
+            or retained.recorded_at != recovery.authoritative_recorded_at
+            or retained_version.request.input_binding.digest
+            != recovery.input_binding_digest
+            or attempt.extraction_request.input_binding.digest
+            != recovery.input_binding_digest
+        ):
+            raise GraphitiAdapterVersionConflict(
+                "ambiguous recovery proof differs from retained authority"
+            )
+        if require_extraction_predecessor:
+            extraction_head = conn.execute(
+                "SELECT current_version_number,current_run_version_id,terminal "
+                "FROM extraction_run_heads WHERE run_id=?",
+                (str(retained.run_id),),
+            ).fetchone()
+            if (
+                extraction_head is None
+                or int(extraction_head["current_version_number"])
+                != retained_version.request.version_number
+                or str(extraction_head["current_run_version_id"])
+                != str(retained.run_version_id)
+                or bool(extraction_head["terminal"])
+            ):
+                raise GraphitiAdapterVersionConflict(
+                    "ambiguous recovery does not extend the extraction head"
+                )
+
     def commit_graphiti_configuration(
         self,
         grant: _AuthorizedCommandGrant,
@@ -227,22 +303,12 @@ class _GraphitiAdapterCommitMixin:
             head = self._graphiti_attempt_head_row(
                 conn, attempt.extraction_request.run_id
             )
-            if attempt.attempt_number == 1:
-                if head is not None:
-                    raise GraphitiAdapterVersionConflict(
-                        "initial adapter attempt already has a current head"
-                    )
-            elif (
-                head is None
-                or int(head["current_attempt_number"])
-                != attempt.attempt_number - 1
-                or str(head["current_attempt_id"])
-                != str(attempt.expected_previous_attempt_id)
-                or bool(head["terminal"])
-            ):
-                raise GraphitiAdapterVersionConflict(
-                    "adapter attempt does not extend the current non-terminal head"
-                )
+            self._require_graphiti_attempt_progression(
+                conn,
+                attempt=attempt,
+                head=head,
+                require_extraction_predecessor=True,
+            )
             if attempt.replay_source is not None:
                 replay_row = conn.execute(
                     "SELECT * FROM graphiti_replay_sources WHERE replay_source_id=?",
@@ -394,21 +460,12 @@ class _GraphitiAdapterCommitMixin:
                 identity=identity,
             )
         head = self._graphiti_attempt_head_row(conn, result.request.run_id)
-        if attempt.attempt_number == 1:
-            if head is not None:
-                raise GraphitiAdapterVersionConflict(
-                    "initial adapter attempt already has a current head"
-                )
-        elif (
-            head is None
-            or int(head["current_attempt_number"]) != attempt.attempt_number - 1
-            or str(head["current_attempt_id"])
-            != str(attempt.expected_previous_attempt_id)
-            or bool(head["terminal"])
-        ):
-            raise GraphitiAdapterVersionConflict(
-                "adapter attempt does not extend the current non-terminal head"
-            )
+        self._require_graphiti_attempt_progression(
+            conn,
+            attempt=attempt,
+            head=head,
+            require_extraction_predecessor=False,
+        )
 
         committed = self._commit_grant_in_transaction(
             conn, adapter_grant, recorded_at=recorded_at.to_text()
@@ -589,6 +646,10 @@ class _GraphitiAdapterCommitMixin:
             "cleanup_receipt_id": str(cleanup.receipt_id),
             "cleanup_receipt_digest": cleanup.canonical_digest,
         }
+        if attempt.recovered_ambiguous_progression is not None:
+            attempt_value["recovered_ambiguous_progression"] = (
+                attempt.recovered_ambiguous_progression.canonical_value()
+            )
         attempt_bytes = canonical_json_bytes(attempt_value)
         conn.execute(
             "INSERT INTO graphiti_adapter_attempts("

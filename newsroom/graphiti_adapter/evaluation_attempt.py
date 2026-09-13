@@ -60,7 +60,12 @@ from .evaluation_packet import (
     GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_GENERATION_ID,
 )
-from .models import GraphitiAdapterConfiguration, GraphitiAttemptRequest, GraphitiInputManifest
+from .models import (
+    GraphitiAdapterConfiguration,
+    GraphitiAttemptRequest,
+    GraphitiInputManifest,
+    RecoveredAmbiguousProgressionProof,
+)
 from .types import (
     GraphitiAdapterConfigurationId,
     GraphitiExecutionProfile,
@@ -153,6 +158,9 @@ def evaluation_attempt_for_body(
     authority_ids: tuple[str, str, str, str, str, str, str] | None = None,
     attempt_number: int = 1,
     predecessor_episode_uuid: str | None = None,
+    recovered_ambiguous_progression: RecoveredAmbiguousProgressionProof | None = None,
+    extraction_previous_version_number: int | None = None,
+    extraction_previous_run_version_id: ExtractionRunVersionId | None = None,
 ) -> GraphitiAttemptRequest:
     text = " ".join(episode_body.split())
     if not text:
@@ -167,7 +175,13 @@ def evaluation_attempt_for_body(
     )
     attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id, attempt_number)
     previous_attempt_id = (
-        None if attempt_number == 1 else attempt_ids(ingest_id, attempt_number - 1)[0]
+        recovered_ambiguous_progression.authoritative_attempt_id
+        if recovered_ambiguous_progression is not None
+        else (
+            None
+            if attempt_number == 1
+            else attempt_ids(ingest_id, attempt_number - 1)[0]
+        )
     )
     if authority_ids is None:
         revision_digest = revision_digest or content_digest(
@@ -254,24 +268,56 @@ def evaluation_attempt_for_body(
         idempotency_key="evaluation-graphiti-configuration-v2",
     )
     native_attempt = proving_run_id == f"native-source:{observation_digest}"
+    if (extraction_previous_version_number is None) != (
+        extraction_previous_run_version_id is None
+    ):
+        raise ValueError(
+            "extraction predecessor version and identity must be supplied together"
+        )
+    if recovered_ambiguous_progression is not None:
+        if extraction_previous_version_number is None:
+            extraction_previous_version_number = (
+                recovered_ambiguous_progression.authoritative_attempt_number
+            )
+            extraction_previous_run_version_id = (
+                recovered_ambiguous_progression.authoritative_run_version_id
+            )
+        elif (
+            extraction_previous_version_number
+            != recovered_ambiguous_progression.authoritative_attempt_number
+            or extraction_previous_run_version_id
+            != recovered_ambiguous_progression.authoritative_run_version_id
+        ):
+            raise ValueError("recovery proof differs from the extraction predecessor")
+    extraction_version_number = (
+        extraction_previous_version_number + 1
+        if extraction_previous_version_number is not None
+        else attempt_number
+    )
     run_version_id = typed_id(
         ExtractionRunVersionId,
         "run-version",
-        f"{ingest_id}:attempt:{attempt_number}" if native_attempt else ingest_id,
+        f"{ingest_id}:attempt:{extraction_version_number}"
+        if native_attempt
+        else ingest_id,
     )
     previous_run_version_id = (
-        typed_id(
-            ExtractionRunVersionId,
-            "run-version",
-            f"{ingest_id}:attempt:{attempt_number - 1}",
+        extraction_previous_run_version_id
+        if extraction_previous_run_version_id is not None
+        else (
+            typed_id(
+                ExtractionRunVersionId,
+                "run-version",
+                f"{ingest_id}:attempt:{extraction_version_number - 1}",
+            )
+            if native_attempt and extraction_version_number > 1
+            else None
         )
-        if native_attempt and attempt_number > 1
-        else None
     )
     request = ExtractionRunRequest(
         run_id=typed_id(ExtractionRunId, "run", ingest_id),
         run_version_id=run_version_id,
-        version_number=attempt_number if native_attempt else 1,
+        version_number=extraction_version_number if native_attempt else 1,
         expected_previous_version_id=previous_run_version_id,
         contract_id=contract.contract_id,
         input_binding=ExtractionInputBinding(
@@ -329,6 +375,7 @@ def evaluation_attempt_for_body(
         episode_uuid=ingest_id,
         generation_id=GRAPHITI_GENERATION_ID,
         predecessor_episode_uuid=predecessor_episode_uuid,
+        recovered_ambiguous_progression=recovered_ambiguous_progression,
     )
 
 

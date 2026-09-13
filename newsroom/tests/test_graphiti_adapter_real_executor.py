@@ -2706,9 +2706,12 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     configuration, revision = _combined_runtime_inputs("Body", "episode-id")
 
     class Proof:
-        def __init__(self, allowed: bool, settled: bool) -> None:
+        def __init__(
+            self, allowed: bool, settled: bool, recovered_allowed: bool
+        ) -> None:
             self.allowed = allowed
             self.settled = settled
+            self.recovered_allowed = recovered_allowed
 
         def allows_fresh_zero_dispatch_retry(
             self, *, episode_uuid: str, attempt_number: int
@@ -2729,8 +2732,16 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
                 and prior_attempt_number == attempt_number - 1
             )
 
+        def allows_fresh_recovered_ambiguous_retry(self, **_values: object) -> bool:
+            return self.recovered_allowed
+
     async def run(
-        attempt_number: int, *, allowed: bool, settled: bool = False
+        attempt_number: int,
+        *,
+        allowed: bool,
+        settled: bool = False,
+        recovered: object | None = None,
+        recovered_allowed: bool = False,
     ) -> None:
         await real._add_episode(
             api_key="key",
@@ -2745,8 +2756,9 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
             restore_result=lambda raw, _telemetry: restored.append(dict(raw)),
             configuration=configuration,
             revision=revision,
-            invocation_observer=Proof(allowed, settled),
+            invocation_observer=Proof(allowed, settled, recovered_allowed),
             retry_snapshot_is_failed=lambda raw: "failure" in raw,
+            recovered_ambiguous_progression=recovered,
         )
 
     complete_attempt_2 = {
@@ -2811,6 +2823,61 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     }
     asyncio.run(run(5, allowed=False, settled=True))
     assert provider_calls == 3
+    assert markers["episode-id:attempt:5"] == {"success": "attempt-3"}
+
+    del markers["episode-id:attempt:4"]
+    del markers["episode-id:attempt:5"]
+    markers["episode-id:attempt:3"] = {"state": "RECOVERED_AMBIGUOUS"}
+    marker_input = digest_canonical(
+        {
+            "episode_uuid": "episode-id",
+            "name": "episode-id",
+            "body": "Body",
+            "reference_time": datetime(2026, 8, 20, tzinfo=UTC).isoformat(),
+            "group_id": GRAPHITI_WORKSPACE_GROUP,
+        }
+    )
+    exact_recovery = SimpleNamespace(
+        ingest_id="episode-id",
+        skipped_attempt_number=4,
+        marker_attempt_number=3,
+        marker_input_digest=marker_input,
+        recovery_marker_digest=digest_canonical(
+            {
+                "state": "RECOVERED_AMBIGUOUS",
+                "attempt_number": 3,
+                "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+                "episode_uuid": "episode-id",
+                "input_digest": marker_input,
+            }
+        ),
+    )
+    with pytest.raises(real.AmbiguousEpisodeEffect):
+        asyncio.run(
+            run(
+                5,
+                allowed=False,
+                recovered=SimpleNamespace(
+                    **{
+                        **vars(exact_recovery),
+                        "recovery_marker_digest": "sha256:" + "0" * 64,
+                    }
+                ),
+                recovered_allowed=True,
+            )
+        )
+        assert provider_calls == 3
+    with pytest.raises(real.AmbiguousEpisodeEffect):
+        asyncio.run(run(5, allowed=False, recovered=exact_recovery))
+    asyncio.run(
+        run(
+            5,
+            allowed=False,
+            recovered=exact_recovery,
+            recovered_allowed=True,
+        )
+    )
+    assert provider_calls == 4
     assert markers["episode-id:attempt:5"] == {"success": "attempt-3"}
 
 
