@@ -306,27 +306,32 @@ def test_failed_upgrade_rolls_back_to_exact_predecessor(
 ) -> None:
     database = tmp_path / f"rollback-v{PREDECESSOR_VERSION}.sqlite3"
     before = build_exact_prefix(database, PREDECESSOR_VERSION)
-    original = authority_migrations.migrate_security_records
+    original = authority_migrations.migrate_authorization_request_storage
 
-    def fail_after_v37_conversion(
+    def fail_after_v38_conversion(
         connection: sqlite3.Connection, *, expected_history
     ) -> None:
         original(connection, expected_history=expected_history)
-        assert connection.execute(
-            "SELECT count(*) FROM authorization_scope_contents"
-        ).fetchone()[0] == 0
-        raise sqlite3.OperationalError("injected after v37 conversion")
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(authorization_requests)")
+        }
+        assert {
+            "storage_request_residual",
+            "storage_request_marker",
+        } <= columns
+        raise sqlite3.OperationalError("injected after v38 conversion")
 
     monkeypatch.setattr(
         authority_migrations,
-        "migrate_security_records",
-        fail_after_v37_conversion,
+        "migrate_authorization_request_storage",
+        fail_after_v38_conversion,
     )
 
     connection = sqlite3.connect(database)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
-        with pytest.raises(sqlite3.DatabaseError, match="after v37 conversion"):
+        with pytest.raises(sqlite3.DatabaseError, match="after v38 conversion"):
             authority_migrations.apply_pending_migrations(
                 connection, applied_at="1970-01-02T00:00:00.000000Z"
             )
