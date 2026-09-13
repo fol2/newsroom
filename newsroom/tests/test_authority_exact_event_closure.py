@@ -36,7 +36,7 @@ def _drop(store: _EventAuthorityStore, trigger: str) -> None:
 def _tamper_authentication(store: _EventAuthorityStore, command_id: str) -> None:
     _drop(store, "immutable_authentication_contexts_update")
     store._execute_test_sql(
-        "UPDATE authentication_contexts SET canonical_bytes=? WHERE "
+        "UPDATE authentication_contexts SET storage_context_marker=? WHERE "
         "authentication_context_id=(SELECT authentication_context_id FROM "
         "authority_commands WHERE command_id=?)",
         (b"{}", command_id),

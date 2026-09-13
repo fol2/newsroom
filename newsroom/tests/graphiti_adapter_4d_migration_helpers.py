@@ -257,8 +257,55 @@ def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version=31")
 
 
+def _drop_v37_security_record_schema(connection: sqlite3.Connection) -> None:
+    """Restore exact v36 context bytes without changing any retained identity."""
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 37:
+        return
+    from newsroom.authority._event_store import _EventAuthorityStore
+    from newsroom.authority.migrations import MIGRATION_STATEMENTS
+    from newsroom.authority.security_record_migrations import (
+        SECURITY_RECORD_MIGRATION_CHECKSUM, SECURITY_RECORD_MIGRATION_NAME,
+    )
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=37"
+    ).fetchone() != (SECURITY_RECORD_MIGRATION_NAME, SECURITY_RECORD_MIGRATION_CHECKSUM):
+        raise sqlite3.DatabaseError("downgrade requires exact v37 context authority")
+    reader = object.__new__(_EventAuthorityStore)
+    cursor = connection.execute("SELECT * FROM authentication_contexts")
+    names = tuple(item[0] for item in cursor.description)
+    rows = []
+    for raw in cursor:
+        row = dict(zip(names, raw, strict=True))
+        canonical = reader._authentication_record_from_row(row).canonical_bytes
+        rows.append(tuple(canonical if name == "storage_context_marker" else row[name] for name in names))
+    connection.execute("SAVEPOINT checked_context_downgrade")
+    connection.execute("PRAGMA defer_foreign_keys=ON")
+    try:
+        connection.execute("DROP TABLE authentication_contexts")
+        connection.execute(next(sql for sql in MIGRATION_STATEMENTS
+                                if sql.startswith("CREATE TABLE authentication_contexts(")))
+        for row in rows:
+            connection.execute("INSERT INTO authentication_contexts VALUES(?,?,?,?,?,?,?,?,?,?)", row)
+        for suffix in ("update", "delete"):
+            connection.execute(next(sql for sql in MIGRATION_STATEMENTS
+                                    if sql.startswith(f"CREATE TRIGGER immutable_authentication_contexts_{suffix}")))
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        connection.execute("DELETE FROM authority_migrations WHERE version=37")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=36")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT checked_context_downgrade")
+        connection.execute("RELEASE SAVEPOINT checked_context_downgrade")
+        raise
+    connection.execute("RELEASE SAVEPOINT checked_context_downgrade")
+
+
 def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:
     """Losslessly restore the v35 decision representation for downgrade fixtures."""
+    _drop_v37_security_record_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 36:
         return
     from newsroom.authority import canonical_json_bytes

@@ -160,7 +160,6 @@ def test_historical_access_receipt_rejects_rebound_security_chain(tmp_path):
 
 
 def test_historical_access_receipt_rejects_altered_credential_provenance(tmp_path):
-    import json
     from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
     from newsroom.authority.canonical import digest_bytes
 
@@ -175,21 +174,23 @@ def test_historical_access_receipt_rejects_altered_credential_provenance(tmp_pat
             "SELECT sql FROM sqlite_master "
             "WHERE name='immutable_authentication_contexts_update'"
         ).fetchone()
-        raw, = connection.execute(
-            "SELECT canonical_bytes FROM authentication_contexts "
+        from newsroom.authority.security_record_migrations import AUTHENTICATION_CONTEXT_FIELDS
+        columns = ','.join(AUTHENTICATION_CONTEXT_FIELDS)
+        values = connection.execute(
+            f"SELECT {columns} FROM authentication_contexts "
             "WHERE authentication_context_id=?",
             (str(receipt.authentication_context_id),),
         ).fetchone()
-        record = json.loads(raw)
+        record = dict(zip(AUTHENTICATION_CONTEXT_FIELDS, values, strict=True))
         record["credential_binding_digest"] = "sha256:" + "f" * 64
         raw = canonical_json_bytes(record)
         connection.execute("DROP TRIGGER immutable_authentication_contexts_update")
         connection.execute(
             "UPDATE authentication_contexts SET credential_binding_digest=?,"
-            "canonical_bytes=?,canonical_digest=? "
+            "canonical_digest=? "
             "WHERE authentication_context_id=?",
             (
-                record["credential_binding_digest"], raw, digest_bytes(raw),
+                record["credential_binding_digest"], digest_bytes(raw),
                 str(receipt.authentication_context_id),
             ),
         )

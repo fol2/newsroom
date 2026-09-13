@@ -89,14 +89,19 @@ class _ExactAuthorityGuards:
             expected_digest,
             digest_column,
         ) in expected:
+            columns = "*" if table == "authentication_contexts" else f"canonical_bytes,{digest_column}"
             row = conn.execute(
-                f"SELECT canonical_bytes,{digest_column} FROM {table} "
+                f"SELECT {columns} FROM {table} "
                 f"WHERE {identity_column}=?",
                 (identity,),
             ).fetchone()
+            retained_bytes = None if row is None else (
+                self._authentication_record_from_row(row).canonical_bytes
+                if table == "authentication_contexts"
+                else bytes(row["canonical_bytes"])
+            )
             if (
-                row is None
-                or bytes(row["canonical_bytes"]) != expected_bytes
+                retained_bytes != expected_bytes
                 or str(row[digest_column]) != expected_digest
             ):
                 raise AuthorityPersistenceError(

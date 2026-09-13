@@ -336,9 +336,9 @@ class _EventStoreReadMixin:
     def _authentication_record_from_row(
         self, row: sqlite3.Row
     ) -> AuthenticationContextRecord:
-        data = bytes(row["canonical_bytes"])
+        if bytes(row["storage_context_marker"]) != b"v37":
+            raise AuthorityPersistenceError("stored authentication context format differs")
         digest = str(row["canonical_digest"])
-        value = self._decode_canonical(data)
         expected = {
             "authentication_context_id": str(row["authentication_context_id"]),
             "principal_id": str(row["principal_id"]),
@@ -349,7 +349,8 @@ class _EventStoreReadMixin:
             "authenticated_at": str(row["authenticated_at"]),
             "expires_at": str(row["expires_at"]),
         }
-        if digest_bytes(data) != digest or value != expected:
+        data = canonical_json_bytes(expected)
+        if digest_bytes(data) != digest:
             raise AuthorityPersistenceError(
                 "stored authentication context is not canonical"
             )

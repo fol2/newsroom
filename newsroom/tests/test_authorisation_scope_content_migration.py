@@ -8,7 +8,7 @@ import pytest
 from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
 from newsroom.authority import authorisation_scope_content_migrations as scope_migration
 from newsroom.authority.canonical import digest_bytes
-from newsroom.authority.migrations import apply_pending_migrations, schema_fingerprint
+from newsroom.authority.migrations import SCHEMA_VERSION, apply_pending_migrations, schema_fingerprint
 
 from .authority_event_helpers import open_test_system
 from .authority_helpers import command, proof
@@ -74,7 +74,7 @@ def test_v35_decisions_migrate_to_one_lossless_scope_content(tmp_path) -> None:
         item.canonical_digest for _event_id, item in originals
     )
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 36
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert connection.execute(
             "SELECT count(*) FROM authorization_scope_contents"
         ).fetchone()[0] == 1

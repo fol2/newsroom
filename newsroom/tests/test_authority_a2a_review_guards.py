@@ -58,12 +58,11 @@ def test_read_policy_rejects_mutable_collection_fields(
 def _insert_authentication(
     store: _EventAuthorityStore, authentication: object
 ) -> None:
-    data = canonical_json_bytes(authentication.canonical_value())  # type: ignore[attr-defined]
     store._execute_test_sql(
         "INSERT INTO authentication_contexts("
         "authentication_context_id,principal_id,authority_domain,"
         "authentication_method,assurance_class,credential_binding_digest,"
-        "authenticated_at,expires_at,canonical_bytes,canonical_digest) "
+        "authenticated_at,expires_at,storage_context_marker,canonical_digest) "
         "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (
             str(authentication.authentication_context_id),  # type: ignore[attr-defined]
@@ -74,7 +73,7 @@ def _insert_authentication(
             authentication.credential_binding_digest,  # type: ignore[attr-defined]
             authentication.authenticated_at.to_text(),  # type: ignore[attr-defined]
             authentication.expires_at.to_text(),  # type: ignore[attr-defined]
-            data,
+            b"v37",
             authentication.digest,  # type: ignore[attr-defined]
         ),
     )

@@ -232,6 +232,7 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "authorisation_shared_scope_content_v36",
         "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
     ),
+    (37, "authentication_context_compaction_v37", "sha256:8ac6c775a376d1787f645ef6526a7aff8e1c70bbb7d22489d06a810d28cfd1be"),
 )
 
 
@@ -333,7 +334,7 @@ def _checked_registry() -> tuple[MigrationLike, ...]:
             "EXPECTED_MIGRATION_HISTORY differs from independent literal release pins"
         )
     versions = tuple(record[0] for record in record_history)
-    if versions != (*range(1, 33), 34, 35, 36):
+    if versions != (*range(1, 33), 34, 35, 36, 37):
         raise MigrationCompatibilityError(
             "authority migration registry differs from the central release sequence"
         )
@@ -443,6 +444,14 @@ def build_exact_prefix(
                     expected_history=tuple(
                         _record_tuple(previous)
                         for previous in MIGRATION_REGISTRY
+                        if previous.version < record.version
+                    ),
+                )
+            elif record.version == authority_migrations.SECURITY_RECORD_SCHEMA_VERSION:
+                authority_migrations.migrate_security_records(
+                    connection,
+                    expected_history=tuple(
+                        _record_tuple(previous) for previous in MIGRATION_REGISTRY
                         if previous.version < record.version
                     ),
                 )

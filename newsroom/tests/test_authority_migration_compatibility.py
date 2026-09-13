@@ -55,6 +55,7 @@ _EXPECTED_NAMES = {
     34: "graphiti_evaluation_extraction_authority_v34",
     35: "graphiti_accounted_zero_proposal_authority_v35",
     36: "authorisation_shared_scope_content_v36",
+    37: "authentication_context_compaction_v37",
 }
 _EXPECTED_CHECKSUMS = {
     13: "sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab",
@@ -80,6 +81,7 @@ _EXPECTED_CHECKSUMS = {
     34: "sha256:ff4d4c7fdb3d9ebe8354002fe0c71739edd549f46f685782821038ab535f350f",
     35: "sha256:5618c2a4392aabc196687b1fccbb47deee20bcdccc52cc21759cb46e32277829",
     36: "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
+    37: "sha256:8ac6c775a376d1787f645ef6526a7aff8e1c70bbb7d22489d06a810d28cfd1be",
 }
 
 _EXPECTED_MATRIX = """version | migration | objects | history fingerprint | schema fingerprint | object fingerprint
@@ -107,6 +109,7 @@ v32 | increment8_recovery_authority_v32 | 1511 | sha256:5a48fd76cd11f266e19a4b48
 v34 | graphiti_evaluation_extraction_authority_v34 | 1516 | sha256:f589854a5241991459ba5052be2cb3804c75da2742ca52d035c679292c8c8d9f | sha256:8b38a4c2279363ed4105c272370bfdc733591c30032aed4cbab5e83ef92b7065 | sha256:cc181b84140510c0239bc812b690c66cd085cdce314381b08bdad78244b0f6b4
 v35 | graphiti_accounted_zero_proposal_authority_v35 | 1516 | sha256:eb02cf288b626cbd2a895d972a8ebd69ab66a2b3e243445edfc7241bca546b20 | sha256:e6f107455a75986a977008073e3882780155d51b73660b1a2ed780a2e573455a | sha256:38a2ffa11cfd76250cf9782102093708cdf64570fe201d68a1ef3fdd64d3c7a0
 v36 | authorisation_shared_scope_content_v36 | 1522 | sha256:cddffffe87f4c5123c3f5f501bb246668dd7b13077e1e4b0cbced4d7aab2b1d1 | sha256:df4cd39f154791d3e5680ac4fa501c2a076427d0ea18caff40145319c08647d0 | sha256:66ecc87b40ee20a59a0c67ddc0ade6c6a6ca670b9c883939b84b7faa0b6d183c
+v37 | authentication_context_compaction_v37 | 1523 | sha256:4478eb4b5d8ea85fa26a72e02830c71d5fafff20d62e72e56e4be1edb9c26ad4 | sha256:4003bc1eb0124845189a50e561b39da33bfde75ab8eabd19ddf9c7f807417d3d | sha256:fe1f5f6d2a109496751dd035da536c7ce9833c19075d7f2ec0a8c3a985c9b505
 """
 
 
@@ -141,7 +144,7 @@ def test_registry_history_and_statement_pins_are_complete_and_named() -> None:
     assert RETAINED_MIN_VERSION == 13
     assert RETAINED_VERSIONS == tuple(_EXPECTED_NAMES)
     assert tuple(record.version for record in MIGRATION_REGISTRY) == tuple(
-        (*range(1, 33), 34, 35, 36)
+        (*range(1, 33), 34, 35, 36, 37)
     )
     assert (
         tuple(
@@ -214,7 +217,7 @@ def test_fresh_current_migrator_equals_direct_exact_current_prefix(
 
 @pytest.mark.parametrize(
     ("version", "expected_calls"),
-    ((PREDECESSOR_VERSION, 0), (CURRENT_VERSION, 1)),
+    ((35, 0), (36, 1)),
 )
 def test_exact_prefix_invokes_v36_procedure_once_only_for_current(
     tmp_path: Path,
@@ -300,27 +303,27 @@ def test_failed_upgrade_rolls_back_to_exact_predecessor(
 ) -> None:
     database = tmp_path / f"rollback-v{PREDECESSOR_VERSION}.sqlite3"
     before = build_exact_prefix(database, PREDECESSOR_VERSION)
-    original = authority_migrations.migrate_authorisation_scope_content
+    original = authority_migrations.migrate_security_records
 
-    def fail_after_v36_conversion(
+    def fail_after_v37_conversion(
         connection: sqlite3.Connection, *, expected_history
     ) -> None:
         original(connection, expected_history=expected_history)
         assert connection.execute(
             "SELECT count(*) FROM authorization_scope_contents"
         ).fetchone()[0] == 0
-        raise sqlite3.OperationalError("injected after v36 conversion")
+        raise sqlite3.OperationalError("injected after v37 conversion")
 
     monkeypatch.setattr(
         authority_migrations,
-        "migrate_authorisation_scope_content",
-        fail_after_v36_conversion,
+        "migrate_security_records",
+        fail_after_v37_conversion,
     )
 
     connection = sqlite3.connect(database)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
-        with pytest.raises(sqlite3.DatabaseError, match="after v36 conversion"):
+        with pytest.raises(sqlite3.DatabaseError, match="after v37 conversion"):
             authority_migrations.apply_pending_migrations(
                 connection, applied_at="1970-01-02T00:00:00.000000Z"
             )
