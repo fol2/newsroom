@@ -3,6 +3,7 @@ import sqlite3
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,10 +12,14 @@ from jsonschema import Draft202012Validator, ValidationError
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import DeterministicWriteAdmission
 from newsroom.control_plane.evidence import (
+    EVIDENCE_GATE_POLICY_VERSION,
+    EvidenceGateEvidence,
+    EvidencePackage,
     bounded_named_entities,
     evidence_package_value,
     validate_governed_evidence_records,
 )
+from newsroom.control_plane.govuk_evidence import parse_govuk_content_document
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
     CONFIG_IDENTITY,
@@ -833,6 +838,144 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
                     candidate, base, (source,), (altered_acquired,),
                 )
     connection.close()
+
+
+def test_retained_22589_inline_part_reference_reaches_write_admission(tmp_path) -> None:
+    fixture_root = Path(__file__).parent / "fixtures/native_assessor"
+    raw_source = (fixture_root / "uk03-appendix-statelessness.json").read_bytes()
+    execution_text = (fixture_root / "result-22589.json").read_text()
+    document = parse_govuk_content_document(
+        "https://www.gov.uk/guidance/immigration-rules/"
+        "immigration-rules-appendix-statelessness",
+        raw_source,
+        retrieved_at=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+    passage = document.title + "\n\n" + document.body_text
+    body = passage.encode()
+    base = EvidencePackage(
+        candidate_id="288f61b7-aad5-40c8-a9d7-ef0cd8785bbd",
+        hypothesis_id="cc71a3a8-ad84-55c4-8ef0-3352a9abd49e",
+        signal_ids=("e0ed0425-a963-4168-831b-e3b71c15c00b",),
+        lead_ids=("11bd4906-c706-43b4-be5f-0b5d2e67d607",),
+        source_ids=("UK-03",),
+        observation_digests=(digest_bytes(body),),
+        passages=(passage,),
+    )
+    assert digest_bytes(raw_source) == (
+        "sha256:c6fca2914d4a72085398561cb7b2883b63ae436a8eb6943b3634b34bf57daa2b"
+    )
+    assert base.digest == (
+        "sha256:5ad91778634c32c631875f2559b55f7478f97c13e5e9d031c88f03a2800249b3"
+    )
+    role = SimpleNamespace(
+        role=SimpleNamespace(value="ORIGINATING_AUTHORITY"),
+        purpose="Own immigration rules",
+        canonical_value=lambda: {
+            "role": "ORIGINATING_AUTHORITY", "purpose": "Own immigration rules",
+        },
+    )
+    source = SimpleNamespace(
+        unit=SimpleNamespace(
+            source_id="UK-03",
+            authority=SimpleNamespace(definition_id="definition-uk03"),
+        ),
+        source_version=SimpleNamespace(
+            canonical_digest="sha256:" + "a" * 64,
+            request=SimpleNamespace(roles=(role,)),
+        ),
+        rights=SimpleNamespace(
+            record_id="rights-uk03", decision="PERMITTED",
+            permitted_use="PUBLICATION_EVIDENCE",
+        ),
+        dependency=SimpleNamespace(
+            record_id="dependency-uk03", dependency_status="RESOLVED",
+            evidential_origin_id="origin-uk03", originating_report_id="report-uk03",
+        ),
+    )
+    acquired = SimpleNamespace(
+        receipt_digest="sha256:" + "b" * 64,
+        canonical_url=(
+            "https://www.gov.uk/guidance/immigration-rules/"
+            "immigration-rules-appendix-statelessness"
+        ),
+        publisher="Home Office", responsible_body="Home Office",
+        source_type="PRIMARY_OFFICIAL",
+        publication_time="2016-02-25T09:18:56.000000Z",
+        retrieval_time="2026-09-13T04:25:26.000000Z",
+        source_updated_time="2026-08-03T10:12:09.000000Z",
+        transport_evidence_digest="sha256:" + "c" * 64,
+        geography="UK", language="en-GB", body=body,
+        body_digest=digest_bytes(body),
+    )
+
+    assessment = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(execution_text, {}),
+        SimpleNamespace(candidate_id=base.candidate_id),
+        base,
+        (source,),
+        (acquired,),
+    )
+    assert tuple(claim.named_entities for claim in assessment.governed_claims) == (
+        ("Part 14: stateless persons",),
+        (),
+    )
+    governed = replace(
+        base,
+        substantive_new_information=assessment.substantive_new_information,
+        governed_claims=assessment.governed_claims,
+        qualification_evidence=assessment.qualification_evidence,
+        selection_rationale=assessment.selection_rationale,
+        geography=assessment.geography,
+        categories=assessment.categories,
+        explicit_exclusions=assessment.explicit_exclusions,
+    )
+    records = NativeEvidenceController._records(
+        base, governed, (source,), (acquired,), assessment
+    )
+    retained_rows = tuple(
+        (
+            record["record_id"], record["record_type"],
+            canonical_json_bytes(record).decode(),
+            digest_bytes(canonical_json_bytes(record)),
+        )
+        for record in records
+    )
+    resolved = validate_governed_evidence_records(
+        candidate_id=base.candidate_id,
+        source_inventory=(("UK-03", acquired.canonical_url),),
+        base_package_digest=base.digest,
+        package=governed,
+        retained_records=retained_rows,
+    )
+    assert resolved is not None
+    claim_ids = tuple(claim.claim_id for claim in governed.governed_claims)
+    evaluated = replace(
+        governed,
+        resolved_evidence_records=resolved,
+        evidence_gate_results=(
+            ("CLAIM_TRACEABILITY", "PASS"),
+            ("EVIDENCE_SUFFICIENCY", "PASS"),
+            ("SOURCE_AUTHORITY", "PASS"),
+        ),
+        evidence_gate_evidence=tuple(
+            EvidenceGateEvidence(
+                gate, "PASS", claim_ids, EVIDENCE_GATE_POLICY_VERSION,
+            )
+            for gate in (
+                "CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY",
+            )
+        ),
+        freshness_result="PASS",
+        integrity_result="PASS",
+    )
+    decision = DeterministicWriteAdmission().decide_candidate_identity(
+        candidate_id=base.candidate_id,
+        hypothesis_id=base.hypothesis_id,
+        package=evaluated,
+        decided_at="2026-09-13T04:26:06.683263Z",
+    )
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
 
 
 def test_native_assessor_retains_precise_qualification_contract_hold(

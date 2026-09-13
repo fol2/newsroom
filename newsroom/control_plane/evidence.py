@@ -25,7 +25,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v10"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v11"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -324,6 +324,15 @@ _SOURCE_BOUND_IMMIGRATION_PART_DECLARATION = re.compile(
 _SOURCE_BOUND_IMMIGRATION_PART_OCCURRENCE_END = (
     r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])"
 )
+_SOURCE_BOUND_IMMIGRATION_PART_INLINE_REFERENCE = re.compile(
+    r"\bunder[ \t]+"
+    r"(Part\s+\d{1,3}:\s+[a-z][a-z-]*(?:[ \t]+[a-z][a-z-]*){0,1}?)"
+    r"(?=[ \t]+applying[ \t]+(?:on|before|after)\b)"
+)
+_SOURCE_BOUND_IMMIGRATION_RULES_DOCUMENT = re.compile(
+    r"(?:\A|\n)Immigration Rules[ \t]+(?:Appendix|Part)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _contextual_official_term_shapes(
@@ -349,6 +358,18 @@ def _source_bound_official_terms(
     source_context: str,
 ) -> tuple[tuple[int, int, str], ...]:
     matches = []
+    if _SOURCE_BOUND_IMMIGRATION_RULES_DOCUMENT.search(source_context):
+        source_inline_terms = {
+            match.group(1)
+            for match in _SOURCE_BOUND_IMMIGRATION_PART_INLINE_REFERENCE.finditer(
+                source_context
+            )
+        }
+        matches.extend(
+            (match.start(1), match.end(1), match.group(1))
+            for match in _SOURCE_BOUND_IMMIGRATION_PART_INLINE_REFERENCE.finditer(text)
+            if match.group(1) in source_inline_terms
+        )
     for declaration in _SOURCE_BOUND_IMMIGRATION_PART_DECLARATION.finditer(
         source_context
     ):
