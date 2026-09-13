@@ -1364,9 +1364,7 @@ class RealGraphitiAdapter:
                 if isinstance(embedding_usage, dict)
                 else _no_embedding_usage()
             )
-            current_telemetry.provider_attempt_number = int(
-                combined_receipt.get("provider_attempt_number", 1)
-            )
+            current_telemetry.provider_attempt_number = attempt.attempt_number
             raw = _raw_receipt(
                 attempt,
                 started_at=started_at,
