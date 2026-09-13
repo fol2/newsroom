@@ -1094,16 +1094,25 @@ def _require_native_fallback_failure_receipt(
             outcome.get("outcome"),
             outcome.get("terminal_at"),
         )
+        or outcome.get("envelope_id") != envelope.envelope_id
+        or outcome.get("outcome") not in {"GRAPHITI_FAILED", "GRAPHITI_REJECTED_BINDING"}
+        or _instant(str(outcome.get("terminal_at"))) < terminal.observed_at
         or outcome.get("outcome_record_id") != receipt_digest
         or tuple(receipt_row[:3]) != (envelope.ingest_id, attempt, "FAILED")
+        or (receipt.get("ingest_id"), receipt.get("attempt_number"), receipt.get("outcome"))
+        != (envelope.ingest_id, attempt, "FAILED")
         or receipt_digest != receipt_row[3]
         or digest_bytes(canonical_json_bytes(unsigned_receipt)) != receipt_digest
         or not isinstance(invocations, list)
-        or len(invocations) != 1
-        or not isinstance(invocations[0], dict)
-        or invocations[0].get("model_invocation_id") != allocation.invocation_id
-        or invocations[0].get("model_invocation_terminal_digest")
-        != terminal.terminal_digest
+        # The native result boundary can fail after retaining the request and
+        # terminal but before returning leaf pointers. Their independent exact
+        # bindings remain authoritative; missing outer telemetry is not zero.
+        or (invocations and not any(
+            isinstance(item, dict)
+            and item.get("model_invocation_id") == allocation.invocation_id
+            and item.get("model_invocation_terminal_digest") == terminal.terminal_digest
+            for item in invocations
+        ))
     ):
         raise ModelUsageIntegrityError("native fallback failure receipt differs")
 

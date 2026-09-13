@@ -154,8 +154,9 @@ def test_native_retry_rechecks_pending_settlement_without_a_cache(tmp_path):
     connection.close()
 
 
+@pytest.mark.parametrize("returned_invocations", (True, False))
 def test_native_retry_requires_the_exact_historical_direct_fallback_event(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, returned_invocations,
 ) -> None:
     monkeypatch.setattr(
         "newsroom.control_plane.graphiti._graphiti_implementation_identity",
@@ -243,6 +244,9 @@ def test_native_retry_requires_the_exact_historical_direct_fallback_event(
             observed_at=T0 + timedelta(seconds=12),
         )
     receipt = {
+        "ingest_id": unit.ingest_id,
+        "attempt_number": 1,
+        "outcome": "FAILED",
         "chat_invocations": [
             {
                 "model_invocation_id": allocation.invocation_id,
@@ -250,12 +254,22 @@ def test_native_retry_requires_the_exact_historical_direct_fallback_event(
             }
         ]
     }
+    if not returned_invocations:
+        # A rejected result can lose outer pointers after its invocation and
+        # request were durably retained; that is not zero usage.
+        receipt.update(
+            chat_invocations=[], chat_invocation_count=0,
+            binding_failure="RESULT_CONTRACT_REJECTED",
+            binding_failure_stage="UNCLASSIFIED_RESULT_BOUNDARY",
+            binding_failure_type="ValueError",
+            provider_attempt_number=None,
+        )
     receipt_digest = usage_module.digest_bytes(
         usage_module.canonical_json_bytes(receipt)
     )
     service.record_work_outcome(
         envelope_id=envelope.envelope_id,
-        outcome="GRAPHITI_FAILED",
+        outcome=("GRAPHITI_FAILED" if returned_invocations else "GRAPHITI_REJECTED_BINDING"),
         outcome_record_id=receipt_digest,
         payload_digest=None,
         terminal_at=T0 + timedelta(seconds=11),
@@ -288,6 +302,17 @@ def test_native_retry_requires_the_exact_historical_direct_fallback_event(
     assert disposition["exact_usage_remains_unknown"] is True
     assert disposition["unknown_spend_released"] is False
     assert _proof(service, unit).settled_provider_attempts == (1,)
+    assert service.terminal(allocation.invocation_id) == terminal
+    fallback_state = service.route_state("GRAPHITI_CHAT_FALLBACK")
+    assert fallback_state["state"] == "OPEN"
+    service.release_route_circuit(
+        route="GRAPHITI_CHAT_FALLBACK", release_kind="DETERMINISTIC_HEALTH_PROBE",
+        bound_failure_reason=str(fallback_state["reason"]),
+        evidence_digest=usage_module.digest_canonical({"fixture": "healthy-cli"}),
+        recorded_at=T0 + timedelta(seconds=13),
+    )
+    assert service.route_state("GRAPHITI_CHAT_FALLBACK")["state"] == "CLOSED"
+    assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "OPEN"
 
     with sqlite3.connect(path) as connection:
         outcome_digest, outcome_raw = connection.execute(
