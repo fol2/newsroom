@@ -726,6 +726,9 @@ class NativePublicationContinuation:
                     intake_receipt_id=str(facts["intake_receipt_id"]),
                     sources=self._sources[revision_id],
                     before_assessment=before_assessment,
+                    assessment_cached_only=(
+                        progress.get("stage") == "ASSESSMENT_CONTRACT_REVALIDATION"
+                    ),
                     proof=self._runtime.proof,
                 )
             except VetoError:

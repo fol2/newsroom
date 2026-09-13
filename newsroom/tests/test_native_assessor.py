@@ -1389,6 +1389,14 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
 
     assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     first = assessor(candidate, base, (), ())
+    if not new_contract:
+        _, reopened_usage = _usage(tmp_path, monkeypatch)
+        reopened_assessor = AutonomousNativeEvidenceAssessor(
+            dispatch, usage=reopened_usage, dispatch_fence=nullcontext,
+        )
+        assert reopened_assessor.assess_with_boundary(
+            candidate, base, (), (), before_dispatch=None, cached_only=True,
+        ) == first
     if new_contract:
         monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
         monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
@@ -1409,6 +1417,54 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_UNRESOLVED_HOLD"):
         assessor(candidate, base, (), ())
     assert calls == ["provider"]
+    connection.close()
+
+
+def test_consumer_only_revalidation_requires_exact_current_cached_input(
+    tmp_path, monkeypatch,
+) -> None:
+    import newsroom.control_plane.native_assessor as module
+
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    calls = []
+
+    def dispatch(_prompt):
+        calls.append("provider")
+        return NativeAssessmentExecution(
+            canonical_json_bytes({"package": _model_package_value(base)}).decode(),
+            {"usage_basis": "PROVIDER_REPORTED", "input_tokens": 1,
+             "output_tokens": 1, "cached_read_tokens": 0, "cached_write_tokens": 0,
+             "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2},
+        )
+
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    service, old_usage = _usage(tmp_path, monkeypatch)
+    AutonomousNativeEvidenceAssessor(
+        dispatch, usage=old_usage, dispatch_fence=nullcontext,
+    )(candidate, base, (), ())
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    _, usage = _usage(tmp_path, monkeypatch)
+    assessor = AutonomousNativeEvidenceAssessor(
+        dispatch, usage=usage, dispatch_fence=nullcontext,
+    )
+
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD"):
+        assessor.assess_with_boundary(
+            candidate, base, (), (), before_dispatch=None, cached_only=True,
+        )
+    changed = replace(base, passages=(base.passages[0] + " changed",))
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD"):
+        assessor.assess_with_boundary(
+            candidate, changed, (), (), before_dispatch=None, cached_only=True,
+        )
+    assert calls == ["provider"]
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute(
+            "SELECT COUNT(*) FROM model_invocation_allocations"
+        ).fetchone() == (1,)
     connection.close()
 
 

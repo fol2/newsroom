@@ -392,6 +392,7 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
 
     def acquire(_self, **request):
         calls.append(request["intake_receipt_id"])
+        assert request["assessment_cached_only"] is True
         assert "package_admission_id" not in journal.progress[unit.revision_id]["facts"]
         raise NativeEvidenceHold("NO_QUALIFYING_NEW_INFORMATION", unit.source_id)
 

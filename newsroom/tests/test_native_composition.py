@@ -33,6 +33,14 @@ from newsroom.tests.test_native_graphiti import _native
 NOW = datetime(2026, 9, 8, 14, tzinfo=UTC)
 
 
+def test_assessment_consumer_contract_binds_producer_and_rendering_policies():
+    assert native_assessor.VERSION == "newsroom.native-evidence-assessor.v12"
+    assert native_composition.ASSESSMENT_CONTRACT_VERSION == (
+        "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v9+"
+        "newsroom.zh-hant-hk-shape.v14"
+    )
+
+
 def test_native_cursor_credential_loads_only_provisioned_key_and_restores_environment(
     tmp_path, monkeypatch,
 ):

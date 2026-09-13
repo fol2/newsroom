@@ -28,6 +28,7 @@ from newsroom.increment6.work_items import RetrievalContextAuthority
 from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 
+from .evidence import NAMED_ENTITY_POLICY_VERSION
 from .govuk_evidence import GovUkEvidenceAcquisition, POLICY_DIGEST as GOVUK_TRANSPORT_POLICY
 from .govuk_rights import (
     LICENCE_URL, REUSE_URL, GovUkLicenceEvidence, retain_current_govuk_licence,
@@ -36,7 +37,7 @@ from .graphiti_operational_readiness import OPERATOR_AUTHORITY_DOMAIN, OPERATOR_
 from .model_usage import InvocationEfficiencyPolicy, ModelUsageService
 from .native_assessor import (
     AutonomousNativeEvidenceAssessor, NativeAssessmentUsage,
-    VERSION as ASSESSMENT_CONTRACT_VERSION,
+    VERSION as ASSESSOR_CONTRACT_VERSION,
 )
 from .native_collision import NativeCollisionAuthority, NativeCollisionIdentity
 from .native_cycle import _uuid4_for
@@ -61,6 +62,12 @@ from .native_source_definitions import MISSING_SOURCE_IDS, register_missing_nati
 from .native_weather_sources import poll_other_source
 from .native_weather_evidence import NativeWeatherEvidenceAcquisition, POLICY_DIGEST as WEATHER_TRANSPORT_POLICY
 from .store import connect
+from .zh_hant import ZH_HANT_HK_SHAPE_POLICY_VERSION
+
+ASSESSMENT_CONTRACT_VERSION = (
+    f"{ASSESSOR_CONTRACT_VERSION}+{NAMED_ENTITY_POLICY_VERSION}+"
+    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+)
 
 TRANSPORT_POLICY = digest_canonical({
     "version": "hermes-native-independent-evidence-v1",

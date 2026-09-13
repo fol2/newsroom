@@ -55,8 +55,15 @@ _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.governed-input.v10+newsroom.named-entity.v8+"
     "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
 )
-WRITE_ADMISSION_POLICY_VERSION = (
+_LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.write-admission.v6+"
+    "newsroom.evid-012.v7+newsroom.evidence-approval.v8+"
+    "newsroom.evidence-gates.v2+newsroom.governed-claim.v7+"
+    "newsroom.governed-input.v10+newsroom.named-entity.v8+"
+    "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
+)
+WRITE_ADMISSION_POLICY_VERSION = (
+    "newsroom.write-admission.v7+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -499,6 +506,7 @@ class WriteAdmissionDecision:
             raise ValueError("invalid write-admission result")
         if self.policy_version not in {
             WRITE_ADMISSION_POLICY_VERSION,
+            _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION,
             _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
             _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
             _OLDEST_WRITE_ADMISSION_POLICY_VERSION,

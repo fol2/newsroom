@@ -38,6 +38,56 @@ def test_short_registry_names_do_not_match_other_latin_words():
     assert evidence.bounded_named_entities("UKVI and ATASX") == frozenset()
 
 
+def test_university_of_name_is_complete_and_drops_the_determiner():
+    source = "The University of Salford published the guidance."
+
+    assert evidence.bounded_named_entities(source) == frozenset(
+        {("University of Salford", "ORGANISATION")}
+    )
+    assert _valid_zh_hant_hk_rendering(SimpleNamespace(
+        claim=source,
+        supporting_excerpt=source,
+        named_entities=("University of Salford",),
+        rendered_assertion_zh_hant_hk="University of Salford公布指引。",
+    ))
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "The University published the guidance.",
+        "University of Salford-X published the guidance.",
+        "University of Salford_X published the guidance.",
+        "University of Salford2 published the guidance.",
+        "University of Salford.ac.uk published the guidance.",
+        "University of Salford Manchester published the guidance.",
+        "XUniversity of Salford published the guidance.",
+        "-University of Salford published the guidance.",
+        "_University of Salford published the guidance.",
+        ".University of Salford published the guidance.",
+    ),
+)
+def test_university_of_name_rejects_truncations_and_extensions(text):
+    assert evidence.bounded_named_entities(text) == frozenset()
+
+
+def test_retained_consumer_corrections_do_not_hide_other_unsupported_literals():
+    assert not _valid_zh_hant_hk_rendering(SimpleNamespace(
+        claim="The University of Salford and DfE published the guidance.",
+        supporting_excerpt=(
+            "The University of Salford and DfE published the guidance."
+        ),
+        named_entities=("University of Salford",),
+        rendered_assertion_zh_hant_hk="University of Salford及DfE公布指引。",
+    ))
+    assert not _valid_zh_hant_hk_rendering(SimpleNamespace(
+        claim="Kent Police dispersed a crowd without notice.",
+        supporting_excerpt="Kent Police dispersed a crowd without notice.",
+        named_entities=("Kent Police",),
+        rendered_assertion_zh_hant_hk="Kent Police在no-notice情況下驅散人群。",
+    ))
+
+
 @pytest.mark.parametrize(
     "source",
     (
