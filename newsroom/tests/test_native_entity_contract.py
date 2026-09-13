@@ -44,6 +44,12 @@ def test_university_of_name_is_complete_and_drops_the_determiner():
     assert evidence.bounded_named_entities(source) == frozenset(
         {("University of Salford", "ORGANISATION")}
     )
+    assert evidence.bounded_named_entities(
+        "University of Salford."
+    ) == frozenset({("University of Salford", "ORGANISATION")})
+    assert evidence._has_bounded_named_entity_shape(
+        "University of Salford", "ORGANISATION", source_context=source,
+    )
     assert _valid_zh_hant_hk_rendering(SimpleNamespace(
         claim=source,
         supporting_excerpt=source,
@@ -61,6 +67,7 @@ def test_university_of_name_is_complete_and_drops_the_determiner():
         "University of Salford2 published the guidance.",
         "University of Salford.ac.uk published the guidance.",
         "University of Salford Manchester published the guidance.",
+        "University of Salford/School published the guidance.",
         "XUniversity of Salford published the guidance.",
         "-University of Salford published the guidance.",
         "_University of Salford published the guidance.",

@@ -281,7 +281,8 @@ _ENGLISH_ORGANISATION = re.compile(
 )
 _ENGLISH_UNIVERSITY_OF = re.compile(
     r"(?<![A-Za-z0-9_.-])(University of [A-Z][a-z]+)"
-    r"(?![A-Za-z0-9_.-]|[ \t]+[A-Z][A-Za-z-]*\b)"
+    r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9_]|/[A-Za-z0-9_]|"
+    r"[ \t]+[A-Z][A-Za-z-]*\b)"
 )
 _ENGLISH_OFFICIAL_TERM = re.compile(
     r"\b(?:[A-Z][A-Za-z-]+(?:\s+(?:and|of|the|for|[A-Z][A-Za-z-]+)){1,7}"
@@ -377,6 +378,8 @@ def _source_bound_official_terms(
 
 
 def _is_bounded_english_organisation(text: str) -> bool:
+    if _ENGLISH_UNIVERSITY_OF.fullmatch(text):
+        return True
     return (
         not re.fullmatch(
             r"(?:The|A|An) (?:Authority|Directorate|Department|Ministry|Agency|"

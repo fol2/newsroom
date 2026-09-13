@@ -340,6 +340,13 @@ class EvidenceAssessor:
                 cached_only=cached_only,
             )
         else:
+            if cached_only:
+                source_id = (
+                    sources[0].unit.source_id if sources else candidate.candidate_id
+                )
+                raise NativeEvidenceHold(
+                    "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+                )
             if before_assessment is not None:
                 before_assessment()
             result = self._assess(candidate, package, sources, acquired)

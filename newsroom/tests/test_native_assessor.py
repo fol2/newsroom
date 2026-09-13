@@ -30,6 +30,7 @@ from newsroom.control_plane.native_assessor import (
     _MAX_RETAINED_RESULT_BYTES,
 )
 from newsroom.control_plane.native_evidence import (
+    EvidenceAssessor,
     NativeEvidenceController,
     NativeEvidenceError,
     NativeEvidenceHold,
@@ -159,19 +160,34 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     connection.close()
 
 
+@pytest.mark.parametrize(
+    ("claim_text", "excerpt", "rendered", "expected_entities"),
+    (
+        (
+            "The Home Office published changes",
+            "The Home Office published changes to the Skilled Worker Visa.",
+            "Home Office 已公布修訂。",
+            ("Home Office",),
+        ),
+        (
+            "The University of Salford published guidance",
+            "The University of Salford published guidance.",
+            "University of Salford公布指引。",
+            ("University of Salford",),
+        ),
+    ),
+)
 def test_native_assessor_derives_entities_from_constructed_uk03_output(
-    tmp_path,
+    tmp_path, claim_text, excerpt, rendered, expected_entities,
 ) -> None:
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
     package = _model_package_value(_ready_package(candidate)[1])
     claim = package["governed_claims"][0]
-    claim_text = "The Home Office published changes"
-    excerpt = "The Home Office published changes to the Skilled Worker Visa."
     claim.update({
         "claim": claim_text,
         "supporting_excerpt": excerpt,
-        "rendered_assertion_zh_hant_hk": "Home Office 已公布修訂。",
+        "rendered_assertion_zh_hant_hk": rendered,
     })
     package.update({
         "substantive_new_information": [claim_text],
@@ -252,8 +268,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         (acquired,),
     )
 
-    assert result.governed_claims[0].named_entities == ("Home Office",)
-    assert result.governed_claims[0].rendered_named_entities == ("Home Office",)
+    assert result.governed_claims[0].named_entities == expected_entities
+    assert result.governed_claims[0].rendered_named_entities == expected_entities
     governed = replace(
         base,
         substantive_new_information=result.substantive_new_information,
@@ -307,6 +323,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
 
     decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
+    if expected_entities == ("University of Salford",):
+        return
 
     ancestry_claim = (
         "English language requirement for settlement on the UK Ancestry route UKA "
@@ -1465,6 +1483,28 @@ def test_consumer_only_revalidation_requires_exact_current_cached_input(
         assert retained.execute(
             "SELECT COUNT(*) FROM model_invocation_allocations"
         ).fetchone() == (1,)
+    connection.close()
+
+
+def test_consumer_only_revalidation_without_retention_never_dispatches(
+    tmp_path,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    calls = []
+    assessor = AutonomousNativeEvidenceAssessor(
+        lambda _prompt: calls.append("provider"),
+    )
+
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD"):
+        assessor.assess_with_boundary(
+            candidate, base, (), (), before_dispatch=None, cached_only=True,
+        )
+    assert calls == []
+    fallback = EvidenceAssessor(lambda *_args: calls.append("fallback"))
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD"):
+        fallback.assess(candidate, base, (), (), cached_only=True)
+    assert calls == []
     connection.close()
 
 

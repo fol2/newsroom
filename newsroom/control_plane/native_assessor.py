@@ -1264,6 +1264,11 @@ class AutonomousNativeEvidenceAssessor:
     ):
         if type(cached_only) is not bool:
             raise NativeEvidenceError("native assessment cache mode differs")
+        source_id = sources[0].unit.source_id if sources else candidate.candidate_id
+        if cached_only and self._usage is None:
+            raise NativeEvidenceHold(
+                "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
+            )
         for source, result in zip(sources, acquired, strict=True):
             if (
                 result.currentness_basis
@@ -1285,7 +1290,6 @@ class AutonomousNativeEvidenceAssessor:
                 )
         if self._usage is not None:
             retained = self._usage.retained_assessments(candidate, base)
-            source_id = sources[0].unit.source_id if sources else candidate.candidate_id
             if retained is None:
                 raise NativeEvidenceHold("ASSESSOR_REVALIDATION_UNRESOLVED_HOLD", source_id)
             if retained:
