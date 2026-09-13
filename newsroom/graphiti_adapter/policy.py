@@ -32,6 +32,7 @@ from .models import (
     GraphitiReplayApprovalRequest,
     GraphitiWorkspacePolicy,
     RealGraphitiRuntimeAuthority,
+    RecoveredAmbiguousProgressionProof,
 )
 from .types import (
     GraphitiAdapterConfigurationId,
@@ -62,9 +63,12 @@ GRAPHITI_ADAPTER_COMMAND_TYPES = frozenset(
 
 _CONFIGURATION_SCHEMA = "graphiti_adapter_configuration_v1"
 _ATTEMPT_SCHEMA = "graphiti_adapter_attempt_v1"
+_ATTEMPT_SCHEMA_V2 = "graphiti_adapter_attempt_v2"
 _REPLAY_SCHEMA = "graphiti_adapter_replay_approval_v1"
 _CONTRACT_VERSION = "graphiti-proposal-adapter-authority-contract-v1"
 _DEFINITION_VERSION = "graphiti-proposal-adapter-authority-command-v1"
+_ATTEMPT_CONTRACT_VERSION_V2 = "graphiti-proposal-adapter-attempt-authority-contract-v2"
+_ATTEMPT_DEFINITION_VERSION_V2 = "graphiti-proposal-adapter-attempt-authority-command-v2"
 
 
 def _object(value: Any, *, field: str, keys: frozenset[str]) -> dict[str, Any]:
@@ -475,6 +479,130 @@ def _attempt_payload(value: Any) -> bytes:
     return canonical_json_bytes(item)
 
 
+
+def _attempt_payload_v2(value: Any) -> bytes:
+    keys = frozenset(
+        {
+            "attempt_id",
+            "attempt_number",
+            "expected_previous_attempt_id",
+            "configuration_id",
+            "configuration_digest",
+            "workspace_id",
+            "cleanup_receipt_id",
+            "manifest_id",
+            "manifest_digest",
+            "extractor_contract_id",
+            "extractor_contract_digest",
+            "run_id",
+            "requested_run_version_id",
+            "requested_version_number",
+            "replay_source_id",
+            "replay_source_digest",
+            "reference_time",
+            "temporal_basis",
+            "episode_uuid",
+            "generation_id",
+            "predecessor_episode_uuid",
+        }
+    )
+    supplied_keys = frozenset(value) if isinstance(value, dict) else frozenset()
+    if "recovered_ambiguous_progression" in supplied_keys:
+        keys = keys | {"recovered_ambiguous_progression"}
+    item = _object(value, field="graphiti_adapter_attempt", keys=keys)
+    attempt_number = _integer(item["attempt_number"], field="attempt_number")
+    if attempt_number <= 0 or attempt_number > 1_000_000:
+        raise PayloadSchemaValidationError("attempt_number is outside its bound")
+    previous = _optional_id(
+        item["expected_previous_attempt_id"],
+        GraphitiAttemptId.parse,
+        field="expected_previous_attempt_id",
+    )
+    if (attempt_number == 1) != (previous is None):
+        raise PayloadSchemaValidationError(
+            "attempt predecessor does not match attempt number"
+        )
+    for field, parser in (
+        ("attempt_id", GraphitiAttemptId.parse),
+        ("configuration_id", GraphitiAdapterConfigurationId.parse),
+        ("workspace_id", GraphitiWorkspaceId.parse),
+        ("cleanup_receipt_id", GraphitiCleanupReceiptId.parse),
+        ("manifest_id", GraphitiInputManifestId.parse),
+        ("extractor_contract_id", ExtractorContractId.parse),
+        ("run_id", ExtractionRunId.parse),
+        ("requested_run_version_id", ExtractionRunVersionId.parse),
+    ):
+        _required_id(item[field], parser, field=field)
+    version_number = _integer(
+        item["requested_version_number"], field="requested_version_number"
+    )
+    if version_number <= 0 or version_number > 1_000_000:
+        raise PayloadSchemaValidationError(
+            "requested_version_number is outside its bound"
+        )
+    for field in (
+        "configuration_digest",
+        "manifest_digest",
+        "extractor_contract_digest",
+    ):
+        _digest(item[field], field=field)
+    replay_id = _optional_id(
+        item["replay_source_id"],
+        GraphitiReplaySourceId.parse,
+        field="replay_source_id",
+    )
+    replay_digest = item["replay_source_digest"]
+    if replay_id is None:
+        if replay_digest is not None:
+            raise PayloadSchemaValidationError(
+                "replay source digest requires replay source identity"
+            )
+    else:
+        _digest(replay_digest, field="replay_source_digest")
+    basis = _string(item["temporal_basis"], field="temporal_basis")
+    try:
+        parse_temporal_basis(basis)
+    except ValueError as exc:
+        raise PayloadSchemaValidationError(
+            "temporal_basis must be a labelled mapping"
+        ) from exc
+
+    reference_time = item["reference_time"]
+    if reference_time is not None:
+        _string(reference_time, field="reference_time")
+    episode_uuid = item["episode_uuid"]
+    if episode_uuid is not None:
+        _string(episode_uuid, field="episode_uuid")
+    predecessor_episode_uuid = item["predecessor_episode_uuid"]
+    if predecessor_episode_uuid is not None:
+        _string(predecessor_episode_uuid, field="predecessor_episode_uuid")
+        if predecessor_episode_uuid == episode_uuid:
+            raise PayloadSchemaValidationError(
+                "episode predecessor cannot name the current episode"
+            )
+    _string(item["generation_id"], field="generation_id")
+    if "recovered_ambiguous_progression" in item:
+        try:
+            recovery = RecoveredAmbiguousProgressionProof.from_canonical_value(
+                item["recovered_ambiguous_progression"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise PayloadSchemaValidationError(
+                f"recovered_ambiguous_progression is invalid: {exc}"
+            ) from exc
+        if (
+            recovery.skipped_attempt_number + 1 != attempt_number
+            or str(recovery.authoritative_attempt_id)
+            != item["expected_previous_attempt_id"]
+            or recovery.authoritative_attempt_number + 1 != version_number
+            or recovery.ingest_id != episode_uuid
+        ):
+            raise PayloadSchemaValidationError(
+                "recovered ambiguous progression differs from the attempt"
+            )
+    return canonical_json_bytes(item)
+
+
 def _replay_payload(value: Any) -> bytes:
     keys = frozenset(
         {
@@ -591,6 +719,44 @@ def _golden_attempt_value() -> dict[str, object]:
     }
 
 
+def _golden_recovered_attempt_value() -> dict[str, object]:
+    value = _golden_attempt_value()
+    value.update(
+        {
+            "attempt_number": 5,
+            "expected_previous_attempt_id": (
+                "00000000-0000-4000-8000-000000004823"
+            ),
+            "requested_version_number": 4,
+            "episode_uuid": "graphiti-recovered-gap",
+            "recovered_ambiguous_progression": {
+                "authoritative_attempt_id": (
+                    "00000000-0000-4000-8000-000000004823"
+                ),
+                "authoritative_attempt_digest": "sha256:" + "4" * 64,
+                "authoritative_attempt_number": 3,
+                "authoritative_run_version_id": (
+                    "00000000-0000-4000-8000-000000004824"
+                ),
+                "authoritative_recorded_at": "2042-03-12T10:00:00.000000Z",
+                "skipped_attempt_number": 4,
+                "skipped_receipt_digest": "sha256:" + "5" * 64,
+                "skipped_ledger_sequence": 4,
+                "skipped_ledger_digest": "sha256:" + "6" * 64,
+                "skipped_recorded_at": "2042-03-12T10:00:01.000000Z",
+                "settled_usage_evidence_digest": "sha256:" + "7" * 64,
+                "recovery_marker_digest": "sha256:" + "8" * 64,
+                "marker_attempt_number": 3,
+                "marker_workspace_id": value["workspace_id"],
+                "marker_input_digest": "sha256:" + "9" * 64,
+                "input_binding_digest": "sha256:" + "a" * 64,
+                "ingest_id": "graphiti-recovered-gap",
+            },
+        }
+    )
+    return value
+
+
 def _golden_replay_request() -> GraphitiReplayApprovalRequest:
     return GraphitiReplayApprovalRequest(
         replay_source_id=GraphitiReplaySourceId.parse(
@@ -619,6 +785,7 @@ def _golden_replay_request() -> GraphitiReplayApprovalRequest:
 def graphiti_adapter_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
     configuration = _golden_configuration()
     attempt = _golden_attempt_value()
+    recovered_attempt = _golden_recovered_attempt_value()
     replay = _golden_replay_request()
     specifications = (
         (
@@ -627,6 +794,9 @@ def graphiti_adapter_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
             _configuration_payload,
             configuration.canonical_value(),
             configuration.canonical_bytes,
+            _CONTRACT_VERSION,
+            "graphiti-adapter-configuration-typed-exact-canonical-json-v1",
+            "increment-4d-configuration-golden-v1",
         ),
         (
             _ATTEMPT_SCHEMA,
@@ -634,6 +804,19 @@ def graphiti_adapter_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
             _attempt_payload,
             attempt,
             canonical_json_bytes(attempt),
+            _CONTRACT_VERSION,
+            "graphiti-adapter-attempt-typed-exact-canonical-json-v1",
+            "increment-4d-attempt-golden-v1",
+        ),
+        (
+            _ATTEMPT_SCHEMA_V2,
+            "attempt-recovered",
+            _attempt_payload_v2,
+            recovered_attempt,
+            canonical_json_bytes(recovered_attempt),
+            _ATTEMPT_CONTRACT_VERSION_V2,
+            "graphiti-adapter-attempt-typed-exact-canonical-json-v2",
+            "increment-4d-attempt-recovered-golden-v2",
         ),
         (
             _REPLAY_SCHEMA,
@@ -641,27 +824,37 @@ def graphiti_adapter_payload_contracts() -> tuple[PayloadSchemaContract, ...]:
             _replay_payload,
             replay.canonical_value(),
             replay.canonical_bytes,
+            _CONTRACT_VERSION,
+            "graphiti-adapter-replay-approval-typed-exact-canonical-json-v1",
+            "increment-4d-replay-approval-golden-v1",
         ),
     )
     return tuple(
         PayloadSchemaContract(
             schema_version=schema_version,
             payload_mode=PayloadMode.INLINE,
-            contract_version=_CONTRACT_VERSION,
-            canonicalizer_implementation_version=(
-                f"graphiti-adapter-{name}-typed-exact-canonical-json-v1"
-            ),
+            contract_version=contract_version,
+            canonicalizer_implementation_version=canonicalizer_version,
             canonicalizer=canonicalizer,
             golden_vectors=(
                 PayloadGoldenVector(
                     name=f"graphiti-adapter-{name}-exact-fields",
-                    input_identity=f"increment-4d-{name}-golden-v1",
+                    input_identity=input_identity,
                     value=value,
                     expected_bytes=expected_bytes,
                 ),
             ),
         )
-        for schema_version, name, canonicalizer, value, expected_bytes in specifications
+        for (
+            schema_version,
+            name,
+            canonicalizer,
+            value,
+            expected_bytes,
+            contract_version,
+            canonicalizer_version,
+            input_identity,
+        ) in specifications
     )
 
 
@@ -675,6 +868,7 @@ def graphiti_adapter_command_definitions() -> tuple[CommandDefinition, ...]:
             "graphiti_adapter_configuration",
             "graphiti.adapter.configuration.registered",
             _CONFIGURATION_SCHEMA,
+            _DEFINITION_VERSION,
             TrustScope.ADMITTED,
             "authority.graphiti.configuration",
         ),
@@ -683,6 +877,16 @@ def graphiti_adapter_command_definitions() -> tuple[CommandDefinition, ...]:
             "graphiti_adapter_attempt",
             "graphiti.adapter.attempt.executed",
             _ATTEMPT_SCHEMA,
+            _DEFINITION_VERSION,
+            TrustScope.PROPOSED,
+            "authority.graphiti.execute",
+        ),
+        (
+            GRAPHITI_ATTEMPT_EXECUTE_COMMAND,
+            "graphiti_adapter_attempt",
+            "graphiti.adapter.attempt.executed",
+            _ATTEMPT_SCHEMA_V2,
+            _ATTEMPT_DEFINITION_VERSION_V2,
             TrustScope.PROPOSED,
             "authority.graphiti.execute",
         ),
@@ -691,6 +895,7 @@ def graphiti_adapter_command_definitions() -> tuple[CommandDefinition, ...]:
             "graphiti_replay_source",
             "graphiti.adapter.replay.approved",
             _REPLAY_SCHEMA,
+            _DEFINITION_VERSION,
             TrustScope.ADMITTED,
             "authority.graphiti.replay.approve",
         ),
@@ -698,7 +903,7 @@ def graphiti_adapter_command_definitions() -> tuple[CommandDefinition, ...]:
     return tuple(
         CommandDefinition(
             command_type=command_type,
-            definition_version=_DEFINITION_VERSION,
+            definition_version=definition_version,
             aggregate_type=aggregate_type,
             event_type=event_type,
             event_schema_version=1,
@@ -720,6 +925,7 @@ def graphiti_adapter_command_definitions() -> tuple[CommandDefinition, ...]:
             aggregate_type,
             event_type,
             schema,
+            definition_version,
             trust_scope,
             required_scope,
         ) in specifications
@@ -754,8 +960,9 @@ def merge_graphiti_adapter_authority_registries(
     }
     current_commands.update(
         {
-            command_type: _DEFINITION_VERSION
-            for command_type in GRAPHITI_ADAPTER_COMMAND_TYPES
+            GRAPHITI_CONFIGURATION_REGISTER_COMMAND: _DEFINITION_VERSION,
+            GRAPHITI_ATTEMPT_EXECUTE_COMMAND: _ATTEMPT_DEFINITION_VERSION_V2,
+            GRAPHITI_REPLAY_APPROVE_COMMAND: _DEFINITION_VERSION,
         }
     )
 
@@ -775,13 +982,15 @@ def merge_graphiti_adapter_authority_registries(
         if existing is None:
             contracts.append(contract)
             by_schema[key] = contract
-    adapter_versions = {item.schema_version for item in additions}
+    adapter_versions = {
+        item.schema_version: item.contract_version for item in additions
+    }
     current_schemas: dict[tuple[str, PayloadMode], str] = {}
     for schema_version, mode in {
         (item.schema_version, item.payload_mode) for item in contracts
     }:
         if schema_version in adapter_versions:
-            current_schemas[(schema_version, mode)] = _CONTRACT_VERSION
+            current_schemas[(schema_version, mode)] = adapter_versions[schema_version]
         else:
             current_schemas[(schema_version, mode)] = prior_schemas.resolve(
                 schema_version, mode

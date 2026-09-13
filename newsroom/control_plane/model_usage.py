@@ -23,6 +23,7 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
     digest_canonical,
+    validate_sha256_digest,
 )
 from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.graphiti_requests import (
@@ -37,6 +38,7 @@ from newsroom.control_plane.issue_790_step16_activation import (
     effective_issue_790_plan_contract,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
+from newsroom.control_plane.store import GRAPHITI_MAX_FAILURES
 from newsroom.control_plane.veto import assert_private_store
 
 if TYPE_CHECKING:
@@ -3178,6 +3180,7 @@ class ModelUsageService:
 
     def native_graphiti_ingest_retry_evidence_many(
         self, *, failed_attempts: Mapping[str, int], max_attempts: int,
+        _allow_missing_work_outcome_attempts: Mapping[str, int] | None = None,
     ) -> dict[str, GraphitiIngestRetryEvidence]:
         """Read only the finite native attempt allowance, never unrelated history.
 
@@ -3210,8 +3213,232 @@ class ModelUsageService:
             for ingest_id, (evidence, _) in self._graphiti_ingest_retry_evidence_batch(
                 ingest_ids=tuple(failed_attempts), native_attempts=native_attempts,
                 native_failed_attempts=failed_attempts,
+                allow_missing_work_outcome_envelopes=frozenset(
+                    WorkEnvelope.create(
+                        cycle_id=native_graphiti_usage_cycle_id(
+                            ingest_id=ingest_id, attempt_number=number,
+                        ),
+                        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                        admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+                        admission_decision_id=None, candidate_id=None,
+                        hypothesis_digest=None, evidence_package_digest=None,
+                        ingest_id=ingest_id,
+                        graphiti_attempt_id=f"{ingest_id}:{number}",
+                    ).envelope_id
+                    for ingest_id, number in (
+                        _allow_missing_work_outcome_attempts or {}
+                    ).items()
+                ),
             ).items()
         }
+
+    def native_recovered_ambiguous_usage_evidence_digest(
+        self,
+        *,
+        ingest_id: str,
+        authoritative_attempt_number: int,
+        skipped_attempt_number: int,
+        skipped_receipt_digest: str,
+        skipped_recorded_at: datetime,
+        latest_allowed_attempt_number: int | None = None,
+        retained_reentry_attempt_number: int | None = None,
+    ) -> str:
+        """Authenticate settled use followed only by one local binding refusal."""
+
+        latest_allowed = (
+            skipped_attempt_number
+            if latest_allowed_attempt_number is None
+            else latest_allowed_attempt_number
+        )
+        if (
+            type(authoritative_attempt_number) is not int
+            or authoritative_attempt_number <= 0
+            or skipped_attempt_number != authoritative_attempt_number + 1
+            or type(latest_allowed) is not int
+            or latest_allowed < skipped_attempt_number
+            or skipped_recorded_at.tzinfo is None
+            or skipped_recorded_at.utcoffset() is None
+            or (
+                retained_reentry_attempt_number is not None
+                and retained_reentry_attempt_number != latest_allowed
+            )
+        ):
+            raise ModelUsageIntegrityError(
+                "recovered ambiguous usage attempt sequence differs"
+            )
+        try:
+            validate_sha256_digest(
+                skipped_receipt_digest, field="skipped receipt digest"
+            )
+        except ValueError as exc:
+            raise ModelUsageIntegrityError(str(exc)) from exc
+        evidence = self.native_graphiti_ingest_retry_evidence_many(
+            failed_attempts={ingest_id: latest_allowed},
+            max_attempts=latest_allowed,
+            _allow_missing_work_outcome_attempts=(
+                None
+                if retained_reentry_attempt_number is None
+                else {ingest_id: retained_reentry_attempt_number}
+            ),
+        )[ingest_id]
+        if (
+            authoritative_attempt_number not in evidence.settled_provider_attempts
+            or evidence.unresolved_attempts != (skipped_attempt_number,)
+            or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
+            or any(number > latest_allowed for number in evidence.attempt_numbers)
+        ):
+            raise ModelUsageIntegrityError(
+                "recovered ambiguous usage is not exactly settled"
+            )
+
+        cycle_id = native_graphiti_usage_cycle_id(
+            ingest_id=ingest_id, attempt_number=skipped_attempt_number
+        )
+        envelope = WorkEnvelope.create(
+            cycle_id=cycle_id,
+            workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+            admission_decision_id=None,
+            candidate_id=None,
+            hypothesis_digest=None,
+            evidence_package_digest=None,
+            ingest_id=ingest_id,
+            graphiti_attempt_id=f"{ingest_id}:{skipped_attempt_number}",
+        )
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN")
+            retained_envelope = connection.execute(
+                "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()
+            outcome = connection.execute(
+                "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+                "FROM model_work_outcomes WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()
+            leaf_count = connection.execute(
+                "SELECT COUNT(*) FROM model_invocation_allocations WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()[0]
+            request_count = connection.execute(
+                "SELECT COUNT(*) FROM graphiti_internal_requests WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()[0]
+            refusal_count = connection.execute(
+                "SELECT COUNT(*) FROM graphiti_internal_request_refusals "
+                "WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()[0]
+            later_allocations = connection.execute(
+                "SELECT e.record_json FROM model_work_envelopes e JOIN "
+                "model_invocation_allocations a USING(envelope_id) "
+                "WHERE json_extract(e.record_json,'$.ingest_id')=?",
+                (ingest_id,),
+            ).fetchall()
+            for row in later_allocations:
+                later = _envelope_from_record(_object(row[0]))
+                prefix, separator, suffix = str(
+                    later.graphiti_attempt_id or ""
+                ).rpartition(":")
+                if (
+                    separator != ":"
+                    or prefix != ingest_id
+                    or not suffix.isdigit()
+                    or int(suffix) > latest_allowed
+                ):
+                    raise ModelUsageIntegrityError(
+                        "recovered ambiguous later allocation is retained"
+                    )
+            if retained_envelope is None or outcome is None:
+                raise ModelUsageIntegrityError(
+                    "recovered ambiguous skipped usage record is absent"
+                )
+            envelope_record = _object(retained_envelope[0])
+            outcome_record = _object(outcome[4])
+            unsigned_outcome = dict(outcome_record)
+            outcome_digest = unsigned_outcome.pop("outcome_digest", None)
+            if (
+                _envelope_from_record(envelope_record).envelope_id
+                != envelope.envelope_id
+                or outcome_digest != outcome[0]
+                or digest_canonical(unsigned_outcome) != outcome_digest
+                or tuple(outcome[1:4])
+                != (
+                    outcome_record.get("envelope_id"),
+                    outcome_record.get("outcome"),
+                    outcome_record.get("terminal_at"),
+                )
+                or outcome_record.get("schema_version")
+                != MODEL_USAGE_SCHEMA_VERSION
+                or outcome_record.get("envelope_id") != envelope.envelope_id
+                or outcome_record.get("outcome") != "GRAPHITI_REJECTED_BINDING"
+                or outcome_record.get("outcome_record_id")
+                != skipped_receipt_digest
+                or outcome_record.get("payload_digest") is not None
+                or outcome_record.get("cycle_outcome") is not None
+                or outcome_record.get("route_circuit_state") is not None
+                or outcome_record.get("route_circuit_reason") is not None
+                or outcome_record.get("retained_proposal_count") != 0
+                or outcome_record.get("accepted_provider_attempt_id") is not None
+                or outcome_record.get("stable_reason_codes") != []
+                or _instant(str(outcome_record.get("terminal_at")))
+                > skipped_recorded_at.astimezone(UTC)
+                or any((leaf_count, request_count, refusal_count))
+            ):
+                raise ModelUsageIntegrityError(
+                    "recovered ambiguous skipped usage record differs"
+                )
+
+            settled_records: list[dict[str, object]] = []
+            authoritative_cycle = native_graphiti_usage_cycle_id(
+                ingest_id=ingest_id,
+                attempt_number=authoritative_attempt_number,
+            )
+            for row in connection.execute(
+                "SELECT record_json FROM model_work_envelopes WHERE cycle_id=? "
+                "UNION ALL SELECT record_json FROM model_work_outcomes "
+                "WHERE envelope_id IN (SELECT envelope_id FROM model_work_envelopes "
+                "WHERE cycle_id=?) UNION ALL SELECT record_json FROM "
+                "model_invocation_allocations WHERE cycle_id=? UNION ALL SELECT "
+                "t.record_json FROM model_invocation_terminals t JOIN "
+                "model_invocation_allocations a USING(invocation_id) WHERE a.cycle_id=? "
+                "UNION ALL SELECT r.record_json FROM graphiti_internal_requests r "
+                "JOIN model_invocation_allocations a USING(invocation_id) "
+                "WHERE a.cycle_id=? UNION ALL SELECT p.record_json FROM "
+                "model_provider_telemetry p JOIN model_invocation_allocations a "
+                "USING(invocation_id) WHERE a.cycle_id=? UNION ALL SELECT "
+                "o.record_json FROM model_transport_observations o JOIN "
+                "model_invocation_allocations a USING(invocation_id) "
+                "WHERE a.cycle_id=? UNION ALL SELECT r.record_json FROM "
+                "model_usage_reconciliations r JOIN model_invocation_allocations a "
+                "USING(invocation_id) WHERE a.cycle_id=? UNION ALL SELECT "
+                "d.record_json FROM model_usage_conservative_dispositions d JOIN "
+                "model_invocation_allocations a USING(invocation_id) "
+                "WHERE a.cycle_id=?",
+                (authoritative_cycle,) * 9,
+            ):
+                settled_records.append(_object(row[0]))
+            if not settled_records:
+                raise ModelUsageIntegrityError(
+                    "recovered ambiguous settled usage records are absent"
+                )
+            return digest_canonical(
+                {
+                    "ingest_id": ingest_id,
+                    "authoritative_attempt_number": authoritative_attempt_number,
+                    "skipped_attempt_number": skipped_attempt_number,
+                    "authoritative_attempt_settled": True,
+                    "skipped_attempt_unresolved": True,
+                    "settled_records": sorted(
+                        settled_records, key=digest_canonical
+                    ),
+                    "skipped_envelope": envelope_record,
+                    "skipped_outcome": outcome_record,
+                }
+            )
+        finally:
+            connection.close()
 
     def _graphiti_ingest_retry_evidence(
         self, *, ingest_id: str, before_attempt_number: int | None = None,
@@ -3224,6 +3451,7 @@ class ModelUsageService:
         self, *, ingest_ids: tuple[str, ...], before_attempt_number: int | None = None,
         native_attempts: Mapping[str, tuple[str, int]] | None = None,
         native_failed_attempts: Mapping[str, int] | None = None,
+        allow_missing_work_outcome_envelopes: frozenset[str] = frozenset(),
     ) -> dict[str, tuple[GraphitiIngestRetryEvidence, int]]:
         ingest_ids = tuple(dict.fromkeys(ingest_ids))
         for ingest_id in ingest_ids:
@@ -3466,7 +3694,10 @@ class ModelUsageService:
                     selected_attempts.items(), key=lambda item: item[1]
                 ):
                     leaves = by_attempt[envelope_id]
-                    if envelope_id not in work_outcomes or envelope_id in incomplete_envelopes:
+                    if (
+                        envelope_id not in work_outcomes
+                        and envelope_id not in allow_missing_work_outcome_envelopes
+                    ) or envelope_id in incomplete_envelopes:
                         unresolved.append(attempt)
                         continue
                     if not leaves:

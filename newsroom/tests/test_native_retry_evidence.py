@@ -154,6 +154,114 @@ def test_native_retry_rechecks_pending_settlement_without_a_cache(tmp_path):
     connection.close()
 
 
+def test_recovered_attempt_reentry_authenticates_settled_leaf_without_outer_outcome(
+    tmp_path,
+):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("recovered-reentry-accounting")
+    for number in (1, 2):
+        _settle(service, *_attempt(service, policy, shape, unit, number), zero=True)
+    _settle(service, *_attempt(service, policy, shape, unit, 3), zero=False)
+
+    fourth = WorkEnvelope.create(
+        cycle_id=_graphiti_usage_cycle_id(
+            unit, attempt_number=4, requested_cycle_id=None,
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=unit.ingest_id,
+        graphiti_attempt_id=f"{unit.ingest_id}:4",
+    )
+    service.open_envelope(fourth)
+    receipt_digest = usage_module.digest_canonical({"private": "receipt-4"})
+    service.record_work_outcome(
+        envelope_id=fourth.envelope_id,
+        outcome="GRAPHITI_REJECTED_BINDING",
+        outcome_record_id=receipt_digest,
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=4),
+        retained_proposal_count=0,
+    )
+
+    fifth, allocation = _attempt(service, policy, shape, unit, 5)
+    terminal = _reported(allocation, outcome="COMPLETE")
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=terminal.dispatch_at,
+        state="DISPATCH_STARTED",
+        evidence_digest=allocation.canonical_digest,
+    )
+    service.complete(
+        terminal,
+        provider_telemetry={"invocation": allocation.invocation_id},
+    )
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="recovered ambiguous usage is not exactly settled",
+    ):
+        service.native_recovered_ambiguous_usage_evidence_digest(
+            ingest_id=unit.ingest_id,
+            authoritative_attempt_number=3,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=receipt_digest,
+            skipped_recorded_at=T0 + timedelta(seconds=5),
+            latest_allowed_attempt_number=5,
+        )
+    digest = service.native_recovered_ambiguous_usage_evidence_digest(
+        ingest_id=unit.ingest_id,
+        authoritative_attempt_number=3,
+        skipped_attempt_number=4,
+        skipped_receipt_digest=receipt_digest,
+        skipped_recorded_at=T0 + timedelta(seconds=5),
+        latest_allowed_attempt_number=5,
+        retained_reentry_attempt_number=5,
+    )
+    assert digest.startswith("sha256:")
+    service.record_work_outcome(
+        envelope_id=fifth.envelope_id,
+        outcome="GRAPHITI_COMPLETE",
+        outcome_record_id="retained-authority-attempt-5",
+        payload_digest=None,
+        terminal_at=terminal.completed_at,
+        retained_proposal_count=0,
+    )
+    reopened = ModelUsageService(service.path)
+    reopened.record_work_outcome(
+        envelope_id=fifth.envelope_id,
+        outcome="GRAPHITI_COMPLETE",
+        outcome_record_id="retained-authority-attempt-5",
+        payload_digest=None,
+        terminal_at=terminal.completed_at,
+        retained_proposal_count=0,
+    )
+    replayed = reopened.native_graphiti_ingest_retry_evidence_many(
+        failed_attempts={unit.ingest_id: 5}, max_attempts=6,
+    )[unit.ingest_id]
+    assert replayed.settled_provider_attempts == (3, 5)
+    assert replayed.unresolved_attempts == (4,)
+
+    with sqlite3.connect(service.path) as connection:
+        connection.execute(
+            "DELETE FROM model_provider_telemetry WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        )
+    with pytest.raises(ModelUsageIntegrityError):
+        service.native_recovered_ambiguous_usage_evidence_digest(
+            ingest_id=unit.ingest_id,
+            authoritative_attempt_number=3,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=receipt_digest,
+            skipped_recorded_at=T0 + timedelta(seconds=5),
+            latest_allowed_attempt_number=5,
+            retained_reentry_attempt_number=5,
+        )
+
+
 @pytest.mark.parametrize("returned_invocations", (True, False))
 def test_native_retry_requires_the_exact_historical_direct_fallback_event(
     tmp_path, monkeypatch, returned_invocations,

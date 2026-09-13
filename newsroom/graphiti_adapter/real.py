@@ -18,7 +18,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.broker import (
     NEO4J_BOLT_HOST,
@@ -101,6 +105,7 @@ from .models import (
     GraphitiAdapterExecution,
     GraphitiAttemptRequest,
     GraphitiWorkspaceDescriptor,
+    RecoveredAmbiguousProgressionProof,
     adapter_outcome_for,
 )
 from .types import (
@@ -612,6 +617,9 @@ async def _add_episode(
     donor_store: DonorStore | None = None,
     fallback_permitted: bool = True,
     retry_snapshot_is_failed: Callable[[dict[str, object]], bool] | None = None,
+    recovered_ambiguous_progression: (
+        RecoveredAmbiguousProgressionProof | None
+    ) = None,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
@@ -745,13 +753,56 @@ async def _add_episode(
                         recovered = (
                             await prior_guard.recovered_ambiguous_marker_or_none()
                         )
+                        recovered_proof_allowed = False
                         if (
                             recovered is not None
-                            and callable(settled_retry_proof)
-                            and settled_retry_proof(
-                                episode_uuid=episode_id,
-                                attempt_number=attempt_number,
-                                prior_attempt_number=recovered.attempt_number,
+                            and recovered_ambiguous_progression is not None
+                        ):
+                            proof = recovered_ambiguous_progression
+                            fresh_recovery_proof = getattr(
+                                invocation_observer,
+                                "allows_fresh_recovered_ambiguous_retry",
+                                None,
+                            )
+                            marker_digest = digest_canonical(
+                                {
+                                    "state": "RECOVERED_AMBIGUOUS",
+                                    "attempt_number": recovered.attempt_number,
+                                    "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+                                    "episode_uuid": episode_id,
+                                    "input_digest": recovered.input_digest,
+                                }
+                            )
+                            recovered_proof_allowed = (
+                                proof.ingest_id == episode_id
+                                and proof.skipped_attempt_number + 1
+                                == attempt_number
+                                and proof.marker_attempt_number
+                                == recovered.attempt_number
+                                and proof.marker_input_digest
+                                == recovered.input_digest
+                                and proof.recovery_marker_digest == marker_digest
+                                and callable(fresh_recovery_proof)
+                                and fresh_recovery_proof(
+                                    episode_uuid=episode_id,
+                                    attempt_number=attempt_number,
+                                    prior_attempt_number=recovered.attempt_number,
+                                    proof=proof,
+                                )
+                            )
+                        if (
+                            recovered is not None
+                            and (
+                                recovered_proof_allowed
+                                or (
+                                    recovered_ambiguous_progression is None
+                                    and callable(settled_retry_proof)
+                                    and settled_retry_proof(
+                                        episode_uuid=episode_id,
+                                        attempt_number=attempt_number,
+                                        prior_attempt_number=recovered.attempt_number,
+                                    )
+                                )
                             )
                         ):
                             guard = retry_guard
@@ -1503,6 +1554,9 @@ class RealGraphitiAdapter:
                         donor_store=donor_store,
                         fallback_permitted=self._fallback_permitted,
                         retry_snapshot_is_failed=retry_snapshot_is_failed,
+                        recovered_ambiguous_progression=(
+                            attempt.recovered_ambiguous_progression
+                        ),
                     ),
                     timeout=remaining_timeout_s,
                 )

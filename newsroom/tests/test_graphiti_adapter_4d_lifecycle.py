@@ -32,7 +32,11 @@ from newsroom.sources import (
 )
 
 from .authority_a2b_helpers import open_object_system
-from .extraction_4a_helpers import extraction_proof
+from .extraction_4a_helpers import (
+    extraction_proof,
+    open_extraction_system,
+    seed_extraction_fixture,
+)
 from .graphiti_adapter_4d_authority_helpers import (
     fake_attempt,
     open_graphiti_system,
@@ -319,7 +323,7 @@ def test_native_retry_versions_are_retained_as_one_exact_extraction_chain(
         first_observed_at="2026-09-08T00:00:00.000000Z",
     )
 
-    def generated(attempt_number: int):
+    def generated(attempt_number: int, **progression):
         return evaluation_attempt_for_body(
             episode_body=passage.require_text(), ingest_id="native-ingest",
             proving_run_id="native-source:" + digest_canonical({"raw": "page"}),
@@ -328,6 +332,7 @@ def test_native_retry_versions_are_retained_as_one_exact_extraction_chain(
             published_at=None, updated_at=None, effective_revision=effective,
             canonical_url="https://www.gov.uk/native-item",
             authority_ids=authority_ids, attempt_number=attempt_number,
+            **progression,
         )
 
     def with_native_identity(base, native):
@@ -399,6 +404,258 @@ def test_native_retry_versions_are_retained_as_one_exact_extraction_chain(
     assert second.extraction_request.expected_previous_version_id == (
         first.extraction_request.run_version_id
     )
+    extraction_four = generated(4).extraction_request.run_version_id
+    graphiti_six = generated(
+        6,
+        extraction_previous_version_number=4,
+        extraction_previous_run_version_id=extraction_four,
+    )
+    assert graphiti_six.extraction_request.version_number == 5
+    assert graphiti_six.extraction_request.run_version_id == (
+        generated(5).extraction_request.run_version_id
+    )
+    assert graphiti_six.extraction_request.expected_previous_version_id == (
+        extraction_four
+    )
+    assert graphiti_six.expected_previous_attempt_id == generated(5).attempt_id
+
+
+def test_recovered_ambiguous_authority_crosses_one_private_gap_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import (
+        GraphitiAttemptId,
+        GraphitiAdapterVersionConflict,
+        GraphitiCleanupReceiptId,
+        GraphitiInputManifestId,
+        GraphitiWorkspaceId,
+        RecoveredAmbiguousProgressionProof,
+    )
+    from newsroom.graphiti_adapter.identity import typed_id
+    from newsroom.tests.test_graphiti_adapter_4d_outcomes import (
+        _evaluation_attempt,
+        _evaluation_execution,
+    )
+    from newsroom.graphiti_adapter.real import RealGraphitiAdapter
+
+    state = seed_extraction_fixture(tmp_path / "authority")
+    workspace_root = (tmp_path / "workspace").resolve()
+    base = _evaluation_attempt(state)
+
+    def request_for(
+        graphiti_number: int,
+        extraction_number: int,
+        *,
+        previous_attempt_id=None,
+        previous_run_version_id=None,
+        recovery=None,
+        key_suffix: str = "",
+    ):
+        request = replace(
+            base.extraction_request,
+            run_version_id=typed_id(
+                type(base.extraction_request.run_version_id),
+                "run-version",
+                f"recovered-gap:{extraction_number}",
+            ),
+            version_number=extraction_number,
+            expected_previous_version_id=previous_run_version_id,
+            idempotency_key=f"recovered-gap-run:{extraction_number}{key_suffix}",
+        )
+        manifest = GraphitiInputManifest.from_run_request(
+            manifest_id=typed_id(
+                GraphitiInputManifestId,
+                "manifest",
+                f"recovered-gap:{graphiti_number}{key_suffix}",
+            ),
+            configuration=base.configuration,
+            contract=base.extraction_contract,
+            request=request,
+        )
+        return replace(
+            base,
+            attempt_id=typed_id(
+                GraphitiAttemptId,
+                "attempt",
+                f"recovered-gap:{graphiti_number}{key_suffix}",
+            ),
+            attempt_number=graphiti_number,
+            expected_previous_attempt_id=previous_attempt_id,
+            workspace_id=typed_id(
+                GraphitiWorkspaceId,
+                "workspace",
+                f"recovered-gap:{graphiti_number}{key_suffix}",
+            ),
+            cleanup_receipt_id=typed_id(
+                GraphitiCleanupReceiptId,
+                "cleanup",
+                f"recovered-gap:{graphiti_number}{key_suffix}",
+            ),
+            manifest=manifest,
+            extraction_request=request,
+            idempotency_key=f"recovered-gap-attempt:{graphiti_number}{key_suffix}",
+            episode_uuid="recovered-gap",
+            recovered_ambiguous_progression=recovery,
+        )
+
+    first = request_for(1, 1)
+    second = request_for(
+        2,
+        2,
+        previous_attempt_id=first.attempt_id,
+        previous_run_version_id=first.extraction_request.run_version_id,
+    )
+    third = request_for(
+        3,
+        3,
+        previous_attempt_id=second.attempt_id,
+        previous_run_version_id=second.extraction_request.run_version_id,
+    )
+    calls: list[int] = []
+
+    def execute(_adapter, *, attempt, workspace_root):
+        del workspace_root
+        calls.append(attempt.attempt_number)
+        if attempt.attempt_number in {1, 2}:
+            execution = _evaluation_execution(attempt, outcome="FAILED")
+            shift = timedelta(seconds=(attempt.attempt_number - 3) * 2)
+            return replace(
+                execution,
+                started_at=replace(
+                    execution.started_at,
+                    value=execution.started_at.value + shift,
+                ),
+                ended_at=replace(
+                    execution.ended_at,
+                    value=execution.ended_at.value + shift,
+                ),
+                cleanup_receipt=replace(
+                    execution.cleanup_receipt,
+                    recorded_at=replace(
+                        execution.cleanup_receipt.recorded_at,
+                        value=execution.cleanup_receipt.recorded_at.value + shift,
+                    ),
+                ),
+            )
+        if attempt.attempt_number == 3:
+            return _evaluation_execution(attempt, outcome="AMBIGUOUS_EFFECT")
+        execution = _evaluation_execution(attempt, outcome="COMPLETE")
+        shift = timedelta(seconds=1)
+        return replace(
+            execution,
+            started_at=replace(
+                execution.started_at,
+                value=execution.started_at.value + shift,
+            ),
+            ended_at=replace(
+                execution.ended_at,
+                value=execution.ended_at.value + shift,
+            ),
+            cleanup_receipt=replace(
+                execution.cleanup_receipt,
+                recorded_at=replace(
+                    execution.cleanup_receipt.recorded_at,
+                    value=execution.cleanup_receipt.recorded_at.value + shift,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(RealGraphitiAdapter, "execute", execute)
+    with open_extraction_system(state) as extraction:
+        extraction.extraction.register_contract(
+            base.extraction_contract, proof=extraction_proof()
+        )
+    with open_graphiti_system(state, workspace_root=workspace_root) as system:
+        system.graphiti.register_configuration(
+            first.configuration, proof=extraction_proof()
+        )
+        def governed_execute(attempt):
+            return system.graphiti.execute_attempt(
+                attempt,
+                proof=extraction_proof(),
+                execution_deadline=SOURCE_NOW.value,
+                fallback_permitted=False,
+                invocation_observer=object(),
+            )
+
+        one = governed_execute(first)
+        two = governed_execute(second)
+        ambiguous = governed_execute(third)
+        assert ambiguous.outcome is GraphitiAdapterOutcome.AMBIGUOUS_EFFECT
+        skipped_at = replace(
+            ambiguous.recorded_at,
+            value=ambiguous.recorded_at.value + timedelta(seconds=1),
+        )
+        recovery = RecoveredAmbiguousProgressionProof(
+            authoritative_attempt_id=ambiguous.attempt_id,
+            authoritative_attempt_digest=ambiguous.canonical_digest,
+            authoritative_attempt_number=ambiguous.attempt_number,
+            authoritative_run_version_id=ambiguous.run_version_id,
+            authoritative_recorded_at=ambiguous.recorded_at,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=digest_canonical({"private": "receipt-4"}),
+            skipped_ledger_sequence=4,
+            skipped_ledger_digest=digest_canonical({"private": "ledger-4"}),
+            skipped_recorded_at=skipped_at,
+            settled_usage_evidence_digest=digest_canonical(
+                {"attempt": 3, "usage": "settled"}
+            ),
+            recovery_marker_digest=digest_canonical(
+                {"attempt": 3, "state": "RECOVERED_AMBIGUOUS"}
+            ),
+            marker_attempt_number=3,
+            marker_workspace_id=ambiguous.workspace_id,
+            marker_input_digest=digest_canonical({"neo4j": "input-3"}),
+            input_binding_digest=third.extraction_request.input_binding.digest,
+            ingest_id="recovered-gap",
+        )
+        fifth = request_for(
+            5,
+            4,
+            previous_attempt_id=ambiguous.attempt_id,
+            previous_run_version_id=ambiguous.run_version_id,
+            recovery=recovery,
+        )
+        forged = replace(
+            fifth,
+            recovered_ambiguous_progression=replace(
+                recovery,
+                authoritative_attempt_digest=digest_canonical(
+                    {"forged": "attempt"}
+                ),
+            ),
+            idempotency_key="recovered-gap-attempt:5-forged",
+        )
+        with pytest.raises(
+            GraphitiAdapterVersionConflict,
+            match="differs from retained authority",
+        ):
+            governed_execute(forged)
+        assert calls == [1, 2, 3]
+        completed = governed_execute(fifth)
+        replayed = governed_execute(fifth)
+        history = system.graphiti.attempt_history(
+            first.extraction_request.run_id,
+            limit=10,
+            proof=extraction_proof(),
+        )
+
+    assert [one.attempt_number, two.attempt_number, ambiguous.attempt_number] == [
+        1,
+        2,
+        3,
+    ]
+    assert completed.attempt_number == 5
+    assert completed.run_version_id == fifth.extraction_request.run_version_id
+    assert replayed == replace(completed, replayed=True)
+    assert [item.attempt_number for item in history] == [5, 3, 2, 1]
+    with open_graphiti_system(state, workspace_root=workspace_root) as reopened:
+        reopened_history = reopened.graphiti.attempt_history(
+            first.extraction_request.run_id,
+            limit=10,
+            proof=extraction_proof(),
+        )
+    assert [item.attempt_number for item in reopened_history] == [5, 3, 2, 1]
 
 
 def test_tombstone_blocks_attempt_replay_and_reads_without_deleting_history(

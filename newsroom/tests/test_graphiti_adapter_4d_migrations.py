@@ -5,10 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.authority.graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_MIGRATION_CHECKSUM,
     GRAPHITI_ADAPTER_MIGRATION_NAME,
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
+)
+from newsroom.authority.graphiti_recovered_ambiguous_migrations import (
+    GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_STATEMENTS,
 )
 from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
@@ -32,6 +36,7 @@ from .extraction_4a_helpers import (
     seed_extraction_fixture,
 )
 from .graphiti_adapter_4d_migration_helpers import (
+    _drop_v39_recovered_ambiguous_guards,
     downgrade_empty_graphiti_adapter_schema_to_v15,
 )
 
@@ -70,6 +75,173 @@ REQUIRED_GRAPHITI_ADAPTER_TRIGGERS = {
     "immutable_graphiti_adapter_attempts_delete",
     "graphiti_attempt_head_delete_guard",
 }
+
+
+def test_v39_replaces_only_graphiti_progression_guards(tmp_path: Path) -> None:
+    state = seed_extraction_fixture(tmp_path)
+    conn = sqlite3.connect(state.database, isolation_level=None)
+    try:
+        before = {
+            (str(kind), str(name)): str(sql)
+            for kind, name, sql in conn.execute(
+                "SELECT type,name,sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        _drop_v39_recovered_ambiguous_guards(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        v38 = {
+            (str(kind), str(name)): str(sql)
+            for kind, name, sql in conn.execute(
+                "SELECT type,name,sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        changed = {
+            key
+            for key in before.keys() | v38.keys()
+            if before.get(key) != v38.get(key)
+        }
+        assert changed == {
+            ("trigger", "graphiti_attempt_chain_guard"),
+            ("trigger", "graphiti_attempt_head_update_guard"),
+        }
+        apply_pending_migrations(
+            conn, applied_at="2042-03-12T10:00:00.000000Z"
+        )
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
+    finally:
+        conn.close()
+
+
+def test_v39_chain_guard_binds_candidate_proof_to_authority_payload() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE graphiti_adapter_attempts(
+                attempt_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                run_version_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                previous_attempt_id TEXT,
+                workspace_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                authority_event_id TEXT NOT NULL,
+                canonical_bytes BLOB NOT NULL,
+                canonical_digest TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
+            CREATE TABLE authority_payloads(
+                payload_id TEXT PRIMARY KEY,
+                payload_bytes BLOB NOT NULL
+            );
+            CREATE TABLE ledger_events(
+                event_id TEXT PRIMARY KEY,
+                payload_id TEXT NOT NULL
+            );
+            """
+        )
+        recorded_at = "2042-03-12T10:00:00.000000Z"
+        skipped_recorded_at = "2042-03-12T10:00:01.000000Z"
+        proof = {
+            "authoritative_attempt_id": "attempt-3",
+            "authoritative_attempt_digest": "sha256:parent",
+            "authoritative_attempt_number": 3,
+            "authoritative_run_version_id": "version-3",
+            "authoritative_recorded_at": recorded_at,
+            "skipped_attempt_number": 4,
+            "skipped_receipt_digest": "sha256:receipt",
+            "skipped_ledger_sequence": 4,
+            "skipped_ledger_digest": "sha256:ledger",
+            "skipped_recorded_at": skipped_recorded_at,
+            "settled_usage_evidence_digest": "sha256:usage",
+            "recovery_marker_digest": "sha256:marker",
+            "marker_attempt_number": 3,
+            "marker_workspace_id": "workspace",
+            "marker_input_digest": "sha256:marker-input",
+            "input_binding_digest": "sha256:input-binding",
+            "ingest_id": "episode",
+        }
+        conn.execute(
+            "INSERT INTO graphiti_adapter_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "attempt-3",
+                "run",
+                "version-3",
+                3,
+                "attempt-2",
+                "workspace",
+                "AMBIGUOUS_EFFECT",
+                "event-3",
+                canonical_json_bytes({"attempt_id": "attempt-3"}),
+                "sha256:parent",
+                recorded_at,
+            ),
+        )
+        conn.execute(GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_STATEMENTS[1])
+        conn.execute(
+            "INSERT INTO authority_payloads VALUES(?,?)",
+            (
+                "payload-5",
+                canonical_json_bytes({"recovered_ambiguous_progression": proof}),
+            ),
+        )
+        conn.execute("INSERT INTO ledger_events VALUES(?,?)", ("event-5", "payload-5"))
+
+        candidate_values = (
+            "attempt-5",
+            "run",
+            "version-4",
+            5,
+            "attempt-3",
+            "workspace",
+            "COMPLETE",
+            "event-5",
+        )
+        for candidate in (
+            {"attempt_id": "attempt-5"},
+            {"attempt_id": "attempt-5", "recovered_ambiguous_progression": None},
+            {
+                "attempt_id": "attempt-5",
+                "recovered_ambiguous_progression": {
+                    **proof,
+                    "skipped_receipt_digest": "sha256:different",
+                },
+            },
+        ):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="invalid graphiti attempt chain",
+            ):
+                conn.execute(
+                    "INSERT INTO graphiti_adapter_attempts "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        *candidate_values,
+                        canonical_json_bytes(candidate),
+                        "sha256:five",
+                        skipped_recorded_at,
+                    ),
+                )
+
+        conn.execute(
+            "INSERT INTO graphiti_adapter_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                *candidate_values,
+                canonical_json_bytes(
+                    {
+                        "attempt_id": "attempt-5",
+                        "recovered_ambiguous_progression": proof,
+                    }
+                ),
+                "sha256:five",
+                skipped_recorded_at,
+            ),
+        )
+    finally:
+        conn.close()
 
 
 def test_fresh_schema_v16_history_policies_tables_and_triggers_are_exact(

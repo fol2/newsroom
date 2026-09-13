@@ -57,6 +57,7 @@ _EXPECTED_NAMES = {
     36: "authorisation_shared_scope_content_v36",
     37: "authentication_context_compaction_v37",
     38: "authorization_request_residual_storage_v38",
+    39: "graphiti_recovered_ambiguous_progression_v39",
 }
 _EXPECTED_CHECKSUMS = {
     13: "sha256:c3e5ae627dda1c04bebc50952786413d977bd399e67b7f5b87452794f08f49ab",
@@ -84,6 +85,7 @@ _EXPECTED_CHECKSUMS = {
     36: "sha256:a91546af0a81e4dbc5c1fb2aaa215a455e36b8e28014991238d597c9ef1b15f9",
     37: "sha256:8ac6c775a376d1787f645ef6526a7aff8e1c70bbb7d22489d06a810d28cfd1be",
     38: "sha256:18c4ef2179dfeea90d8ffec815e89190b1053b87dc4a06410d8b00ee7a789b38",
+    39: "sha256:40a2d6a969e6759ad76fa950d122dda1552a81f44f6a65c30c4b1e8389ccc3ed",
 }
 
 _EXPECTED_MATRIX = """version | migration | objects | history fingerprint | schema fingerprint | object fingerprint
@@ -113,6 +115,7 @@ v35 | graphiti_accounted_zero_proposal_authority_v35 | 1516 | sha256:eb02cf288b6
 v36 | authorisation_shared_scope_content_v36 | 1522 | sha256:cddffffe87f4c5123c3f5f501bb246668dd7b13077e1e4b0cbced4d7aab2b1d1 | sha256:df4cd39f154791d3e5680ac4fa501c2a076427d0ea18caff40145319c08647d0 | sha256:66ecc87b40ee20a59a0c67ddc0ade6c6a6ca670b9c883939b84b7faa0b6d183c
 v37 | authentication_context_compaction_v37 | 1523 | sha256:4478eb4b5d8ea85fa26a72e02830c71d5fafff20d62e72e56e4be1edb9c26ad4 | sha256:4003bc1eb0124845189a50e561b39da33bfde75ab8eabd19ddf9c7f807417d3d | sha256:fe1f5f6d2a109496751dd035da536c7ce9833c19075d7f2ec0a8c3a985c9b505
 v38 | authorization_request_residual_storage_v38 | 1524 | sha256:28c196a875fd3553b758064fd90c9fa2be1f0f08931b69806dd3c84a7b2e6a70 | sha256:fd12ca767bc53236efb0a7500dae2bc2dbaee70bfc78cdc99a5ad4c421cc2a29 | sha256:89bd6d2ad8f81bfff8ee0cbad72fa1f266038b363a15a4f4e9fb450f8992a016
+v39 | graphiti_recovered_ambiguous_progression_v39 | 1524 | sha256:fa2d3fc80a04d5df4c5213e44f95c095279256a3bf3d31e41e465c38986a7b96 | sha256:d88defccf440c0c5a89ae9a3e2e900bb4acdc64fb9781c9483add6d0ad79a6c8 | sha256:a36bec5b6d0f281e2ee05274700d1ed18a0f38688ae5731a1f8688cd57c1e429
 """
 
 
@@ -147,7 +150,7 @@ def test_registry_history_and_statement_pins_are_complete_and_named() -> None:
     assert RETAINED_MIN_VERSION == 13
     assert RETAINED_VERSIONS == tuple(_EXPECTED_NAMES)
     assert tuple(record.version for record in MIGRATION_REGISTRY) == tuple(
-        (*range(1, 33), 34, 35, 36, 37, 38)
+        (*range(1, 33), 34, 35, 36, 37, 38, 39)
     )
     assert (
         tuple(
@@ -301,37 +304,24 @@ def test_default_connection_backup_leaves_exclusive_upgrade_available(
     inspect_exact_prefix(database, expected_version=CURRENT_VERSION)
 
 
-def test_failed_upgrade_rolls_back_to_exact_predecessor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failed_upgrade_rolls_back_to_exact_predecessor(tmp_path: Path) -> None:
     database = tmp_path / f"rollback-v{PREDECESSOR_VERSION}.sqlite3"
     before = build_exact_prefix(database, PREDECESSOR_VERSION)
-    original = authority_migrations.migrate_authorization_request_storage
+    fail_after = authority_migrations.GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_STATEMENTS[
+        1
+    ]
 
-    def fail_after_v38_conversion(
-        connection: sqlite3.Connection, *, expected_history
-    ) -> None:
-        original(connection, expected_history=expected_history)
-        columns = {
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(authorization_requests)")
-        }
-        assert {
-            "storage_request_residual",
-            "storage_request_marker",
-        } <= columns
-        raise sqlite3.OperationalError("injected after v38 conversion")
+    class FailAfterV39Statement(sqlite3.Connection):
+        def execute(self, sql: str, parameters=(), /):
+            cursor = super().execute(sql, parameters)
+            if sql == fail_after:
+                raise sqlite3.OperationalError("injected after v39 trigger change")
+            return cursor
 
-    monkeypatch.setattr(
-        authority_migrations,
-        "migrate_authorization_request_storage",
-        fail_after_v38_conversion,
-    )
-
-    connection = sqlite3.connect(database)
+    connection = sqlite3.connect(database, factory=FailAfterV39Statement)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
-        with pytest.raises(sqlite3.DatabaseError, match="after v38 conversion"):
+        with pytest.raises(sqlite3.DatabaseError, match="after v39 trigger change"):
             authority_migrations.apply_pending_migrations(
                 connection, applied_at="1970-01-02T00:00:00.000000Z"
             )

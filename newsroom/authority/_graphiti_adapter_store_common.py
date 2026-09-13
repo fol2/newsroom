@@ -47,6 +47,7 @@ from newsroom.graphiti_adapter.models import (
     GraphitiReplaySourceRecord,
     GraphitiWorkspaceDescriptor,
     GraphitiWorkspacePolicy,
+    RecoveredAmbiguousProgressionProof,
 )
 from newsroom.graphiti_adapter.policy import (
     GRAPHITI_ATTEMPT_EXECUTE_COMMAND,
@@ -691,36 +692,16 @@ class _GraphitiAdapterStoreSupport:
             cleanup_receipt=cleanup,
             authority_event_id=EventId.parse(str(row["authority_event_id"])),
             recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
+            recovered_ambiguous_progression=(
+                None
+                if "recovered_ambiguous_progression" not in value
+                else RecoveredAmbiguousProgressionProof.from_canonical_value(
+                    value["recovered_ambiguous_progression"]
+                )
+            ),
             replayed=replayed,
         )
-        expected = {
-            "attempt_id": str(record.attempt_id),
-            "run_id": str(record.run_id),
-            "run_version_id": str(record.run_version_id),
-            "attempt_number": record.attempt_number,
-            "previous_attempt_id": (
-                None
-                if record.previous_attempt_id is None
-                else str(record.previous_attempt_id)
-            ),
-            "configuration_id": str(record.configuration_id),
-            "configuration_digest": record.configuration_digest,
-            "workspace_id": str(record.workspace_id),
-            "manifest_id": str(record.manifest_id),
-            "outcome": record.outcome.value,
-            "failure_code": record.failure_code,
-            "started_at": record.started_at.to_text(),
-            "ended_at": record.ended_at.to_text(),
-            "usage": usage.canonical_value(),
-            "output_id": None if record.output_id is None else str(record.output_id),
-            "proposal_set_id": (
-                None
-                if record.proposal_set_id is None
-                else str(record.proposal_set_id)
-            ),
-            "cleanup_receipt_id": str(cleanup.receipt_id),
-            "cleanup_receipt_digest": cleanup.canonical_digest,
-        }
+        expected = record.canonical_value()
         if value != expected:
             raise AuthorityPersistenceError("Graphiti attempt canonical data differs")
         configuration = self._graphiti_configuration_from_row(
@@ -811,7 +792,21 @@ class _GraphitiAdapterStoreSupport:
                 if payload.get("predecessor_episode_uuid") is None
                 else str(payload["predecessor_episode_uuid"])
             ),
+            recovered_ambiguous_progression=(
+                None
+                if "recovered_ambiguous_progression" not in payload
+                else RecoveredAmbiguousProgressionProof.from_canonical_value(
+                    payload["recovered_ambiguous_progression"]
+                )
+            ),
         )
+        if (
+            request.recovered_ambiguous_progression
+            != record.recovered_ambiguous_progression
+        ):
+            raise AuthorityPersistenceError(
+                "Graphiti attempt recovery proof differs from command authority"
+            )
         self._validate_graphiti_record_envelope(
             conn,
             row,
