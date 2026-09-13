@@ -19,7 +19,7 @@ from .classify_change import (
     resolve_tree,
     verify_exact_clean_checkout,
 )
-from .dependencies import DependencyError, build_dependency_graph, module_name_for_path
+from .dependencies import DependencyError, _relative_module, build_dependency_graph, module_name_for_path
 
 
 SCHEMA_VERSION = "newsroom.sdlc.focus-route.v1"
@@ -156,18 +156,30 @@ def _test_files(repo_root: Path) -> tuple[Path, ...]:
     )
 
 
-def _imported_modules(tree: ast.AST) -> set[str]:
+def _imported_modules(tree: ast.AST, *, importer: str | None = None) -> set[str]:
     imports: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
-            imports.update(
-                f"{node.module}.{alias.name}"
-                for alias in node.names
-                if alias.name != "*"
-            )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module
+            if node.level and importer is not None:
+                module = _relative_module(importer.rpartition(".")[0], node.level, module)
+            if module:
+                imports.add(module)
+                imports.update(
+                    f"{module}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+        elif (
+            importer is not None and isinstance(node, ast.Call) and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value.startswith(("newsroom.", "scripts."))
+        ):
+            # Preserve the selector's literal module references in the same walk.
+            imports.add(node.args[0].value)
     return imports
 
 

@@ -279,3 +279,22 @@ def test_focus_contract_rejects_reintroduced_universal_pr_suite() -> None:
     changed["global"]["full_suite_is_default"] = True
     with pytest.raises(FocusGateError, match="full-suite"):
         validate_focus_contract_data(changed)
+
+
+def test_import_inventory_resolves_context_without_changing_legacy_default() -> None:
+    import ast
+    from scripts.sdlc.focus_gate import _imported_modules
+
+    tree = ast.parse(
+        "from . import fixture as selected\n"
+        "from .bridge import build as retained\n"
+        "import newsroom.package.child as package\n"
+        "importlib.import_module('newsroom.tests.dynamic')\n"
+    )
+    assert _imported_modules(tree) == {
+        "bridge", "bridge.build", "newsroom.package.child",
+    }
+    assert _imported_modules(tree, importer="newsroom.tests.test_consumer") == {
+        "newsroom.tests", "newsroom.tests.fixture", "newsroom.tests.bridge",
+        "newsroom.tests.bridge.build", "newsroom.package.child", "newsroom.tests.dynamic",
+    }

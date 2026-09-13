@@ -522,6 +522,8 @@ def test_changed_test_helper_routes_exact_direct_and_transitive_consumers(
     _write(tmp_path, "newsroom/tests/other_fixture.py", "def unrelated(): return 9\n")
     _write(tmp_path, "newsroom/tests/test_direct.py", "from .fixture import changed as selected\n")
     _write(tmp_path, "newsroom/tests/test_module.py", "import newsroom.tests.fixture as selected\n")
+    _write(tmp_path, "newsroom/tests/test_package_child.py", "from . import fixture as selected\n")
+    _write(tmp_path, "newsroom/tests/test_dynamic.py", "import importlib\nselected = importlib.import_module('newsroom.tests.fixture')\n")
     _write(tmp_path, "newsroom/tests/test_transitive.py", "from .relay import wrapped\n")
     _write(tmp_path, "newsroom/tests/test_helper_neo4j_service.py", "from .bridge import build\n")
     _write(tmp_path, "newsroom/tests/test_other_symbol.py", "from .fixture import other\n")
@@ -537,7 +539,8 @@ def test_changed_test_helper_routes_exact_direct_and_transitive_consumers(
     assert route["full_health_required"] is False
     assert "unresolved_dependency_analysis:full_health" not in route["reasons"]
     assert route["selected_tests"] == sorted([
-        "newsroom/tests/test_direct.py", "newsroom/tests/test_module.py",
+        "newsroom/tests/test_direct.py", "newsroom/tests/test_dynamic.py",
+        "newsroom/tests/test_module.py", "newsroom/tests/test_package_child.py",
         "newsroom/tests/test_transitive.py",
         *([] if symbol_sensitive else ["newsroom/tests/test_other_symbol.py"]),
     ])
@@ -570,3 +573,43 @@ def test_broad_package_change_retains_absolute_and_relative_submodule_consumers(
         "newsroom/tests/test_absolute.py", "newsroom/tests/test_relative.py",
     ]
     assert route["full_health_required"] is False
+
+
+@pytest.mark.parametrize("dependent_count", (1, 100))
+def test_broad_test_import_walk_is_once_per_file_not_per_dependent(
+    tmp_path: Path, monkeypatch, dependent_count: int,
+) -> None:
+    import ast
+
+    helper = "newsroom/tests/fixture.py"
+    _write(tmp_path, helper, "VALUE = 1\n")
+    body = "import unrelated\n\ndef test_counted_tree():\n" + "    value = 1\n" * 500
+    for name in ("test_first.py", "test_second.py"):
+        _write(tmp_path, "newsroom/tests/" + name, body)
+    monkeypatch.setattr(selector, "build_dependency_graph", lambda _: _Graph({
+        helper: tuple(f"newsroom/dependent_{number}.py" for number in range(dependent_count)),
+    }))
+    monkeypatch.setattr(selector, "_changed_public_symbols", lambda *_: None)
+    original = ast.walk
+    walks = []
+
+    def counted(tree):
+        if isinstance(tree, ast.Module) and any(
+            isinstance(node, ast.FunctionDef) and node.name == "test_counted_tree"
+            for node in tree.body
+        ):
+            walks.append(tree)
+        yield from original(tree)
+
+    monkeypatch.setattr(ast, "walk", counted)
+    selected, unresolved = selector._discover_tests(tmp_path, (helper,))
+    assert selected == set() and unresolved is False
+    assert len(walks) == 2
+
+
+def test_invalid_test_relative_import_keeps_unresolved_fallback(tmp_path: Path) -> None:
+    _write(tmp_path, "newsroom/tests/fixture.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/test_consumer.py", "from ....fixture import VALUE\n")
+    route = selector.select_focus(("newsroom/tests/fixture.py",), repo_root=tmp_path)
+    assert route["full_health_required"] is True
+    assert "unresolved_dependency_analysis:full_health" in route["reasons"]
