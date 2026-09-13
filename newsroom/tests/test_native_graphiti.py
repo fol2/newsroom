@@ -1170,16 +1170,24 @@ def test_native_reenters_retained_recovered_attempt_before_a_new_successor(
         attempt_history=lambda *_args, **_values: (head, third),
     )
     processor._runner = Runner()
-    processor._usage = SimpleNamespace(
-        native_graphiti_ingest_retry_evidence_many=lambda **_values: {
+    evidence_requests = []
+
+    def retry_evidence(**values):
+        requested = values["failed_attempts"]
+        evidence_requests.append(requested)
+        selected = requested[unit.ingest_id]
+        return {
             unit.ingest_id: GraphitiIngestRetryEvidence(
-                attempt_numbers=(1, 2, 3, 4, 5),
+                attempt_numbers=tuple(range(1, selected + 1)),
                 zero_dispatch_attempts=(1, 2),
                 settled_provider_attempts=(3,),
                 latest_settled_provider_attempt=3,
-                unresolved_attempts=(4, 5),
+                unresolved_attempts=tuple(range(4, selected + 1)),
             )
         }
+
+    processor._usage = SimpleNamespace(
+        native_graphiti_ingest_retry_evidence_many=retry_evidence,
     )
     processor._settle_missing_subscription_usage = lambda _units: None
     monkeypatch.setattr(
@@ -1236,13 +1244,6 @@ def test_native_reenters_retained_recovered_attempt_before_a_new_successor(
             model_usage=processor._usage,
             recovered_ambiguous_attempts={},
             authenticated_rejected_attempts={unit.ingest_id: (4,)},
-        )
-        assert not cycle._queue(
-            connection,
-            (unit,),
-            model_usage=processor._usage,
-            recovered_ambiguous_attempts={},
-            authenticated_rejected_attempts={unit.ingest_id: (4,)},
             authenticated_reentry_attempts={unit.ingest_id: 4},
         )
         assert cycle._queue(
@@ -1253,8 +1254,10 @@ def test_native_reenters_retained_recovered_attempt_before_a_new_successor(
             authenticated_rejected_attempts={unit.ingest_id: (4,)},
             authenticated_reentry_attempts={unit.ingest_id: 5},
         )
+        assert evidence_requests[-1] == {unit.ingest_id: 5}
 
         result, = processor.advance((unit,), cycle_id="recovered-gap-reentry")
+        assert evidence_requests[-1] == {unit.ingest_id: 5}
         assert (result.state, result.reason, calls) == (
             "GRAPHITI_COMPLETE", None, [("authenticate", 5), ("ingest", 5)]
         )

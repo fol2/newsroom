@@ -824,7 +824,14 @@ def _queue(
     authenticated_rejected_attempts = authenticated_rejected_attempts or {}
     authenticated_reentry_attempts = authenticated_reentry_attempts or {}
     failed_attempts = {
-        ingest_id: retries
+        ingest_id: max(
+            retries,
+            (
+                authenticated_reentry_attempts[ingest_id]
+                if type(authenticated_reentry_attempts.get(ingest_id)) is int
+                else retries
+            ),
+        )
         for _, ingest_id, retries, dead in pending
         if dead
     }
