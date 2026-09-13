@@ -186,3 +186,10 @@ def test_no_payload_event_retains_explicit_empty_authority(
         assert event.payload_mode == "NO_PAYLOAD"
         assert event.payload_digest == digest_bytes(b"")
         assert event.object_admission_id is None
+
+    with open_test_system(
+        tmp_path / "authority.sqlite3",
+        registry=CommandRegistry([definition]),
+        payload_schema_registry=payload_schemas(contract),
+    ) as reopened:
+        assert reopened.events.after(0, proof=proof())[0].payload_digest == digest_bytes(b"")

@@ -9,6 +9,8 @@ import pytest
 
 from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
 from newsroom.authority._event_store import _EventAuthorityStore
+from newsroom.authority._event_store_payload_integrity import _PayloadAndEnvelopeIntegrity
+from newsroom.authority.canonical import digest_bytes
 
 from .authority_event_helpers import open_test_system
 from .authority_helpers import FIXED_NOW, command, make_service, proof
@@ -25,7 +27,13 @@ _STREAMED_QUERIES = frozenset(
         "FROM authorization_decisions d LEFT JOIN authorization_scope_contents s "
         "ON s.scope_content_digest=d.scope_content_digest",
         "SELECT command_id,result_digest,result_bytes FROM authority_commands",
-        "SELECT * FROM authority_payloads",
+        "SELECT p.*,c.contract_digest AS selected_contract_digest,"
+        "c.schema_version AS selected_schema_version,"
+        "c.payload_mode AS selected_payload_mode,"
+        "c.contract_version AS selected_contract_version,"
+        "c.canonicalizer_implementation_version AS selected_canonicalizer_version "
+        "FROM authority_payloads p LEFT JOIN payload_schema_contracts c "
+        "ON c.contract_digest=p.schema_contract_digest",
         "SELECT * FROM ledger_events ORDER BY ledger_seq",
     }
 )
@@ -194,3 +202,125 @@ def test_reopen_streams_and_rejects_tamper_at_every_position(
     expected = "payload digest" if record_kind == "payload" else "result digest"
     with pytest.raises(AuthorityPersistenceError, match=expected):
         open_test_system(database)
+
+
+@pytest.mark.parametrize("payload_count", (3, 11))
+def test_streamed_payload_validation_does_not_query_each_schema_contract(
+    tmp_path: Path, payload_count: int,
+) -> None:
+    service = make_service()
+    with _store(tmp_path / "payload-contracts.sqlite3", service) as store:
+        for index in range(payload_count):
+            store.commit(service._authorize_for_commit(
+                command(key=f"payload-contract-{index}"), proof=proof(),
+            ))
+        statements = []
+        store._connection.set_trace_callback(statements.append)
+        try:
+            store._validate_immutable_records(store._connection)
+        finally:
+            store._connection.set_trace_callback(None)
+        lookups = [statement for statement in statements if statement.startswith(
+            "SELECT * FROM payload_schema_contracts WHERE contract_digest="
+        )]
+        assert len(lookups) == 0
+        assert store._connection.execute(
+            "SELECT COUNT(*) FROM authority_payloads"
+        ).fetchone()[0] == payload_count
+
+
+class _NoopIntegrity:
+    def _validate_immutable_records(self, _connection: object) -> None:
+        pass
+
+
+class _PayloadIntegrityProbe(_PayloadAndEnvelopeIntegrity, _NoopIntegrity):
+    pass
+
+
+@pytest.mark.parametrize("streamed", (False, True))
+@pytest.mark.parametrize(("changes", "message"), (
+    ({"schema_contract_digest": "sha256:" + "f" * 64}, "schema contract is missing"),
+    ({"schema_version": "different-v1"}, "immutable schema contract"),
+    ({"schema_contract_version": "different-v1"}, "immutable schema contract"),
+    ({"canonicalizer_implementation_version": "different-v1"}, "immutable schema contract"),
+    ({"mode": "NO_PAYLOAD", "payload_bytes": b"", "payload_digest": digest_bytes(b"")}, "immutable schema contract"),
+    ({"payload_bytes": None}, "retained payload bytes are missing"),
+    ({"payload_bytes": b"tampered"}, "payload digest"),
+    ({"payload_bytes": b"", "payload_digest": digest_bytes(b"")}, "INLINE authority cannot retain an empty payload"),
+    ({"mode": "NO_PAYLOAD"}, "NO_PAYLOAD authority must retain exact empty bytes"),
+))
+def test_joined_and_standalone_payload_validation_reject_late_corruption(
+    tmp_path: Path, streamed: bool, changes: dict, message: str,
+) -> None:
+    service = make_service()
+    with _store(tmp_path / "payload-corruption.sqlite3", service) as store:
+        for index in range(3):
+            store.commit(service._authorize_for_commit(
+                command(key=f"late-payload-{index}"), proof=proof(),
+            ))
+        connection = store._connection
+        last_id = connection.execute(
+            "SELECT payload_id FROM authority_payloads ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()[0]
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute("DROP TRIGGER immutable_authority_payloads_update")
+        connection.execute(
+            "UPDATE authority_payloads SET "
+            + ",".join(f"{field}=?" for field in changes) + " WHERE payload_id=?",
+            (*changes.values(), last_id),
+        )
+        connection.execute(_PAYLOAD_UPDATE_TRIGGER)
+        probe = _PayloadIntegrityProbe()
+        with pytest.raises(AuthorityPersistenceError, match=message):
+            if streamed:
+                probe._validate_immutable_records(_StreamingConnection(connection))
+            else:
+                row = connection.execute(
+                    "SELECT * FROM authority_payloads WHERE payload_id=?", (last_id,),
+                ).fetchone()
+                probe._validate_payload_record(connection, row)
+
+
+@pytest.mark.parametrize("field", (
+    "selected_schema_version", "selected_payload_mode", "selected_contract_version",
+    "selected_canonicalizer_version", "selected_contract_digest",
+))
+def test_present_joined_contract_does_not_treat_null_fields_as_absent(
+    tmp_path: Path, field: str,
+) -> None:
+    service = make_service()
+    with _store(tmp_path / "null-contract-field.sqlite3", service) as store:
+        store.commit(service._authorize_for_commit(command(), proof=proof()))
+        query = next(query for query in _STREAMED_QUERIES if query.startswith("SELECT p.*"))
+        row = store._connection.execute(query).fetchone()
+        selected = dict(row)
+        selected[field] = "sha256:" + "f" * 64 if field == "selected_contract_digest" else None
+        with pytest.raises(AuthorityPersistenceError, match="immutable schema contract"):
+            store._validate_payload_record(store._connection, row, selected_contract_row=selected)
+
+
+def test_standalone_payload_validation_rechecks_contract_on_every_call(tmp_path: Path) -> None:
+    service = make_service()
+    with _store(tmp_path / "standalone-contract.sqlite3", service) as store:
+        store.commit(service._authorize_for_commit(command(), proof=proof()))
+        connection = store._connection
+        row = connection.execute("SELECT * FROM authority_payloads").fetchone()
+        statements = []
+        connection.set_trace_callback(statements.append)
+        try:
+            for _ in range(2):
+                store._validate_payload_record(connection, row)
+        finally:
+            connection.set_trace_callback(None)
+        assert sum(statement.startswith(
+            "SELECT * FROM payload_schema_contracts WHERE contract_digest="
+        ) for statement in statements) == 2
+        connection.execute("DROP TRIGGER immutable_payload_schema_contracts_update")
+        connection.execute(
+            "UPDATE payload_schema_contracts SET contract_version='different-v1' "
+            "WHERE contract_digest=?", (row["schema_contract_digest"],),
+        )
+        with pytest.raises(AuthorityPersistenceError, match="immutable schema contract"):
+            store._validate_payload_record(connection, row)
