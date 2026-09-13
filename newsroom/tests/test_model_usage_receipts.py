@@ -2354,7 +2354,23 @@ def test_native_conservative_landing_requires_exact_canonical_record(
         model_usage_module._native_landed_source_unit(
             connection,
             ingest_id=unit.ingest_id,
+            effective_revision_digest=_digest(asdict(unit.effective_revision)),
         )
+    connection.close()
+
+
+def test_native_landing_revision_hint_cannot_select_another_unit(
+    tmp_path: Path,
+) -> None:
+    connection = connect_unpublished_store(str(tmp_path / "unpublished.sqlite3"))
+    unit = _native("selected")
+    NativeRevisionJournal(connection).land((unit,))
+
+    assert model_usage_module._native_landed_source_unit(
+        connection,
+        ingest_id=unit.ingest_id,
+        effective_revision_digest=_digest({"revision": "another"}),
+    ) is None
     connection.close()
 
 

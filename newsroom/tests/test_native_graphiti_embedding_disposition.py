@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import newsroom.control_plane.model_usage as model_usage_module
+import newsroom.control_plane.native_progress as native_progress_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.control_plane.cycle import _graphiti_usage_cycle_id
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
@@ -255,6 +257,34 @@ def test_native_embedding_cancellation_does_not_replay_native_progress(
         case.connection.close()
 
 
+@pytest.mark.parametrize("leaf", ["chat", "embedding"])
+def test_native_disposition_uses_request_revision_hint_before_landing_bodies(
+    tmp_path, monkeypatch, leaf,
+):
+    case = _cancelled(tmp_path, monkeypatch, chat=leaf == "chat")
+    try:
+        unrelated = _native("unrelated-landing")
+        case.journal.land((unrelated,))
+        original_unit = native_progress_module._unit
+
+        def selected_unit_only(value, bodies):
+            if value["item_key"] == unrelated.item_key:
+                pytest.fail("unrelated landing body was reconstructed")
+            return original_unit(value, bodies)
+
+        monkeypatch.setattr(native_progress_module, "_unit", selected_unit_only)
+        if leaf == "embedding":
+            record = _dispose(case)
+            assert record["usage_status"] == "ESTIMATED"
+        else:
+            assert model_usage_module._native_envelope(
+                case.connection,
+                case.allocation,
+            ) == case.envelope
+    finally:
+        case.connection.close()
+
+
 @pytest.mark.parametrize("dispose_first", [False, True])
 def test_exact_later_telemetry_is_not_replaced_or_blocked_by_an_estimate(
     tmp_path, monkeypatch, dispose_first,
@@ -290,7 +320,8 @@ def test_exact_later_telemetry_is_not_replaced_or_blocked_by_an_estimate(
 
 @pytest.mark.parametrize("case_kind", [
     "wrong-workload", "non-native", "pre-dispatch", "reported",
-    "wrong-route-index", "wrong-model-index", "corrupt-request",
+    "wrong-route-index", "wrong-model-index", "wrong-request-index",
+    "corrupt-request",
     "missing-request", "bad-canonical-policy", "missing-dispatch",
     "multiple-dispatch", "wrong-dispatch-binding", "policy-breach",
 ])
@@ -310,6 +341,12 @@ def test_native_embedding_cancellation_rejects_ineligible_or_changed_evidence(
             connection.execute(
                 f"UPDATE model_invocation_allocations SET {column}=? "
                 "WHERE invocation_id=?", ("another-contract", invocation_id),
+            )
+        elif case_kind == "wrong-request-index":
+            connection.execute(
+                "UPDATE graphiti_internal_requests SET provider_attempt_id=? "
+                "WHERE invocation_id=?",
+                ("another-provider-attempt", invocation_id),
             )
         elif case_kind == "corrupt-request":
             raw, = connection.execute(

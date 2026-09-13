@@ -992,15 +992,127 @@ def _native_envelope(
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
-    if _native_landed_source_unit(connection, ingest_id=envelope.ingest_id) is None:
+    identity = _retained_graphiti_request_identity(connection, allocation)
+    if identity is not None and (
+        identity.envelope_id != envelope.envelope_id
+        or identity.graphiti_attempt_id != envelope.graphiti_attempt_id
+        or identity.ingest_obligation_id != envelope.ingest_id
+    ):
+        raise ModelUsageIntegrityError(
+            "native conservative request binding differs"
+        )
+    if _native_landed_source_unit(
+        connection,
+        ingest_id=envelope.ingest_id,
+        effective_revision_digest=(
+            identity.effective_revision_digest if identity is not None else None
+        ),
+    ) is None:
         raise ModelUsageIntegrityError(
             "native conservative disposition lacks a landed source observation"
         )
     return envelope
 
 
+def _retained_graphiti_request_identity(
+    connection: sqlite3.Connection,
+    allocation: InvocationAllocation,
+) -> GraphitiInternalRequestIdentity | None:
+    row = connection.execute(
+        "SELECT canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
+        "internal_ordinal,semantic_state_digest,provider_attempt_id,"
+        "call_shape_policy_digest,record_json FROM graphiti_internal_requests "
+        "WHERE invocation_id=?",
+        (allocation.invocation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    record = _object(row[8])
+    try:
+        values = dict(record)
+        values.pop("schema_version", None)
+        values["leaf_class"] = GraphitiLeafClass(values["leaf_class"])
+        identity = GraphitiInternalRequestIdentity.create(**values)
+        ModelUsageService._validate_graphiti_identity(allocation, identity)
+    except (KeyError, TypeError, ValueError, ModelUsageAdmissionError) as exc:
+        raise ModelUsageIntegrityError(
+            "native Graphiti request identity differs"
+        ) from exc
+    if row[8] != _json(identity.as_record()) or tuple(row[:8]) != (
+        identity.canonical_digest,
+        identity.invocation_id,
+        identity.envelope_id,
+        identity.graphiti_attempt_id,
+        identity.internal_ordinal,
+        identity.semantic_state_digest,
+        identity.provider_attempt_id,
+        identity.call_shape_policy_digest,
+    ):
+        raise ModelUsageIntegrityError("native Graphiti request identity differs")
+    manifest_row = connection.execute(
+        "SELECT context_manifest_digest,provider,route,evidence_package_digest,"
+        "record_json FROM model_invocation_context_manifests "
+        "WHERE context_manifest_digest=?",
+        (allocation.context_manifest_digest,),
+    ).fetchone()
+    if manifest_row is None:
+        raise ModelUsageIntegrityError("native Graphiti context manifest is absent")
+    manifest = _object(manifest_row[4])
+    unsigned = dict(manifest)
+    retained_digest = unsigned.pop("context_manifest_digest", None)
+    if (
+        manifest_row[4] != _json(manifest)
+        or retained_digest != allocation.context_manifest_digest
+        or digest_canonical(unsigned) != retained_digest
+        or tuple(manifest_row[:4]) != (
+            retained_digest,
+            allocation.provider,
+            allocation.route,
+            identity.effective_revision_digest,
+        )
+        or any(
+            manifest.get(key) != getattr(allocation, key)
+            for key in (
+                "provider",
+                "route",
+                "model",
+                "reasoning",
+                "prompt_bytes",
+                "prompt_digest",
+                "request_digest",
+                "output_schema_digest",
+                "context_identity",
+                "config_identity",
+                "one_turn",
+                "exact_input",
+                "skills_enabled",
+                "tools_enabled",
+                "mcp_enabled",
+                "prior_message_count",
+            )
+        )
+        or any(
+            manifest.get(key) != getattr(identity, key)
+            for key in (
+                "effective_revision_digest",
+                "ingest_obligation_id",
+                "graphiti_attempt_id",
+                "provider_attempt_id",
+                "semantic_state_digest",
+                "call_shape_policy_digest",
+                "dispatch_authority_digest",
+            )
+        )
+    ):
+        raise ModelUsageIntegrityError("native Graphiti context manifest differs")
+    return identity
+
+
 def _native_landed_source_unit(
-    connection: sqlite3.Connection, *, ingest_id: str
+    connection: sqlite3.Connection,
+    *,
+    ingest_id: str,
+    effective_revision_digest: str | None = None,
 ) -> CorpusIngestUnit | None:
     """Prove one governed unit without replaying unrelated native progress."""
 
@@ -1035,43 +1147,65 @@ def _native_landed_source_unit(
         return units[0].revision_id, units
 
     candidate_revisions: set[str] = set()
-    for (raw_value,) in connection.execute(
-        "SELECT payload_json FROM ledger WHERE kind=?", (LAND,)
-    ):
-        try:
-            payload = json.loads(str(raw_value))
-            bodies: dict[str, str] = {}
-            units = tuple(
-                _unit(value, bodies) for value in payload.get("units", ())
-            )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
-        for unit in units:
-            if unit.ingest_id == ingest_id:
-                candidate_revisions.add(str(payload.get("revision_id")))
-    if len(candidate_revisions) != 1:
+    if effective_revision_digest is not None:
+        for revision_id, raw_revision in connection.execute(
+            "SELECT json_extract(payload_json,'$.revision_id'),"
+            "json_extract(unit.value,'$.effective_revision') FROM ledger "
+            "JOIN json_each(payload_json,'$.units') AS unit WHERE kind=?",
+            (LAND,),
+        ):
+            try:
+                revision = json.loads(str(raw_revision))
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(revision, dict)
+                and digest_canonical(revision) == effective_revision_digest
+            ):
+                candidate_revisions.add(str(revision_id))
+    else:
+        # Retained pre-request fixtures have no revision hint. Preserve their
+        # exact validation path without making it the normal native route cost.
+        for (raw_value,) in connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind=?", (LAND,)
+        ):
+            try:
+                payload = json.loads(str(raw_value))
+                bodies: dict[str, str] = {}
+                units = tuple(
+                    _unit(value, bodies) for value in payload.get("units", ())
+                )
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+            for unit in units:
+                if unit.ingest_id == ingest_id:
+                    candidate_revisions.add(str(payload.get("revision_id")))
+    if not candidate_revisions:
         return None
-    revision_id = next(iter(candidate_revisions))
 
-    retained_units: tuple[CorpusIngestUnit, ...] | None = None
-    for row in connection.execute(
-        "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
-        "AND json_extract(payload_json,'$.revision_id')=?",
-        (LAND, revision_id),
-    ):
-        landed_revision_id, units = decode_landing(row)
-        if landed_revision_id != revision_id:
-            raise ModelUsageIntegrityError(
-                "native conservative source landing differs"
-            )
-        if retained_units is not None and retained_units != units:
-            raise ModelUsageIntegrityError(
-                "native conservative source landing changed"
-            )
-        retained_units = units
-    matches = tuple(
-        unit for unit in retained_units or () if unit.ingest_id == ingest_id
-    )
+    matches: list[CorpusIngestUnit] = []
+    for revision_id in candidate_revisions:
+        retained_units: tuple[CorpusIngestUnit, ...] | None = None
+        for row in connection.execute(
+            "SELECT payload_digest,payload_json FROM ledger WHERE kind=? "
+            "AND json_extract(payload_json,'$.revision_id')=?",
+            (LAND, revision_id),
+        ):
+            landed_revision_id, units = decode_landing(row)
+            if landed_revision_id != revision_id:
+                raise ModelUsageIntegrityError(
+                    "native conservative source landing differs"
+                )
+            if retained_units is not None and retained_units != units:
+                raise ModelUsageIntegrityError(
+                    "native conservative source landing changed"
+                )
+            retained_units = units
+        matches.extend(
+            unit
+            for unit in retained_units or ()
+            if unit.ingest_id == ingest_id
+        )
     if len(matches) != 1:
         return None
     return matches[0]
@@ -1157,36 +1291,20 @@ def _native_graphiti_embedding_cancellation_authority(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger'"
     ).fetchone() is None:
         raise ModelUsageIntegrityError("native Graphiti cancellation lacks source landing")
-    unit = _native_landed_source_unit(connection, ingest_id=envelope.ingest_id)
+    identity = _retained_graphiti_request_identity(connection, allocation)
+    if identity is None:
+        raise ModelUsageIntegrityError("native Graphiti cancellation request is absent")
+    unit = _native_landed_source_unit(
+        connection,
+        ingest_id=envelope.ingest_id,
+        effective_revision_digest=identity.effective_revision_digest,
+    )
     if unit is None or unit.proving_run_id != "native-source:" + unit.observation_digest:
         raise ModelUsageIntegrityError("native Graphiti cancellation lacks source landing")
 
-    row = connection.execute(
-        "SELECT canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
-        "internal_ordinal,semantic_state_digest,provider_attempt_id,"
-        "call_shape_policy_digest,record_json FROM graphiti_internal_requests "
-        "WHERE invocation_id=?", (allocation.invocation_id,),
-    ).fetchone()
-    if row is None:
-        raise ModelUsageIntegrityError("native Graphiti cancellation request is absent")
-    record = _object(row[8])
-    try:
-        values = dict(record)
-        values.pop("schema_version", None)
-        values["leaf_class"] = GraphitiLeafClass(values["leaf_class"])
-        identity = GraphitiInternalRequestIdentity.create(**values)
-        ModelUsageService._validate_graphiti_identity(allocation, identity)
-    except (KeyError, TypeError, ValueError, ModelUsageAdmissionError) as exc:
-        raise ModelUsageIntegrityError("native Graphiti cancellation request differs") from exc
     revision = unit.effective_revision
-    if tuple(row[:8]) != (
-        identity.canonical_digest, identity.invocation_id, identity.envelope_id,
-        identity.graphiti_attempt_id, identity.internal_ordinal,
-        identity.semantic_state_digest, identity.provider_attempt_id,
-        identity.call_shape_policy_digest,
-    ) or (
-        row[8] != _json(identity.as_record())
-        or identity.leaf_class is not GraphitiLeafClass.EMBEDDING
+    if (
+        identity.leaf_class is not GraphitiLeafClass.EMBEDDING
         or identity.semantic_request_class != "EMBEDDING_VECTOR"
         or identity.response_schema_identity != "embedding-vector"
         or identity.response_schema_digest != digest_canonical({
@@ -1201,37 +1319,6 @@ def _native_graphiti_embedding_cancellation_authority(
         })
     ):
         raise ModelUsageIntegrityError("native Graphiti cancellation request binding differs")
-    row = connection.execute(
-        "SELECT context_manifest_digest,provider,route,evidence_package_digest,record_json "
-        "FROM model_invocation_context_manifests WHERE context_manifest_digest=?",
-        (allocation.context_manifest_digest,),
-    ).fetchone()
-    if row is None:
-        raise ModelUsageIntegrityError("native Graphiti cancellation manifest is absent")
-    manifest = _object(row[4])
-    unsigned = dict(manifest)
-    retained_digest = unsigned.pop("context_manifest_digest", None)
-    if (
-        row[4] != _json(manifest)
-        or retained_digest != allocation.context_manifest_digest
-        or digest_canonical(unsigned) != retained_digest
-        or tuple(row[:4]) != (
-            retained_digest, allocation.provider, allocation.route,
-            identity.effective_revision_digest,
-        )
-        or any(manifest.get(key) != getattr(allocation, key) for key in (
-            "provider", "route", "model", "reasoning", "prompt_bytes",
-            "prompt_digest", "request_digest", "output_schema_digest",
-            "context_identity", "config_identity", "one_turn", "exact_input",
-            "skills_enabled", "tools_enabled", "mcp_enabled", "prior_message_count",
-        ))
-        or any(manifest.get(key) != getattr(identity, key) for key in (
-            "effective_revision_digest", "ingest_obligation_id", "graphiti_attempt_id",
-            "provider_attempt_id", "semantic_state_digest", "call_shape_policy_digest",
-            "dispatch_authority_digest",
-        ))
-    ):
-        raise ModelUsageIntegrityError("native Graphiti cancellation manifest binding differs")
     conservative_total = max(policy.max_total_tokens, allocation.prompt_bytes)
     return {
         "authority_schema_version": NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION,
