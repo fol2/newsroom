@@ -1161,13 +1161,14 @@ class EvaluationGraphitiRunner:
             }
         )
         if (
-            decoded != receipt
+            type(row[0]) is not int
+            or decoded != receipt
             or raw != canonical_json_bytes(receipt)
             or digest_bytes(raw) != str(row[4])
             or str(row[4]) != payload_digest
             or str(row[3]) != event_digest
-            or str(row[2]) != (
-                LEDGER_GENESIS if int(row[0]) == 1 else row[6]
+            or row[2] != (
+                LEDGER_GENESIS if row[0] == 1 else row[6]
             )
         ):
             return None
