@@ -93,6 +93,7 @@ from newsroom.relations.editorial_types import (
     EditorialRelationDecisionAction,
 )
 
+from .authority_a2b_helpers import admit, open_object_system
 from .entity_4b_helpers import seed_homonym_entity_fixture
 from .extraction_4a_helpers import extraction_proof
 from .projection_b2_helpers import MemoryNeo4jAdapter
@@ -1219,7 +1220,7 @@ def test_rights_authority_rehydrates_exact_current_source_bytes() -> None:
     calls: list[object] = []
 
     class Objects:
-        def hydrate(self, hydration, *, proof):
+        def rehydrate(self, hydration, *, proof):
             calls.append((hydration, proof))
             return SimpleNamespace(
                 data=data,
@@ -1249,6 +1250,66 @@ def test_rights_authority_rehydrates_exact_current_source_bytes() -> None:
             ),
         )
     ) is False
+
+
+def test_rights_authority_reuses_retained_access_for_sequential_rechecks(
+    tmp_path,
+) -> None:
+    path = tmp_path / "authority.sqlite3"
+    data = b"Alice"
+    proof = extraction_proof()
+
+    def counts() -> tuple[int, ...]:
+        with sqlite3.connect(path) as connection:
+            return tuple(
+                int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+                for table in (
+                    "authentication_contexts",
+                    "authorization_requests",
+                    "authorization_decisions",
+                    "object_access_decisions",
+                )
+            )
+
+    with open_object_system(path) as system:
+        admission = admit(system, data=data).admission
+        request = replace(
+            _request(),
+            evidence_passages=(
+                {
+                    "passage_id": "00000000-0000-4000-8000-000000007601",
+                    "admission_id": str(admission.admission_id),
+                    "purpose": "project.discovery",
+                    "byte_offset": 0,
+                    "byte_length": len(data),
+                    "blob_digest": digest_bytes(data),
+                    "allowed_use": "project.discovery",
+                    "security_scope": "authority.protected",
+                    "retention_scope": "source.short",
+                },
+            ),
+        )
+        authority = ExistingGovernedGraphitiRightsAuthority(
+            objects=system.objects,
+            proof=proof,
+        )
+
+        before = counts()
+        assert authority.is_current(request) is True
+        after_first = counts()
+        assert after_first == tuple(value + 1 for value in before)
+
+        assert authority.is_current(request) is True
+        assert authority.is_current(request) is True
+        assert counts() == after_first
+
+    with open_object_system(path) as reopened:
+        authority = ExistingGovernedGraphitiRightsAuthority(
+            objects=reopened.objects,
+            proof=proof,
+        )
+        assert authority.is_current(request) is True
+        assert counts() == after_first
 
 
 def test_conservative_entity_plan_allocates_separate_unknown_identity() -> None:
