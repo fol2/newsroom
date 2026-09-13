@@ -140,15 +140,17 @@ def _document(raw: str, payload_digest: str) -> dict:
 
 def _ledger(connection: sqlite3.Connection) -> tuple[tuple, ...]:
     relevant_kinds = (_STARTED, _TERMINAL, _QUALIFICATION, LAND, STATE, PORTFOLIO)
-    rows = tuple(connection.execute(
+    rows = []
+    cursor = connection.execute(
         "SELECT current.seq,current.at,current.kind,current.payload_digest,"
         "current.payload_json,current.prev_digest,current.digest,prior.digest "
         "FROM ledger current LEFT JOIN ledger prior ON prior.seq=current.seq-1 "
         f"WHERE current.kind IN ({','.join('?' for _ in relevant_kinds)}) "
         "ORDER BY current.seq",
         relevant_kinds,
-    ))
-    for seq, at, kind, payload_digest, raw, prev_digest, ledger_digest, prior_digest in rows:
+    )
+    for row in cursor:
+        seq, at, kind, payload_digest, raw, prev_digest, ledger_digest, prior_digest = row
         if (
             type(seq) is not int
             or prev_digest != (LEDGER_GENESIS if seq == 1 else prior_digest)
@@ -164,7 +166,10 @@ def _ledger(connection: sqlite3.Connection) -> tuple[tuple, ...]:
         }))
         if ledger_digest != expected:
             raise NativeQualificationError("native ledger digest differs")
-    return rows
+        # The journal separately reconstructs these logical records. Keep their
+        # verified references, not another full history of bodies and bindings.
+        rows.append(row[:4] + (None,) + row[5:] if kind in {LAND, STATE, PORTFOLIO} else row)
+    return tuple(rows)
 
 
 def _service_cycle(

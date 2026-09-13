@@ -214,10 +214,8 @@ def test_hermes_composition_opens_one_writer_and_all_native_facades(
     reopened = open_hermes_native_authority_system(**kwargs)
     try:
         assert len(work_item_constructions) == 1
-        assert context_authentications == [
-            retrieval_binding.context_id,
-            retrieval_binding.context_id,
-        ]
+        # The one currentness read also authenticates retained integrity.
+        assert context_authentications == [retrieval_binding.context_id]
         with sqlite3.connect(tmp_path / "authority.sqlite3") as connection:
             trigger_name = "immutable_triage_work_item_versions_update"
             trigger_sql = connection.execute(

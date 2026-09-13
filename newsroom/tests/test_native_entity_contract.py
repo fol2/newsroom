@@ -243,6 +243,40 @@ def test_immigration_part_title_allows_real_end_delimiters(suffix):
     ) == frozenset({(term, "OFFICIAL_TERM")})
 
 
+def test_declared_immigration_part_title_can_prefix_ordinary_claim_prose():
+    term = "Part 14: stateless persons"
+    claim = (
+        "A Stateless person or their partner or dependent child previously granted "
+        f"permission under {term} applying on or after 11 November 2025 will be "
+        "considered under this route."
+    )
+
+    assert evidence.bounded_named_entities(
+        claim,
+        source_context=f"Immigration Rules part 14: stateless persons. {claim}",
+    ) == frozenset({(term, "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize(
+    ("claim_term", "declaration"),
+    (
+        ("Part 14: stateless personsX", "Immigration Rules part 14: stateless persons."),
+        ("Part 14: stateless persons", "A handbook cites Part 14: stateless persons."),
+        (
+            "Part 14: stateless persons",
+            "Immigration Rules part 14: stateless persons and related people.",
+        ),
+    ),
+)
+def test_ordinary_claim_prefix_requires_the_exact_declared_part_title(
+    claim_term, declaration,
+):
+    claim = f"Permission under {claim_term} applying from today."
+    assert evidence.bounded_named_entities(
+        claim, source_context=f"{declaration} {claim}",
+    ) == frozenset()
+
+
 def test_immigration_part_short_reference_does_not_bind_longer_declaration():
     term = "Part 14: stateless persons"
     assert evidence.bounded_named_entities(

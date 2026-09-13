@@ -26,6 +26,7 @@ from newsroom.control_plane.admission import (
     _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION,
     _OLDEST_WRITE_ADMISSION_POLICY_VERSION,
     _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
+    _PENULTIMATE_WRITE_ADMISSION_POLICY_VERSION,
     _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
@@ -1444,15 +1445,22 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
         "newsroom.governed-input.v10+newsroom.named-entity.v8+"
         "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
     )
-    assert _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION == (
+    assert _PENULTIMATE_WRITE_ADMISSION_POLICY_VERSION == (
         "newsroom.write-admission.v6+"
         "newsroom.evid-012.v7+newsroom.evidence-approval.v8+"
         "newsroom.evidence-gates.v2+newsroom.governed-claim.v7+"
         "newsroom.governed-input.v10+newsroom.named-entity.v8+"
         "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13"
     )
-    assert WRITE_ADMISSION_POLICY_VERSION == (
+    assert _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION == (
         "newsroom.write-admission.v7+"
+        "newsroom.evid-012.v7+newsroom.evidence-approval.v8+"
+        "newsroom.evidence-gates.v2+newsroom.governed-claim.v7+"
+        "newsroom.governed-input.v10+newsroom.named-entity.v9+"
+        "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v14"
+    )
+    assert WRITE_ADMISSION_POLICY_VERSION == (
+        "newsroom.write-admission.v8+"
         f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
@@ -1539,13 +1547,23 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         **values,
     )
     assert WriteAdmissionDecision.from_record(legacy.as_record()) == legacy
+    penultimate_values = {
+        **values,
+        "policy_version": _PENULTIMATE_WRITE_ADMISSION_POLICY_VERSION,
+    }
+    penultimate = WriteAdmissionDecision(
+        decision_id=_decision_id(**penultimate_values),
+        decided_at="2026-09-11T18:00:00Z",
+        **penultimate_values,
+    )
+    assert WriteAdmissionDecision.from_record(penultimate.as_record()) == penultimate
     latest_legacy_values = {
         **values,
         "policy_version": _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION,
     }
     latest_legacy = WriteAdmissionDecision(
         decision_id=_decision_id(**latest_legacy_values),
-        decided_at="2026-09-11T18:00:00Z",
+        decided_at="2026-09-11T21:00:00Z",
         **latest_legacy_values,
     )
     assert WriteAdmissionDecision.from_record(latest_legacy.as_record()) == latest_legacy
@@ -1586,6 +1604,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
     retain_write_admission_decision(connection, oldest)
     retain_write_admission_decision(connection, earlier)
     retain_write_admission_decision(connection, legacy)
+    retain_write_admission_decision(connection, penultimate)
     retain_write_admission_decision(connection, latest_legacy)
     retain_write_admission_decision(connection, legacy)
     retain_write_admission_decision(connection, current)
@@ -1596,6 +1615,7 @@ def test_changed_admission_semantics_replay_the_exact_previous_policy(
         (_OLDEST_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_EARLIER_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_PREVIOUS_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
+        (_PENULTIMATE_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (_LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
         (WRITE_ADMISSION_POLICY_VERSION, "HOLD"),
     ]

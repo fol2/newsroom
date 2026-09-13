@@ -1987,13 +1987,17 @@ class ProposalDispositionStore:
 
     def verify_retained_integrity_in_transaction(self) -> None:
         """Revalidate retained disposition/finding authority without currentness."""
+        self._verified_dispositions_in_transaction()
+
+    def _verified_dispositions_in_transaction(self) -> dict[str, ProposalDisposition]:
+        """Return fully checked dispositions from the caller's current snapshot."""
         if not self._connection.in_transaction:
             raise DispositionContractError(
                 "transaction-aware disposition integrity requires an active transaction"
             )
-        self._verify_integrity()
+        return self._verify_integrity()
 
-    def _verify_integrity(self) -> None:
+    def _verify_integrity(self) -> dict[str, ProposalDisposition]:
         tables = {
             str(row[0])
             for row in self._connection.execute(
@@ -2006,7 +2010,7 @@ class ProposalDispositionStore:
         }
         if not required <= tables:
             raise DispositionContractError("v19 disposition schema is absent")
-        self._verify_retained_disposition_rows(
+        return self._verify_retained_disposition_rows(
             self._connection.execute(
                 "SELECT finding_id,work_item_id,work_item_version_id,"
                 "work_item_version_digest,proposal_id,proposal_content_identity,"

@@ -366,6 +366,40 @@ def test_real_store_create_replay_current_history_and_reopen(tmp_path) -> None:
     assert _open(reopened_fixture).current(first.hypothesis_id, proof=proof) == first
 
 
+@pytest.mark.parametrize("version_count", [2, 4])
+def test_verify_reuses_same_snapshot_dispositions_and_target_versions(tmp_path, version_count):
+    fixture = _authority_fixture(tmp_path)
+    connection, retrieval, authenticator, proof, proposal, dispositions, *_ = fixture
+    authority = _open(fixture)
+    try:
+        latest = authority.retain(proposal, dispositions, proof=proof)
+        expected = {latest.version_id: latest}
+        for index in range(1, version_count):
+            raw, source = _targeted_proposal(
+                fixture, proposal_id=str(uuid.uuid4()), local_id=f"hypothesis:shared-{index}",
+                relationship="SAME_STATE", target=latest.hypothesis_id,
+            )
+            latest = authority.retain(raw, source, proof=proof, expected_target_version=latest)
+            expected[latest.version_id] = latest
+        store = _HypothesisStore(connection, retrieval, authenticator, UtcTimestamp.now)
+        queries = []
+        connection.set_trace_callback(queries.append)
+        connection.execute("BEGIN")
+        try:
+            assert store._verify() == expected
+        finally:
+            connection.rollback()
+            connection.set_trace_callback(None)
+        selects = [" ".join(query.split()).upper() for query in queries if query.lstrip().upper().startswith("SELECT")]
+        disposition_reads = [query for query in selects if "FROM TRIAGE_PROPOSAL_DISPOSITIONS" in query]
+        target_reads = [query for query in selects if query.startswith("SELECT HYPOTHESIS_ID,CANONICAL_DIGEST FROM EVENT_HYPOTHESIS_VERSIONS_V2 WHERE VERSION_ID=")]
+        assert len(disposition_reads) == 1
+        assert target_reads == []
+    finally:
+        authority.close()
+        connection.close()
+
+
 def test_wrong_proof_partial_or_unretained_inputs_write_nothing(tmp_path) -> None:
     fixture = _authority_fixture(tmp_path)
     connection, _, _, proof, proposal, dispositions, *_ = fixture

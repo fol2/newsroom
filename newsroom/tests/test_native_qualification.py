@@ -564,6 +564,43 @@ def test_only_referenced_native_ledger_rows_enter_qualification(tmp_path):
         connection.close()
 
 
+def test_qualification_retains_history_references_not_duplicate_payloads(tmp_path):
+    from newsroom.control_plane.native_progress import LAND, PORTFOLIO, STATE
+    from newsroom.control_plane.native_qualification import _ledger
+
+    connection = _open(tmp_path / "history-references.sqlite3")
+    try:
+        _cycle(connection, facts={
+            "reason": "SOURCE_LOCAL_EVIDENCE_HOLD", "retained_text": "x" * 262_144,
+        })
+        expected = connection.execute(
+            "SELECT seq,kind,payload_digest,digest FROM ledger ORDER BY seq"
+        ).fetchall()
+        rows = _ledger(connection)
+        assert [(row[0], row[2], row[3], row[6]) for row in rows] == expected
+        assert all(row[4] is None for row in rows if row[2] in {LAND, STATE, PORTFOLIO})
+        assert all(isinstance(row[4], str) for row in rows if row[2] not in {LAND, STATE, PORTFOLIO})
+        retained = record_qualification(connection, IDENTITY)
+        assert validate_qualification(connection, IDENTITY) == retained
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("kind", ["NATIVE_REVISION_LANDED", "NATIVE_REVISION_PROGRESS", "NATIVE_SOURCE_PORTFOLIO"])
+def test_qualification_validates_payload_before_discarding_duplicate(kind, tmp_path):
+    from newsroom.control_plane.native_qualification import _ledger
+
+    connection = _open(tmp_path / "corrupt-history.sqlite3")
+    try:
+        _cycle(connection)
+        connection.execute("UPDATE ledger SET payload_json='{}' WHERE kind=?", (kind,))
+        connection.commit()
+        with pytest.raises(NativeQualificationError, match="native ledger payload"):
+            _ledger(connection)
+    finally:
+        connection.close()
+
+
 def test_same_count_revision_fact_mutation_does_not_match_reference(tmp_path):
     connection = _open(tmp_path / "revision-mutation.sqlite3")
     try:

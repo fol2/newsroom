@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from newsroom.authority import HydrationRequest, ObjectAdmissionId
+from newsroom.authority import (
+    AuthenticationError, HydrationRequest, ObjectAdmissionDenied, ObjectAdmissionId,
+    ObjectAdmissionRequest, ObjectIntegrityError,
+)
 from newsroom.authority.canonical import digest_bytes
 from newsroom.control_plane import native_source_rights as rights
 from newsroom.control_plane import cycle
@@ -15,7 +18,7 @@ from newsroom.control_plane.native_runtime import open_native_runtime
 from newsroom.control_plane.veto import VetoError
 from newsroom.increment9.proving import SOURCE_URLS
 from newsroom.tests.test_native_runtime import _args
-from newsroom.tests.test_native_source_intake import _licence
+from newsroom.tests.test_native_source_intake import _licence, _source_read_audit_counts
 
 
 def test_observed_rights_retain_real_terms_and_keep_source_local_holds(tmp_path, monkeypatch):
@@ -305,3 +308,134 @@ def test_portfolio_refresh_replaces_permitted_snapshot_without_timestamp_churn()
     ).decision == "HOLD"
     assert portfolio.reason_for("HK-02") == "REVIEWED_REUSE_PERMITTED"
     assert portfolio.reason_for("UK-01") == "GOVUK_LICENCE_REVIEW_HOLD"
+
+
+def _one_source_terms(monkeypatch):
+    url = rights.TERMS["HK-02"][0][0]
+    raw = b"<main>Reviewed unchanged Observatory terms</main>"
+    monkeypatch.setattr(rights, "TERMS", {
+        "HK-02": ((url, rights.terms_text_digest("HK-02", raw)),),
+    })
+    return url, raw
+
+
+def test_rights_refresh_reuses_reads_but_retains_each_new_observation(
+    tmp_path, monkeypatch,
+):
+    url, raw = _one_source_terms(monkeypatch)
+    args = _args(tmp_path, monkeypatch)
+    calls = []
+
+    def fetch(selected_url):
+        calls.append(selected_url)
+        return raw
+
+    with open_native_runtime(**args) as runtime:
+        objects, proof = runtime.authority.objects, runtime.proof
+        # An already admitted page without an access receipt needs its first
+        # fully governed read, not an invented or missing historical receipt.
+        admitted = objects.admit(ObjectAdmissionRequest(
+            "evidence.source", f"native-source-terms:HK-02:{digest_bytes(raw)}",
+        ), raw, proof=proof).admission
+        before = _source_read_audit_counts(args["authority_path"])
+        first = rights.observe_portfolio_terms(
+            objects=objects, proof=proof, stop_check=lambda: None,
+            stop_fence=nullcontext, fetch=fetch,
+            clock=lambda: datetime(2026, 9, 8, 15, tzinfo=UTC),
+        )["HK-02"]
+        assert first.observations[0][2] == str(admitted.admission_id)
+        after_first = _source_read_audit_counts(args["authority_path"])
+        assert after_first == tuple(n + 1 for n in before)
+        later = rights.observe_portfolio_terms(
+            objects=objects, proof=proof, stop_check=lambda: None,
+            stop_fence=nullcontext, fetch=fetch,
+            clock=lambda: datetime(2026, 9, 8, 15, 5, tzinfo=UTC),
+        )["HK-02"]
+        assert calls == [url, url]  # Current acquisition is not cached.
+        assert _source_read_audit_counts(args["authority_path"]) == after_first
+        assert later.observations == first.observations
+        assert later.observed_at != first.observed_at
+        portfolio = rights.NativePortfolioRights(None, {"HK-02": later})
+        for _ in range(2):
+            portfolio.require_retained(objects=objects, proof=proof)
+        assert _source_read_audit_counts(args["authority_path"]) == after_first
+        assessment = portfolio.for_source(
+            source_id="HK-02", definition_url=SOURCE_URLS["HK-02"],
+        )
+        request = dict(
+            source_id="HK-02", definition_url=SOURCE_URLS["HK-02"],
+            assessment=assessment, reason=later.reason,
+            observations=later.observations,
+        )
+        snapshot = rights.retain_rights_snapshot(
+            objects=objects, proof=proof, observed_at=first.observed_at, **request,
+        )
+        after_snapshot = _source_read_audit_counts(args["authority_path"])
+        assert after_snapshot == tuple(n + delta for n, delta in zip(
+            after_first, (2, 8, 8, 8), strict=True,
+        ))
+        latest = rights.retain_rights_snapshot(
+            objects=objects, proof=proof, observed_at=later.observed_at, **request,
+        )
+        assert latest.assessment_admission_id == snapshot.assessment_admission_id
+        assert latest.observation_admission_id != snapshot.observation_admission_id
+        assert _source_read_audit_counts(args["authority_path"]) == tuple(
+            n + delta for n, delta in zip(after_snapshot, (1, 4, 4, 4), strict=True)
+        )
+    with open_native_runtime(**args) as reopened:
+        before = _source_read_audit_counts(args["authority_path"])
+        portfolio.require_retained(objects=reopened.authority.objects, proof=reopened.proof)
+        assert rights.retain_rights_snapshot(
+            objects=reopened.authority.objects, proof=reopened.proof,
+            observed_at=later.observed_at, **request,
+        ) == latest
+        assert _source_read_audit_counts(args["authority_path"]) == before
+
+
+@pytest.mark.parametrize(("fault", "error"), (
+    ("current_credential", AuthenticationError),
+    ("revocation", ObjectAdmissionDenied),
+    ("cas_bytes", ObjectIntegrityError),
+    ("expected_digest", ValueError),
+    ("reviewed_terms", ValueError),
+))
+def test_retained_rights_read_rechecks_current_authority_and_exact_content(
+    tmp_path, monkeypatch, fault, error,
+):
+    url, raw = _one_source_terms(monkeypatch)
+    args = _args(tmp_path, monkeypatch)
+    with open_native_runtime(**args) as runtime:
+        objects, proof = runtime.authority.objects, runtime.proof
+        evidence = rights.observe_portfolio_terms(
+            objects=objects, proof=proof, stop_check=lambda: None,
+            stop_fence=nullcontext, fetch=lambda _: raw,
+        )
+        entry = evidence["HK-02"]
+        admission_id = ObjectAdmissionId.parse(entry.observations[0][2])
+        if fault == "current_credential":
+            proof = replace(proof, credential="not-the-current-credential")
+        elif fault == "revocation":
+            objects.revoke(
+                admission_id, reason_code="REVOKED", idempotency_key="revoke-terms",
+                proof=proof,
+            )
+        elif fault == "cas_bytes":
+            [path] = [path for path in (args["object_root"] / "objects").rglob("*")
+                      if path.is_file()]
+            path.chmod(0o600)
+            path.write_bytes(raw.replace(b"Reviewed", b"Tampered"))
+            path.chmod(0o400)
+        elif fault == "expected_digest":
+            _, _, admission, access = entry.observations[0]
+            evidence["HK-02"] = replace(entry, observations=(
+                (url, "sha256:" + "f" * 64, admission, access),
+            ))
+        else:
+            monkeypatch.setattr(rights, "TERMS", {
+                "HK-02": ((url, "sha256:" + "f" * 64),),
+            })
+        portfolio = rights.NativePortfolioRights(None, evidence)
+        before = _source_read_audit_counts(args["authority_path"])
+        with pytest.raises(error):
+            portfolio.require_retained(objects=objects, proof=proof)
+        assert _source_read_audit_counts(args["authority_path"]) == before

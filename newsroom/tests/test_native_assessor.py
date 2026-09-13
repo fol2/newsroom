@@ -489,6 +489,18 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
             "先前已根據Part 14: stateless persons獲准。",
             ("Part 14: stateless persons",),
         ),
+        (
+            "A Stateless person or their partner or dependent child previously "
+            "granted permission under Part 14: stateless persons applying on or "
+            "after 11 November 2025 will be considered under this route.",
+            "Immigration Rules part 14: stateless persons. A Stateless person or "
+            "their partner or dependent child previously granted permission under "
+            "Part 14: stateless persons applying on or after 11 November 2025 will "
+            "be considered under this route.",
+            "先前根據 Part 14: stateless persons 獲准逗留的無國籍人士或其伴侶或"
+            "受養子女，如在2025年11月11日或之後提出申請，將按此途徑審理。",
+            ("Part 14: stateless persons",),
+        ),
     ):
         official = json.loads(canonical_json_bytes(package))
         official["governed_claims"][0].update({
