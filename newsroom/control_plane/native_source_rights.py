@@ -171,7 +171,7 @@ def retain_rights_snapshot(
         "evidence.source", f"native-rights-assessment:{assessment.record_id}",
     ), assessment_bytes, proof=proof).admission
     for admission, raw in ((observation, observation_bytes), (retained, assessment_bytes)):
-        hydrated = objects.hydrate(
+        hydrated = objects.rehydrate(
             HydrationRequest(admission.admission_id, "evidence.source"), proof=proof,
         )
         if hydrated.data != raw:
@@ -283,7 +283,7 @@ class NativePortfolioRights:
             govuk.require_retained(objects=objects, proof=proof)
         for source_id, evidence in evidence_snapshot.items():
             for url, digest, admission_id, _access in evidence.observations:
-                retained = objects.hydrate(HydrationRequest(ObjectAdmissionId.parse(admission_id), "evidence.source"), proof=proof)
+                retained = objects.rehydrate(HydrationRequest(ObjectAdmissionId.parse(admission_id), "evidence.source"), proof=proof)
                 if digest_bytes(retained.data) != digest:
                     raise ValueError("retained source terms bytes differ")
                 if evidence.reason == "REVIEWED_REUSE_PERMITTED" and terms_text_digest(source_id, retained.data) != dict(TERMS[source_id]).get(url):
@@ -320,7 +320,7 @@ def observe_portfolio_terms(*, objects, proof, stop_check,
         for url, raw in bodies:
             digest = digest_bytes(raw)
             admission = objects.admit(ObjectAdmissionRequest("evidence.source", f"native-source-terms:{source_id}:{digest}"), raw, proof=proof).admission
-            access = objects.hydrate(HydrationRequest(admission.admission_id, "evidence.source"), proof=proof).decision
+            access = objects.rehydrate(HydrationRequest(admission.admission_id, "evidence.source"), proof=proof).decision
             observations.append((url, digest, str(admission.admission_id), str(access.access_decision_id)))
         evidence[source_id] = SourceTermsEvidence(source_id, observed_at, reason, tuple(observations))
     return evidence
