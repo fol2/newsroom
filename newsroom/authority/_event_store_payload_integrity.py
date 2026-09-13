@@ -39,9 +39,15 @@ class _PayloadAndEnvelopeIntegrity:
     ) -> None:
         super()._validate_immutable_records(conn)  # type: ignore[misc]
         for row in conn.execute(
-            "SELECT * FROM authority_payloads"
+            "SELECT p.*,c.contract_digest AS selected_contract_digest,"
+            "c.schema_version AS selected_schema_version,"
+            "c.payload_mode AS selected_payload_mode,"
+            "c.contract_version AS selected_contract_version,"
+            "c.canonicalizer_implementation_version AS selected_canonicalizer_version "
+            "FROM authority_payloads p LEFT JOIN payload_schema_contracts c "
+            "ON c.contract_digest=p.schema_contract_digest"
         ):
-            self._validate_payload_record(conn, row)
+            self._validate_payload_record(conn, row, selected_contract_row=row)
 
         for row in conn.execute(
             "SELECT * FROM ledger_events ORDER BY ledger_seq"
@@ -49,9 +55,10 @@ class _PayloadAndEnvelopeIntegrity:
             self._validate_event_types(row)
 
     def _validate_payload_record(
-        self, conn: sqlite3.Connection, row: sqlite3.Row
+        self, conn: sqlite3.Connection, row: sqlite3.Row,
+        *, selected_contract_row: sqlite3.Row | None = None,
     ) -> None:
-        """Validate one retained payload without scanning unrelated history."""
+        """Validate one payload, optionally using its same-query joined contract."""
 
         PayloadId.parse(str(row["payload_id"]))
         mode = PayloadMode(str(row["mode"]))
@@ -77,10 +84,30 @@ class _PayloadAndEnvelopeIntegrity:
             raise AuthorityPersistenceError(
                 "INLINE authority cannot retain an empty payload"
             )
-        contract = conn.execute(
-            "SELECT * FROM payload_schema_contracts WHERE contract_digest=?",
-            (str(row["schema_contract_digest"]),),
-        ).fetchone()
+        if selected_contract_row is None:
+            contract = conn.execute(
+                "SELECT * FROM payload_schema_contracts WHERE contract_digest=?",
+                (str(row["schema_contract_digest"]),),
+            ).fetchone()
+        elif selected_contract_row["selected_contract_digest"] is None:
+            contract = None
+        elif str(selected_contract_row["selected_contract_digest"]) != str(
+            row["schema_contract_digest"]
+        ):
+            raise AuthorityPersistenceError(
+                "payload does not match its immutable schema contract"
+            )
+        else:
+            # The LEFT JOIN keeps missing parents visible; no contract or
+            # validation result is retained beyond the current streamed row.
+            contract = {
+                "schema_version": selected_contract_row["selected_schema_version"],
+                "payload_mode": selected_contract_row["selected_payload_mode"],
+                "contract_version": selected_contract_row["selected_contract_version"],
+                "canonicalizer_implementation_version": selected_contract_row[
+                    "selected_canonicalizer_version"
+                ],
+            }
         if contract is None:
             raise AuthorityPersistenceError("payload schema contract is missing")
         if (
