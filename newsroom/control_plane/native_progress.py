@@ -233,5 +233,5 @@ class NativeRevisionJournal:
             "observations": [list(value) for value in getattr(item, "observations", ())],
             "item_holds": [list(value) for value in getattr(item, "item_holds", ())],
         } for item in dispositions)
-        if values != self.portfolio:
+        if self._portfolio_record is None or values != self.portfolio:
             self._retain(PORTFOLIO, {"sources": list(values)})
