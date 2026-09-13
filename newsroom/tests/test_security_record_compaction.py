@@ -64,6 +64,30 @@ def test_current_security_storage_is_compact_with_exact_public_provenance(tmp_pa
     assert canonical_json_bytes(json.loads(after.authorization_request.canonical_bytes)) == before.authorization_request.canonical_bytes
 
 
+def test_v38_request_decoder_does_not_reparse_reconstructed_bytes(
+    tmp_path, monkeypatch
+):
+    from newsroom.authority._event_store import _EventAuthorityStore
+
+    path = tmp_path / 'single-decode.sqlite3'
+    with open_test_system(path) as system:
+        result = system.commands.execute(command(key='single-decode'), proof=proof())
+        expected = system.events.provenance(
+            result.event_id, proof=proof()
+        ).authorization_request.canonical_bytes
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute('SELECT * FROM authorization_requests').fetchone()
+        reader = object.__new__(_EventAuthorityStore)
+        monkeypatch.setattr(
+            reader,
+            '_decode_canonical',
+            lambda _data: pytest.fail('reparsed reconstructed request bytes'),
+        )
+        assert request_migration.authorization_request_bytes_from_v38_row(row) == expected
+        assert reader._request_record_from_row(row).canonical_bytes == expected
+
+
 def _v36_path(tmp_path, *, count=2):
     path = tmp_path / 'old.sqlite3'
     commands = tuple(command(key=f'old-{index}') for index in range(count))

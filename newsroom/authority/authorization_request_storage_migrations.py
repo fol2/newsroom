@@ -64,10 +64,10 @@ def authorization_request_residual_from_v37_row(
     )
 
 
-def authorization_request_bytes_from_v38_row(
+def authorization_request_value_from_v38_row(
     row: Mapping[str, object],
-) -> bytes:
-    """Reconstruct the original canonical request bytes from a v38 row."""
+) -> dict[str, object]:
+    """Reconstruct the original request value from a v38 row."""
 
     if bytes(row["storage_request_marker"]) != AUTHORIZATION_REQUEST_STORAGE_MARKER:
         raise ValueError("stored authorization request format differs")
@@ -75,7 +75,15 @@ def authorization_request_bytes_from_v38_row(
     collisions = set(residual).intersection(AUTHORIZATION_REQUEST_INDEXED_FIELDS)
     if collisions:
         raise ValueError("stored authorization request residual collides")
-    return canonical_json_bytes({**residual, **_indexed_request_fields(row)})
+    return {**residual, **_indexed_request_fields(row)}
+
+
+def authorization_request_bytes_from_v38_row(
+    row: Mapping[str, object],
+) -> bytes:
+    """Reconstruct the original canonical request bytes from a v38 row."""
+
+    return canonical_json_bytes(authorization_request_value_from_v38_row(row))
 
 
 def _rows(
