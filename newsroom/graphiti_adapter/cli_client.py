@@ -474,7 +474,7 @@ def _grok_update(value: object) -> dict[str, object] | None:
 
 
 def parse_grok_stream_output(raw: str) -> CliExecution:
-    """Extract message chunks and ``turn_completed`` usage from Grok NDJSON."""
+    """Extract Grok headless or ACP text and terminal-only usage from NDJSON."""
 
     chunks: list[str] = []
     usage = unreported_cli_usage()
@@ -488,13 +488,15 @@ def parse_grok_stream_output(raw: str) -> CliExecution:
         if update is None:
             continue
         kind = update.get("sessionUpdate") or update.get("type")
-        if kind in {"agent_message_chunk", "assistant_message_chunk"}:
-            content = update.get("content")
+        if kind in {"agent_message_chunk", "assistant_message_chunk", "text"}:
+            content = (
+                update.get("data") if kind == "text" else update.get("content")
+            )
             text = content.get("text") if isinstance(content, dict) else content
             if isinstance(text, str):
                 chunks.append(text)
                 recognised = True
-        elif kind in {"turn_completed", "turnEnded"}:
+        elif kind in {"turn_completed", "turnEnded", "end"}:
             usage = grok_cli_usage(update.get("usage"))
             recognised = True
     return CliExecution(
