@@ -728,8 +728,7 @@ class NativePublicationContinuation:
                     else None
                 )
                 consumer_only_revalidation = (
-                    progress.get("stage") == "ASSESSMENT_CONTRACT_REVALIDATION"
-                    and type(prior_contract) is str
+                    type(prior_contract) is str
                     and self._assessment_contract_version is not None
                     and prior_contract.split("+", 1)[0]
                     == self._assessment_contract_version.split("+", 1)[0]
