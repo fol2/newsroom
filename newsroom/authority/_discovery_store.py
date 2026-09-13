@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from ._event_store_base import _validation_stage
 # ruff: noqa: I001 - preserve legacy import layout within bounded change
 # fmt: off - preserve legacy layout and bounded addition within the line cap
 
@@ -1686,22 +1688,23 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
         super()._validate_schema_and_integrity()
         if not self._should_validate_row_integrity():
             return
-        conn = self._connection
-        for row in conn.execute("SELECT * FROM discovery_signals ORDER BY recorded_at,signal_id"):
-            self._signal_from_row(conn, row, replayed=False)
-            request = signal_request_from_bytes(bytes(row["canonical_bytes"]))
-            self._require_exact_signal_lineage(conn, request)
-        for row in conn.execute("SELECT * FROM discovery_gate_decisions ORDER BY signal_id,decision_ordinal"):
-            self._gate_from_row(conn, row, replayed=False)
-        for row in conn.execute("SELECT * FROM news_leads ORDER BY recorded_at,lead_id"):
-            self._lead_from_row(conn, row, replayed=False)
-            self._require_source_contract_matches_lead(conn, lead_request_from_bytes(bytes(row["canonical_bytes"])))
-        for row in conn.execute("SELECT * FROM discovery_watch_conditions ORDER BY recorded_at,watch_condition_id"):
-            self._watch_from_row(conn, row, replayed=False)
-        for row in conn.execute("SELECT * FROM lead_disposition_decisions ORDER BY lead_id,decision_ordinal"):
-            self._disposition_from_row(conn, row, replayed=False)
-        self._validate_discovery_heads(conn)
-        self._validate_discovery_event_coverage(conn)
+        with _validation_stage("discovery_integrity"):
+            conn = self._connection
+            for row in conn.execute("SELECT * FROM discovery_signals ORDER BY recorded_at,signal_id"):
+                self._signal_from_row(conn, row, replayed=False)
+                request = signal_request_from_bytes(bytes(row["canonical_bytes"]))
+                self._require_exact_signal_lineage(conn, request)
+            for row in conn.execute("SELECT * FROM discovery_gate_decisions ORDER BY signal_id,decision_ordinal"):
+                self._gate_from_row(conn, row, replayed=False)
+            for row in conn.execute("SELECT * FROM news_leads ORDER BY recorded_at,lead_id"):
+                self._lead_from_row(conn, row, replayed=False)
+                self._require_source_contract_matches_lead(conn, lead_request_from_bytes(bytes(row["canonical_bytes"])))
+            for row in conn.execute("SELECT * FROM discovery_watch_conditions ORDER BY recorded_at,watch_condition_id"):
+                self._watch_from_row(conn, row, replayed=False)
+            for row in conn.execute("SELECT * FROM lead_disposition_decisions ORDER BY lead_id,decision_ordinal"):
+                self._disposition_from_row(conn, row, replayed=False)
+            self._validate_discovery_heads(conn)
+            self._validate_discovery_event_coverage(conn)
 
     @staticmethod
     def _validate_discovery_heads(conn: sqlite3.Connection) -> None:

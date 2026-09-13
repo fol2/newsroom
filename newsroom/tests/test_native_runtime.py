@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -75,8 +76,9 @@ def test_native_runtime_rejects_overlapping_store_identity_before_open(tmp_path,
 
 
 def test_native_runtime_builds_dependencies_from_opened_base_before_children(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, caplog,
 ):
+    caplog.set_level(logging.INFO, logger="newsroom.authority.open")
     args = _args(tmp_path, monkeypatch)
     retrieval = args.pop("retrieval_authority")
     collision = args.pop("collision_enforcer")
@@ -105,18 +107,55 @@ def test_native_runtime_builds_dependencies_from_opened_base_before_children(
         assert captured[1][2] is reopened.authority.commands
         assert captured[1][3] is reopened.authority.events
 
+    records = [r for r in caplog.records if r.name == "newsroom.authority.open"]
+    stages = (
+        "extraction_integrity", "entity_integrity", "editorial_relation_integrity",
+        "graphiti_integrity", "source_integrity", "check_integrity", "discovery_integrity",
+        "projection_integrity", "cas_reconciliation", "native_dependencies",
+        "native_semantic_stores", "native_relationships", "native_lineage", "native_candidates",
+    )
+    for stage in stages:
+        selected = [r for r in records if r.args[0] == stage]
+        assert [r.args[1] if len(r.args) > 1 else "STARTED" for r in selected] == [
+            "STARTED", "COMPLETE", "STARTED", "COMPLETE",
+        ]
+    # Nested phase totals overlap. A stack proves the hierarchy rather than
+    # summing the enclosing validation and its child elapsed times.
+    stack = []
+    for record in records:
+        assert record.levelno == logging.INFO
+        stage = record.args[0]
+        if len(record.args) == 1:
+            stack.append(stage)
+        else:
+            assert stack.pop() == stage
+            assert type(record.args[-1]) is int and record.args[-1] >= 0
+    assert stack == []
+    messages = [r.getMessage() for r in records]
+    validation_end = next(i for i, r in enumerate(records) if r.args[:2] == ("validation", "COMPLETE"))
+    assert messages.index("authority_open stage=projection_integrity status=STARTED") < validation_end
+    assert messages.index("authority_open stage=cas_reconciliation status=STARTED") > validation_end
+    assert messages.index("authority_open stage=native_semantic_stores status=STARTED") > validation_end
 
-def test_native_runtime_factory_failure_closes_base_writer(tmp_path, monkeypatch):
+
+def test_native_runtime_factory_failure_closes_base_writer(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="newsroom.authority.open")
     args = _args(tmp_path, monkeypatch)
     retrieval = args.pop("retrieval_authority")
     collision = args.pop("collision_enforcer")
 
+    failure = RuntimeError("dependency construction failed")
+
     def fail_factory(**_):
-        raise RuntimeError("dependency construction failed")
+        raise failure
 
     args["native_dependency_factory"] = fail_factory
-    with pytest.raises(RuntimeError, match="dependency construction failed"):
+    with pytest.raises(RuntimeError, match="dependency construction failed") as raised:
         open_native_runtime(**args)
+    assert raised.value is failure
+    assert [r.args[0] for r in caplog.records if "status=FAILED" in r.getMessage()] == [
+        "native_dependencies",
+    ]
 
     args.pop("native_dependency_factory")
     args.update(retrieval_authority=retrieval, collision_enforcer=collision)
@@ -126,10 +165,12 @@ def test_native_runtime_factory_failure_closes_base_writer(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("failure", (None, "relationship", "lineage", "candidate"))
 def test_native_open_shares_only_one_stable_validation_transaction(
-    tmp_path, monkeypatch, failure
+    tmp_path, monkeypatch, failure, caplog
 ):
     from newsroom.authority import _hermes_native_system as native
 
+    caplog.set_level(logging.INFO, logger="newsroom.authority.open")
+    injected = ValueError("injected composed validation failure")
     args = _args(tmp_path, monkeypatch)
     connection = None
     shared_inputs = None
@@ -148,7 +189,7 @@ def test_native_open_shares_only_one_stable_validation_transaction(
         assert connection.in_transaction
         visited.append(stage)
         if stage == failure:
-            raise ValueError("injected composed validation failure")
+            raise injected
 
     def relationships(store):
         nonlocal shared_inputs
@@ -181,9 +222,13 @@ def test_native_open_shares_only_one_stable_validation_transaction(
                 assert "ROLLBACK" not in statements
                 assert statements.count("COMMIT") == 1
         else:
-            with pytest.raises(ValueError, match="injected composed validation failure"):
+            with pytest.raises(ValueError, match="injected composed validation failure") as raised:
                 open_native_runtime(**args)
-            assert visited[-1] == failure
+            assert raised.value is injected
+            assert [r.args[0] for r in caplog.records if "status=FAILED" in r.getMessage()] == [
+                {"relationship": "native_relationships", "lineage": "native_lineage", "candidate": "native_candidates"}[failure],
+            ]
+            assert visited == ["relationship", "lineage", "candidate"][:1 + ("relationship", "lineage", "candidate").index(failure)]
             assert statements[-1] == "ROLLBACK"
         # Success and every failure path release the root writer.
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -203,3 +248,32 @@ def test_native_runtime_rejects_ambiguous_dependency_setup_before_open(
     with pytest.raises(TypeError, match="conflicts with explicit"):
         open_native_runtime(**args)
     assert not args["authority_path"].exists()
+
+
+@pytest.mark.parametrize("phase", ("graphiti_integrity", "cas_reconciliation"))
+def test_native_open_phase_failure_retains_exact_exception(tmp_path, monkeypatch, caplog, phase):
+    from newsroom.authority._graphiti_adapter_store_integrity import _GraphitiAdapterIntegrityMixin
+    from newsroom.authority._object_store_base import _ObjectStoreBase
+
+    args = _args(tmp_path, monkeypatch)
+    caplog.set_level(logging.INFO, logger="newsroom.authority.open")
+    failure = RuntimeError("private fault must not appear in phase log")
+    calls = []
+
+    def fail(*_):
+        calls.append(phase)
+        raise failure
+
+    owner, method = (
+        (_GraphitiAdapterIntegrityMixin, "_validate_graphiti_adapter_integrity")
+        if phase == "graphiti_integrity" else (_ObjectStoreBase, "_reconcile_objects")
+    )
+    monkeypatch.setattr(owner, method, fail)
+    with pytest.raises(RuntimeError) as raised:
+        open_native_runtime(**args)
+    assert raised.value is failure
+    assert calls == [phase]
+    records = [r for r in caplog.records if r.name == "newsroom.authority.open"]
+    failed = [r.args[0] for r in records if "status=FAILED" in r.getMessage()]
+    assert failed == ([phase, "validation"] if phase == "graphiti_integrity" else [phase])
+    assert all(str(failure) not in r.getMessage() for r in records)

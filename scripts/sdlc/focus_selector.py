@@ -375,18 +375,17 @@ def _discover_tests(
         relative = path.relative_to(repo_root).as_posix()
         if _is_research_only(relative):
             continue
+        importer = module_name_for_path(relative)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        except (OSError, SyntaxError, UnicodeError):
+            imports = legacy._imported_modules(tree, importer=importer)
+        except (OSError, SyntaxError, UnicodeError, DependencyError):
             unresolved = True
             continue
-        imports = legacy._imported_modules(tree)
         direct_hit = any(
             (
-                _imports_changed_surface(
-                    tree, module, direct_symbols[module], module_name_for_path(relative)
-                )
-                if direct_symbols.get(module) is not None
+                _imports_changed_surface(tree, module, direct_symbols[module], importer)
+                if direct_symbols[module] is not None
                 else any(_imports_module(imported, module) for imported in imports)
             )
             for module in direct

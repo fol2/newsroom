@@ -299,6 +299,17 @@ _SOURCE_BOUND_TECHNICAL_FRAMEWORK = re.compile(
     r"\s+of\s+Reference\s+for\s+[A-Z][A-Za-z-]+)\b"
 )
 _SOURCE_BOUND_LEVEL_CODE = re.compile(r"\blevel\s+([A-C][12])\b")
+_SOURCE_BOUND_IMMIGRATION_RULE_CITATION = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d{1,3}\.\d{1,3}(?:/\d{1,3}){1,4})"
+    r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])"
+)
+_SOURCE_BOUND_IMMIGRATION_PART_END = (
+    r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_]|[ \t]+[A-Za-z0-9_])"
+)
+_SOURCE_BOUND_IMMIGRATION_PART_REFERENCE = re.compile(
+    r"\b(Part\s+\d{1,3}:\s+[a-z][a-z-]*(?:[ \t]+[a-z][a-z-]*){0,4})"
+    + _SOURCE_BOUND_IMMIGRATION_PART_END
+)
 
 
 def _contextual_official_term_shapes(
@@ -309,6 +320,8 @@ def _contextual_official_term_shapes(
         _SOURCE_BOUND_ROUTE_TERM,
         _SOURCE_BOUND_TECHNICAL_FRAMEWORK,
         _SOURCE_BOUND_LEVEL_CODE,
+        _SOURCE_BOUND_IMMIGRATION_RULE_CITATION,
+        _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE,
     ):
         matches.extend(
             (match.start(1), match.end(1), match.group(1))
@@ -321,18 +334,42 @@ def _source_bound_official_terms(
     text: str,
     source_context: str,
 ) -> tuple[tuple[int, int, str], ...]:
-    return tuple(
-        (start, end, term)
-        for start, end, term in _contextual_official_term_shapes(text)
-        if (
-            not re.search(rf"\b{re.escape(term)}\s+route\b", text)
-            or re.search(
-                rf"\b{re.escape(term)}\s+route\b",
-                source_context,
-            )
+    matches = []
+    for start, end, term in _contextual_official_term_shapes(text):
+        if not re.search(_entity_pattern(term), source_context):
+            continue
+        reference_pattern = (
+            _SOURCE_BOUND_IMMIGRATION_RULE_CITATION
+            if _SOURCE_BOUND_IMMIGRATION_RULE_CITATION.fullmatch(term)
+            else _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE
+            if _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(term)
+            else None
         )
-        and re.search(_entity_pattern(term), source_context)
-    )
+        if reference_pattern is not None and not any(
+            match.group(1) == term for match in reference_pattern.finditer(source_context)
+        ):
+            continue
+        if reference_pattern is _SOURCE_BOUND_IMMIGRATION_RULE_CITATION:
+            declared = re.search(
+                r"\bImmigration Rules Appendix\b", source_context,
+                flags=re.IGNORECASE,
+            )
+        elif reference_pattern is _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE:
+            declared = re.search(
+                rf"\bImmigration Rules\s+{re.escape(term)}"
+                + _SOURCE_BOUND_IMMIGRATION_PART_END,
+                source_context,
+                flags=re.IGNORECASE,
+            )
+        elif re.search(rf"\b{re.escape(term)}\s+route\b", text):
+            declared = re.search(
+                rf"\b{re.escape(term)}\s+route\b", source_context
+            )
+        else:
+            declared = True
+        if declared:
+            matches.append((start, end, term))
+    return tuple(matches)
 
 
 def _is_bounded_english_organisation(text: str) -> bool:
@@ -355,6 +392,8 @@ def _has_bounded_named_entity_shape(
             return bool(
                 _ENGLISH_OFFICIAL_TERM.fullmatch(text)
                 or _ENGLISH_OFFICIAL_REFERENCE.fullmatch(text)
+                or _SOURCE_BOUND_IMMIGRATION_RULE_CITATION.fullmatch(text)
+                or _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(text)
                 or text in _BOUNDED_OFFICIAL_ABBREVIATIONS
                 or any(
                     candidate == text
@@ -1026,7 +1065,13 @@ class GovernedClaimEvidence:
             or any(
                 text in {self.claim, self.supporting_excerpt}
                 or len(text) > 80
-                or re.search(r"[\n。！？!?；;：:]", text)
+                or (
+                    re.search(r"[\n。！？!?；;：:]", text)
+                    and not (
+                        entity_type == "OFFICIAL_TERM"
+                        and _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(text)
+                    )
+                )
                 or not _has_bounded_named_entity_shape(
                     text,
                     entity_type,
@@ -1038,7 +1083,10 @@ class GovernedClaimEvidence:
                 not isinstance(text, str)
                 or not text.strip()
                 or len(text) > 80
-                or re.search(r"[\n。！？!?；;：:]", text)
+                or (
+                    re.search(r"[\n。！？!?；;：:]", text)
+                    and not _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(text)
+                )
                 for text in self.rendered_named_entities
             )
         ):

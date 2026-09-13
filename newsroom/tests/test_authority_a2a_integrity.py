@@ -67,7 +67,7 @@ def test_reopen_logs_each_existing_validation_phase(tmp_path, caplog) -> None:
     records = [r for r in caplog.records if r.name == "newsroom.authority.open"]
     phases = (
         "schema", "quick_check", "foreign_key_check", "connection_settings",
-        "aggregate_heads", "command_completeness", "event_routing",
+        "relational_invariants", "aggregate_heads", "command_completeness", "event_routing",
         "immutable_records", "registry_coverage",
     )
     assert [r.getMessage() for r in records if "STARTED" in r.getMessage()] == [
@@ -75,7 +75,11 @@ def test_reopen_logs_each_existing_validation_phase(tmp_path, caplog) -> None:
         for stage in ("validation", *phases)
     ]
     completed = [r for r in records if "COMPLETE" in r.getMessage()]
-    assert [r.args[0] for r in completed] == [*phases, "validation"]
+    # The relational phase encloses the existing three SQL subphases; these
+    # elapsed values overlap and must not be added as independent wall time.
+    assert [r.args[0] for r in completed] == [
+        *phases[:4], *phases[5:8], "relational_invariants", *phases[8:], "validation",
+    ]
     assert all(type(r.args[-1]) is int and r.args[-1] >= 0 for r in completed)
     assert len(records) == 2 * (len(phases) + 1)
 

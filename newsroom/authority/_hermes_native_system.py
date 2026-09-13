@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -330,21 +332,22 @@ def open_hermes_native_authority_system(
                 composed_hydrate, rehydrate=composed_rehydrate,
                 _token=_OBJECT_COMPOSITION_TOKEN
             )
-            dependencies = native_dependency_factory(
-                objects=base.objects,
-                extraction=base.extraction,
-                commands=authority_commands,
-                events=authority_events,
-            )
-            if (
-                type(dependencies) is not tuple
-                or len(dependencies) != 3
-                or type(dependencies[0]) is not RetrievalContextAuthority
-                or type(dependencies[1]) is not CurrentCollisionEffectEnforcer
-                or type(dependencies[2]) is not CurrentCandidateCitationReadPort
-            ):
-                raise TypeError("native dependency factory result differs")
-            retrieval_authority, collision_enforcer, current_candidate_citations = dependencies
+            with _validation_stage("native_dependencies"):
+                dependencies = native_dependency_factory(
+                    objects=base.objects,
+                    extraction=base.extraction,
+                    commands=authority_commands,
+                    events=authority_events,
+                )
+                if (
+                    type(dependencies) is not tuple
+                    or len(dependencies) != 3
+                    or type(dependencies[0]) is not RetrievalContextAuthority
+                    or type(dependencies[1]) is not CurrentCollisionEffectEnforcer
+                    or type(dependencies[2]) is not CurrentCandidateCitationReadPort
+                ):
+                    raise TypeError("native dependency factory result differs")
+                retrieval_authority, collision_enforcer, current_candidate_citations = dependencies
         assert retrieval_authority is not None and collision_enforcer is not None
 
         check_boundary = _CheckBoundary(
@@ -392,27 +395,28 @@ def open_hermes_native_authority_system(
             current_status=discovery_boundary.current_status,
         )
 
-        work_items = TriageWorkItemStore(connection, retrieval_authority)
-        executions = _open_on_connection(
-            connection, retrieval_authority=retrieval_authority,
-            authenticator=authenticator, clock=clock,
-            lease_ttl_seconds=lease_ttl_seconds,
-            work_items=work_items,
-        )
-        executions._TriageExecutionAuthority__store._transaction_lock = operation_lock
-        dispositions = ProposalDispositionStore(
-            connection,
-            retrieval_authority,
-            authenticator,
-            current_candidate_citations,
-            work_items=work_items,
-        )
-        hypothesis_store = _HypothesisStore(
-            connection, retrieval_authority, authenticator, clock,
-            current_candidate_citations,
-            dispositions=dispositions,
-        )
-        hypothesis_store._lock = operation_lock
+        with _validation_stage("native_semantic_stores"):
+            work_items = TriageWorkItemStore(connection, retrieval_authority)
+            executions = _open_on_connection(
+                connection, retrieval_authority=retrieval_authority,
+                authenticator=authenticator, clock=clock,
+                lease_ttl_seconds=lease_ttl_seconds,
+                work_items=work_items,
+            )
+            executions._TriageExecutionAuthority__store._transaction_lock = operation_lock
+            dispositions = ProposalDispositionStore(
+                connection,
+                retrieval_authority,
+                authenticator,
+                current_candidate_citations,
+                work_items=work_items,
+            )
+            hypothesis_store = _HypothesisStore(
+                connection, retrieval_authority, authenticator, clock,
+                current_candidate_citations,
+                dispositions=dispositions,
+            )
+            hypothesis_store._lock = operation_lock
 
         relationship_store = _share_store(_SharedRelationshipStore, root)
         with relationship_store._hypothesis_rows():
@@ -447,12 +451,15 @@ def open_hermes_native_authority_system(
         with operation_lock, relationship_store._transaction():
             relationship_store._adopt()
             try:
-                _verify_relationship_event_coverage(connection)
-                relationship_inputs = relationship_store._verify_relationships()
-                lineage_store._verify_global_event_coverage()
-                lineage_store._verify(relationship_inputs=relationship_inputs)
-                candidate_store._verify_global_event_coverage()
-                candidate_store._verify(relationship_receipts=relationship_inputs[1])
+                with _validation_stage("native_relationships"):
+                    _verify_relationship_event_coverage(connection)
+                    relationship_inputs = relationship_store._verify_relationships()
+                with _validation_stage("native_lineage"):
+                    lineage_store._verify_global_event_coverage()
+                    lineage_store._verify(relationship_inputs=relationship_inputs)
+                with _validation_stage("native_candidates"):
+                    candidate_store._verify_global_event_coverage()
+                    candidate_store._verify(relationship_receipts=relationship_inputs[1])
             finally:
                 relationship_store._release()
 

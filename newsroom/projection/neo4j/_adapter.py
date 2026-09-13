@@ -722,31 +722,10 @@ class _Neo4jAdapter:
         with self._lock:
             try:
                 with self._driver.session(database=self._config.database) as session:
-                    node_rows, relationship_rows = session.execute_read(
+                    actual_digest = session.execute_read(
                         self._state_transaction,
                         generation_id,
                     )
-                actual_digest = _actual_projection_state_digest(
-                    generation_id,
-                    node_records=tuple(
-                        (
-                            _record_labels(row, "labels"),
-                            _record_mapping(row, "properties"),
-                        )
-                        for row in node_rows
-                    ),
-                    relationship_records=tuple(
-                        (
-                            _record_labels(row, "source_labels"),
-                            _record_mapping(row, "source_properties"),
-                            str(row["relation_type"]),
-                            _record_mapping(row, "relation_properties"),
-                            _record_labels(row, "target_labels"),
-                            _record_mapping(row, "target_properties"),
-                        )
-                        for row in relationship_rows
-                    ),
-                )
             except Neo4jIdentityConflict:
                 raise
             except Exception:
@@ -763,20 +742,39 @@ class _Neo4jAdapter:
     def _state_transaction(
         transaction: Any,
         generation_id: str,
-    ) -> tuple[list[Any], list[Any]]:
-        node_parameters = {"generation_id": generation_id}
-        relation_parameters = {
-            "generation_id": generation_id,
-            "relation_types": [item.value for item in ProjectionRelationType],
-        }
-        return (
-            list(transaction.run(_STATE_NODES_QUERY, node_parameters)),
-            list(
-                transaction.run(
-                    _STATE_RELATIONSHIPS_QUERY,
-                    relation_parameters,
+    ) -> str:
+        def node_records():
+            for row in transaction.run(
+                _STATE_NODES_QUERY, {"generation_id": generation_id},
+            ):
+                yield (
+                    _record_labels(row, "labels"),
+                    _record_mapping(row, "properties"),
                 )
-            ),
+
+        def relationship_records():
+            for row in transaction.run(
+                _STATE_RELATIONSHIPS_QUERY,
+                {
+                    "generation_id": generation_id,
+                    "relation_types": [item.value for item in ProjectionRelationType],
+                },
+            ):
+                yield (
+                    _record_labels(row, "source_labels"),
+                    _record_mapping(row, "source_properties"),
+                    str(row["relation_type"]),
+                    _record_mapping(row, "relation_properties"),
+                    _record_labels(row, "target_labels"),
+                    _record_mapping(row, "target_properties"),
+                )
+
+        # Consume and validate nodes before starting the next query, which would
+        # otherwise buffer an unfinished driver result. Only the digest escapes.
+        return _actual_projection_state_digest(
+            generation_id,
+            node_records=node_records(),
+            relationship_records=relationship_records(),
         )
 
     def cleanup_generation(self, generation_id: str) -> int:

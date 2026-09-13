@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ._event_store_base import _validation_stage
+
 import sqlite3
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
@@ -12,7 +14,8 @@ class _GraphitiAdapterIntegrityMixin:
         super()._validate_schema_and_integrity()
         if not self._should_validate_row_integrity():
             return
-        self._validate_graphiti_adapter_integrity(self._connection)
+        with _validation_stage("graphiti_integrity"):
+            self._validate_graphiti_adapter_integrity(self._connection)
 
     def _validate_graphiti_adapter_integrity(
         self, conn: sqlite3.Connection

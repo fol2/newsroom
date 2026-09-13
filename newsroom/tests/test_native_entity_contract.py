@@ -92,6 +92,109 @@ def test_source_context_types_official_route_framework_and_level_codes():
 
 
 @pytest.mark.parametrize(
+    ("claim", "source_context", "official_term"),
+    (
+        (
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "Immigration Rules Appendix Graduate. "
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "ST8.1/2/3",
+        ),
+        (
+            "Permission was previously granted under Part 14: stateless persons.",
+            "Immigration Rules part 14: stateless persons. "
+            "Permission was previously granted under Part 14: stateless persons.",
+            "Part 14: stateless persons",
+        ),
+    ),
+)
+def test_source_context_types_bounded_immigration_rule_references(
+    claim, source_context, official_term,
+):
+    assert evidence.bounded_named_entities(
+        claim,
+        source_context=source_context,
+    ) == frozenset({(official_term, "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize(
+    ("claim", "source_context"),
+    (
+        (
+            "The qualification must meet ST8.1/2/3X of the Rules.",
+            "Immigration Rules Appendix Graduate. ST8.1/2/3 applies.",
+        ),
+        (
+            "The qualification must meet ST8.1/2/3 of the Rules.",
+            "A training handbook says ST8.1/2/3 applies.",
+        ),
+        (
+            "Permission was granted under Part 14: stateless persons.",
+            "A handbook cites Part 14: stateless persons.",
+        ),
+        (
+            "Permission was granted under Part 14: stateless personsX.",
+            "Immigration Rules part 14: stateless persons.",
+        ),
+    ),
+)
+def test_immigration_rule_references_require_exact_declared_source_context(
+    claim, source_context,
+):
+    assert evidence.bounded_named_entities(
+        claim,
+        source_context=source_context,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", ("/4.", ".4.", "_extra.", "X.", ".foo", "-extra"))
+def test_immigration_citation_source_prefix_is_not_an_exact_token(suffix):
+    assert evidence.bounded_named_entities(
+        "The code is ST8.1/2/3",
+        source_context="Immigration Rules Appendix Graduate. The code is ST8.1/2/3" + suffix,
+    ) == frozenset()
+
+
+def test_immigration_citation_allows_sentence_ending_punctuation():
+    claim = "The code is ST8.1/2/3."
+    assert evidence.bounded_named_entities(
+        claim, source_context="Immigration Rules Appendix Graduate. " + claim,
+    ) == frozenset({("ST8.1/2/3", "OFFICIAL_TERM")})
+
+
+@pytest.mark.parametrize("suffix", (" and related persons.", "-related.", "/related.", "_related.", ".related.", "X."))
+def test_immigration_part_source_prefix_is_not_an_exact_title(suffix):
+    assert evidence.bounded_named_entities(
+        "Permission under Part 14: stateless persons",
+        source_context="Immigration Rules Part 14: stateless persons" + suffix,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", (" today.", " Today.", " 2.", "\ttoday."))
+def test_immigration_part_word_limit_does_not_truncate_source_title(suffix):
+    term = "Part 14: stateless persons and related people"
+    assert evidence.bounded_named_entities(
+        term, source_context="Immigration Rules " + term + suffix,
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("suffix", (".", ",", ";", ":", ")", "\nThe rules apply."))
+def test_immigration_part_title_allows_real_end_delimiters(suffix):
+    term = "Part 14: stateless persons"
+    assert evidence.bounded_named_entities(
+        term, source_context="Immigration Rules " + term + suffix,
+    ) == frozenset({(term, "OFFICIAL_TERM")})
+
+
+def test_immigration_part_short_reference_does_not_bind_longer_declaration():
+    term = "Part 14: stateless persons"
+    assert evidence.bounded_named_entities(
+        term,
+        source_context="Immigration Rules " + term + " and related persons. " + term + ".",
+    ) == frozenset()
+
+
+@pytest.mark.parametrize(
     "source",
     (
         "UK Ancestry applicants may apply.",
