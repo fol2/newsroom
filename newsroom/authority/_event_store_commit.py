@@ -403,7 +403,6 @@ class _EventStoreCommitMixin:
         decision: Any,
         recorded_at: str,
     ) -> None:
-        auth_bytes = canonical_json_bytes(authentication.canonical_value())
         request_bytes = canonical_json_bytes(request.canonical_value())
         scopes_bytes = canonical_json_bytes(list(decision.effective_scopes))
         scope_content_digest = digest_bytes(scopes_bytes)
@@ -412,7 +411,7 @@ class _EventStoreCommitMixin:
             "INSERT OR IGNORE INTO authentication_contexts("
             "authentication_context_id,principal_id,authority_domain,"
             "authentication_method,assurance_class,credential_binding_digest,"
-            "authenticated_at,expires_at,canonical_bytes,canonical_digest) "
+            "authenticated_at,expires_at,storage_context_marker,canonical_digest) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 str(authentication.authentication_context_id),
@@ -423,7 +422,7 @@ class _EventStoreCommitMixin:
                 authentication.credential_binding_digest,
                 authentication.authenticated_at.to_text(),
                 authentication.expires_at.to_text(),
-                auth_bytes,
+                b"v37",
                 authentication.digest,
             ),
         )

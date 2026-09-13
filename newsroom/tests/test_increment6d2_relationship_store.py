@@ -510,7 +510,7 @@ def _tamper_relationship_authentication(store, decision_id: str) -> None:
     command_id = _relationship_command_id(store, decision_id)
     store._execute_test_sql("DROP TRIGGER immutable_authentication_contexts_update")
     store._execute_test_sql(
-        "UPDATE authentication_contexts SET canonical_bytes=? WHERE "
+        "UPDATE authentication_contexts SET storage_context_marker=? WHERE "
         "authentication_context_id=(SELECT authentication_context_id FROM "
         "authority_commands WHERE command_id=?)",
         (b"{}", command_id),
