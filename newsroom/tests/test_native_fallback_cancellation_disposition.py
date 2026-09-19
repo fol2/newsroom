@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import asdict, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -16,10 +16,33 @@ from newsroom.control_plane.graphiti_requests import load_checked_native_graphit
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.native_qualification import NativeQualificationError, NativeQualificationPending, _invocations
 from newsroom.control_plane.store import connect, insert_graphiti_attempt_receipt, reserve_graphiti_spend, reconcile_graphiti_spend
-from newsroom.tests.test_graphiti_internal_requests import EXTRACTED_ENTITIES_SCHEMA, T0
 from newsroom.tests.test_native_graphiti import _native, _open
 
 ROUTE = "GRAPHITI_CHAT_FALLBACK"
+T0 = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
+# Retained ExtractedEntities request schema: accounting fixtures must collect
+# without importing the optional Graphiti runtime or its skipped test module.
+EXTRACTED_ENTITIES_SCHEMA = json.dumps({
+    "$defs": {"ExtractedEntity": {
+        "properties": {
+            "name": {"description": "Name of the extracted entity", "title": "Name", "type": "string"},
+            "entity_type_id": {
+                "description": "ID of the classified entity type. Must be one of the provided entity_type_id integers.",
+                "title": "Entity Type Id", "type": "integer",
+            },
+            "episode_indices": {
+                "description": "List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].",
+                "items": {"type": "integer"}, "title": "Episode Indices", "type": "array",
+            },
+        },
+        "required": ["name", "entity_type_id"], "title": "ExtractedEntity", "type": "object",
+    }},
+    "properties": {"extracted_entities": {
+        "description": "List of extracted entities", "items": {"$ref": "#/$defs/ExtractedEntity"},
+        "title": "Extracted Entities", "type": "array",
+    }},
+    "required": ["extracted_entities"], "title": "ExtractedEntities", "type": "object",
+})
 
 
 def _cancelled(tmp_path, monkeypatch, *, land=True, native=True, dispatched=True,
