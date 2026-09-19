@@ -252,26 +252,26 @@ def _imported_from(node: ast.ImportFrom, importer: str | None) -> str | None:
     return ".".join((*base, *(node.module.split(".") if node.module else ())))
 
 
-def _imports_public_symbol(
-    tree: ast.AST, package: str, symbols: set[str], importer: str | None = None
+def _imports_any_public_symbol(
+    tree: ast.AST, packages: set[str], symbols: set[str], importer: str | None = None
 ) -> bool:
-    if not symbols:
+    if not symbols or not packages:
         return False
     aliases: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and _imported_from(node, importer) == package:
+        if isinstance(node, ast.ImportFrom) and _imported_from(node, importer) in packages:
             if any(alias.name == "*" or alias.name in symbols for alias in node.names):
                 return True
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == package:
+                if alias.name in packages:
                     aliases.add(alias.asname or alias.name.split(".")[0])
-    package_parts = tuple(package.split("."))
+    package_parts = {tuple(package.split(".")) for package in packages}
     for node in ast.walk(tree):
         chain = _attribute_chain(node)
         if not chain or chain[-1] not in symbols:
             continue
-        if chain[:-1] == package_parts:
+        if chain[:-1] in package_parts:
             return True
         if len(chain) == 2 and chain[0] in aliases:
             return True
@@ -395,11 +395,7 @@ def _discover_tests(
             for imported in imports
             for module in dependents
         )
-        reexport_hit = any(
-            _imports_public_symbol(
-                tree, package, symbols, module_name_for_path(relative)
-            ) for package in reexports
-        )
+        reexport_hit = _imports_any_public_symbol(tree, reexports, symbols, importer)
         if direct_hit or dependent_hit or reexport_hit:
             selected.add(relative)
     return selected, unresolved

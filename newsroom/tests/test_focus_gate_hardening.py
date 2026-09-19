@@ -613,3 +613,101 @@ def test_invalid_test_relative_import_keeps_unresolved_fallback(tmp_path: Path) 
     route = selector.select_focus(("newsroom/tests/fixture.py",), repo_root=tmp_path)
     assert route["full_health_required"] is True
     assert "unresolved_dependency_analysis:full_health" in route["reasons"]
+
+
+def _previous_public_symbol_match(tree, package, symbols, importer):
+    """Frozen single-package semantics, before combining the AST traversals."""
+    import ast
+
+    if not symbols:
+        return False
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and selector._imported_from(node, importer) == package:
+            if any(alias.name == "*" or alias.name in symbols for alias in node.names):
+                return True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == package:
+                    aliases.add(alias.asname or alias.name.split(".")[0])
+    package_parts = tuple(package.split("."))
+    for node in ast.walk(tree):
+        chain = selector._attribute_chain(node)
+        if chain and chain[-1] in symbols:
+            if chain[:-1] == package_parts or (len(chain) == 2 and chain[0] in aliases):
+                return True
+    return False
+
+
+@pytest.mark.parametrize("source,importer,symbols,expected", (
+    ("from newsroom.api import Changed", None, {"Changed"}, True),
+    ("from newsroom.other_api import Changed as Selected", None, {"Changed"}, True),
+    ("from newsroom.api import *", None, {"Changed"}, True),
+    ("import newsroom.api as selected\nvalue = selected.Changed", None, {"Changed"}, True),
+    ("import newsroom.other_api\nvalue = newsroom.other_api.Changed", None, {"Changed"}, True),
+    ("value = newsroom.api.Changed", None, {"Changed"}, True),
+    ("import newsroom.api\nvalue = newsroom.Changed", None, {"Changed"}, True),
+    ("from ..api import Changed", "newsroom.tests.test_example", {"Changed"}, True),
+    ("from ..other_api import Changed as Selected", "newsroom.tests.test_example", {"Changed"}, True),
+    ("from ..api import Changed", None, {"Changed"}, False),
+    ("from newsroom.api import Other", None, {"Changed"}, False),
+    ("from newsroom.api.child import Changed", None, {"Changed"}, False),
+    ("import newsroom.unrelated as selected\nvalue = selected.Changed", None, {"Changed"}, False),
+    ("import newsroom.api as selected\nvalue = selected.Other", None, {"Changed"}, False),
+    ("import newsroom.api as selected\nvalue = selected.child.Changed", None, {"Changed"}, False),
+    ("from newsroom.api import *", None, set(), False),
+))
+def test_reexport_union_matches_previous_package_disjunction(source, importer, symbols, expected):
+    import ast
+
+    tree = ast.parse(source)
+    packages = {"newsroom.api", "newsroom.other_api"}
+    previous = any(
+        _previous_public_symbol_match(tree, package, symbols, importer)
+        for package in packages
+    )
+    assert previous is expected
+    assert selector._imports_any_public_symbol(tree, packages, symbols, importer) is previous
+
+
+def test_empty_reexport_packages_do_not_match_or_walk(monkeypatch):
+    import ast
+
+    tree = ast.parse("from newsroom.api import Changed")
+
+    def forbidden(_tree):
+        raise AssertionError("empty package set needs no AST traversal")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, "walk", forbidden)
+        result = selector._imports_any_public_symbol(tree, set(), {"Changed"})
+    assert result is False
+
+
+@pytest.mark.parametrize("package_count", (0, 1, 100))
+def test_reexport_import_walks_are_constant_per_test_file(tmp_path, monkeypatch, package_count):
+    import ast
+
+    source = "newsroom/feature.py"
+    _write(tmp_path, source, "class Changed:\n    pass\n")
+    _write(tmp_path, "newsroom/tests/test_consumer.py", "import unrelated\n\ndef test_counted_tree():\n    pass\n")
+    monkeypatch.setattr(selector, "build_dependency_graph", lambda _: _Graph({
+        source: tuple(f"newsroom/public_{number}/__init__.py" for number in range(package_count)),
+    }))
+    monkeypatch.setattr(selector, "_changed_public_symbols", lambda *_: None)
+    original = ast.walk
+    walks = []
+
+    def counted(tree):
+        if isinstance(tree, ast.Module) and any(
+            isinstance(node, ast.FunctionDef) and node.name == "test_counted_tree"
+            for node in tree.body
+        ):
+            walks.append(tree)
+        yield from original(tree)
+
+    monkeypatch.setattr(ast, "walk", counted)
+    selected, unresolved = selector._discover_tests(tmp_path, (source,))
+    assert selected == set() and unresolved is False
+    # One existing import inventory pass, then at most two reexport passes.
+    assert len(walks) == (3 if package_count else 1)
