@@ -609,8 +609,9 @@ def test_native_required_route_hold_is_not_reported_as_a_rights_failure(tmp_path
 
 
 @pytest.mark.parametrize("retained", [True, False])
+@pytest.mark.parametrize("subscription_outcome", ["FAILED", "TIMEOUT"])
 def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
-    tmp_path, monkeypatch, retained,
+    tmp_path, monkeypatch, retained, subscription_outcome,
 ):
     from newsroom.control_plane.model_usage import ModelUsageService
 
@@ -626,18 +627,22 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
     usage.register_policy(policy)
     # These rows test selection/wiring only. The usage-service tests separately
     # prove authority, canonical bindings, dispatch and policy-derived estimates.
-    for number, ingest_id, workload, provider, status, failure in (
-        (1, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
-        (2, "other-ingest", "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
-        (3, unit.ingest_id, "GRAPHITI_EMBEDDING", "openrouter", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
-        (4, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "REPORTED", "NONE"),
-        (5, unit.ingest_id, "GRAPHITI_CHAT_FALLBACK", "grok-build-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
+    for number, ingest_id, workload, provider, status, failure, outcome in (
+        (1, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", subscription_outcome),
+        (2, "other-ingest", "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "FAILED"),
+        (3, unit.ingest_id, "GRAPHITI_EMBEDDING", "openrouter", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "FAILED"),
+        (4, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "REPORTED", "NONE", "FAILED"),
+        (5, unit.ingest_id, "GRAPHITI_CHAT_FALLBACK", "grok-build-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "FAILED"),
+        # Unknown/ambiguous terminals are not native failed-call estimates.
+        (56, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "AMBIGUOUS_DISPATCH"),
+        (57, unit.ingest_id, "GRAPHITI_CHAT_FALLBACK", "grok-build-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "CANCELLED"),
+        (58, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY", "COMPLETED"),
     ):
         identity = str(number)
         connection.execute(
             "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
             (identity, "cycle", (
-                "GRAPHITI_CHAT_PRIMARY" if number == 5 else workload
+                "GRAPHITI_CHAT_PRIMARY" if workload == "GRAPHITI_CHAT_FALLBACK" else workload
             ), "now", identity,
              json.dumps({"ingest_id": ingest_id})),
         )
@@ -648,7 +653,7 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         )
         connection.execute(
             "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
-            ("terminal-" + identity, identity, status, "FAILED", failure, "now", "{}"),
+            ("terminal-" + identity, identity, status, outcome, failure, "now", "{}"),
         )
     # Settled and unrelated history must not enter the current-ingest selector.
     for number in range(6, 56):
@@ -724,6 +729,10 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
     assert connection.execute(
         "SELECT usage_status FROM model_invocation_terminals WHERE invocation_id='1'"
     ).fetchone()[0] == "UNREPORTED"
+    assert connection.execute(
+        "SELECT count(*) FROM model_usage_conservative_dispositions "
+        "WHERE invocation_id IN ('56','57','58')"
+    ).fetchone()[0] == 0
     connection.close()
 
 
@@ -747,6 +756,7 @@ def test_missing_subscription_usage_selector_scans_only_relevant_liabilities(
             "AND a.workload_class='GRAPHITI_CHAT_PRIMARY' "
             "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
             "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+            "AND t.outcome IN ('FAILED','TIMEOUT') "
             "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
             "WHERE d.invocation_id=a.invocation_id)",
             ("selected-ingest",),
