@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +51,7 @@ from newsroom.control_plane.evidence import (
     EVID_012_POLICY_VERSION,
     EVIDENCE_APPROVAL_POLICY_VERSION,
     EVIDENCE_GATE_POLICY_VERSION,
+    FACTUAL_LOCALISATION_POLICY_VERSION,
     GOVERNED_CLAIM_POLICY_VERSION,
     GOVERNED_INPUT_SCHEMA_VERSION,
     NAMED_ENTITY_POLICY_VERSION,
@@ -1473,8 +1474,45 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
         f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
-        f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+        f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}"
     )
+
+
+@pytest.mark.parametrize("entity_version", (11, 12))
+def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version, tmp_path):
+    candidate, package = _candidate_package()
+    current = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-09-19T12:00:00Z",
+    )
+    values = asdict(current)
+    values.pop("decision_id")
+    decided_at = values.pop("decided_at")
+    values["policy_version"] = (
+        "newsroom.write-admission.v9+newsroom.evid-012.v7+"
+        "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+        "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+        f"newsroom.named-entity.v{entity_version}+newsroom.cont-originality.v3+"
+        "newsroom.zh-hant-hk-shape.v14"
+    )
+    old = WriteAdmissionDecision(
+        decision_id=_decision_id(**values), decided_at=decided_at, **values,
+    )
+    assert WriteAdmissionDecision.from_record(old.as_record()) == old
+    assert old.decision_id != current.decision_id
+    with pytest.raises(ValueError, match="policy is not current"):
+        select_write_ready(((candidate, package, old),), limit=1, selected_at=decided_at)
+    with pytest.raises(ValueError, match="unsupported write-admission policy version"):
+        replace(old, policy_version=old.policy_version.replace(
+            f"named-entity.v{entity_version}", "named-entity.v999",
+        ))
+    connection = connect(str(tmp_path / "v9-replay.sqlite3"))
+    retain_write_admission_decision(connection, old)
+    retain_write_admission_decision(connection, old)
+    retain_write_admission_decision(connection, current)
+    assert connection.execute(
+        "SELECT count(*) FROM unpublished_write_admission_decisions"
+    ).fetchone() == (2,)
+    connection.close()
 
 
 def test_changed_admission_semantics_replay_the_exact_previous_policy(

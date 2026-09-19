@@ -13,6 +13,7 @@ from newsroom.control_plane.evidence import (
     EVID_012_POLICY_VERSION,
     EVIDENCE_APPROVAL_POLICY_VERSION,
     EVIDENCE_GATE_POLICY_VERSION,
+    FACTUAL_LOCALISATION_POLICY_VERSION,
     GOVERNED_CLAIM_POLICY_VERSION,
     GOVERNED_INPUT_SCHEMA_VERSION,
     NAMED_ENTITY_POLICY_VERSION,
@@ -76,13 +77,21 @@ _LATEST_LEGACY_WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.governed-input.v10+newsroom.named-entity.v10+"
     "newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v14"
 )
+_PRIOR_V9_WRITE_ADMISSION_POLICY_VERSIONS = frozenset(
+    "newsroom.write-admission.v9+newsroom.evid-012.v7+"
+    "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+    "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+    f"newsroom.named-entity.v{version}+newsroom.cont-originality.v3+"
+    "newsroom.zh-hant-hk-shape.v14"
+    for version in (11, 12)
+)
 WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.write-admission.v9+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
     f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
-    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}"
 )
 WRITE_SELECTION_POLICY_VERSION = "newsroom.write-selection.v1"
 
@@ -526,6 +535,7 @@ class WriteAdmissionDecision:
             _PREVIOUS_WRITE_ADMISSION_POLICY_VERSION,
             _EARLIER_WRITE_ADMISSION_POLICY_VERSION,
             _OLDEST_WRITE_ADMISSION_POLICY_VERSION,
+            *_PRIOR_V9_WRITE_ADMISSION_POLICY_VERSIONS,
         }:
             raise ValueError("unsupported write-admission policy version")
         expected = _decision_id(
