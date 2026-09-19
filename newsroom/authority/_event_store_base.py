@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - supported runtime/CI is POSIX
     fcntl = None  # type: ignore[assignment]
 
 from ._capability import _CapabilityIssuer
+from ._foreign_keys import has_foreign_key_violation
 from .migrations import (
     EXPECTED_MIGRATION_HISTORY,
     EXPECTED_SCHEMA_FINGERPRINT,
@@ -260,7 +261,7 @@ class _EventStoreBase:
                     f"authority quick_check failed: {quick!r}"
                 )
         with _validation_stage("foreign_key_check"):
-            if conn.execute("PRAGMA foreign_key_check").fetchall():
+            if has_foreign_key_violation(conn):
                 raise AuthoritySchemaError(
                     "authority foreign-key check failed"
                 )

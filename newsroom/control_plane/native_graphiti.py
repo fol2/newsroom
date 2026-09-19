@@ -502,6 +502,7 @@ class NativeGraphitiProcessor:
                 "AND a.route='GRAPHITI_CHAT_FALLBACK')) "
                 "AND t.usage_status='UNREPORTED' "
                 "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+                "AND t.outcome IN ('FAILED','TIMEOUT') "
                 "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
                 "WHERE d.invocation_id=a.invocation_id)",
                 (ingest_id,),

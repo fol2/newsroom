@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from newsroom.authority.migrations import SCHEMA_VERSION
-from newsroom.authority.persistence import AuthorityPersistenceError
+from newsroom.authority.persistence import AuthorityPersistenceError, AuthoritySchemaError
 from newsroom.authority.source_registry_migrations import (
     SOURCE_REGISTRY_MIGRATION_CHECKSUM,
     SOURCE_REGISTRY_MIGRATION_NAME,
@@ -22,12 +22,24 @@ from .source_3a_helpers import (
 )
 
 
-def test_source_system_open_retains_page_and_foreign_key_checks() -> None:
+def test_source_system_open_retains_page_and_foreign_key_checks(tmp_path) -> None:
     from newsroom.authority._event_store_base import _EventStoreBase
 
     source = inspect.getsource(_EventStoreBase._validate_schema_and_integrity)
     assert 'execute("PRAGMA quick_check")' in source
-    assert 'execute("PRAGMA foreign_key_check")' in source
+    database = tmp_path / "source.sqlite3"
+    with open_source_system(database) as system:
+        system.sources.register_definition(definition_request(), proof=proof())
+    with sqlite3.connect(database) as connection:
+        trigger = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='authority_aggregates_update_guard'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER authority_aggregates_update_guard")
+        connection.execute("UPDATE authority_aggregates SET current_version=current_version+1")
+        connection.execute(trigger)
+        assert connection.execute("PRAGMA foreign_key_check").fetchone() is not None
+    with pytest.raises(AuthoritySchemaError, match="foreign-key"):
+        open_source_system(database)
 
 
 def test_increment4_open_retains_row_integrity() -> None:
