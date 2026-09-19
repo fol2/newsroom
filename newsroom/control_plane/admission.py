@@ -84,14 +84,22 @@ _PRIOR_V9_WRITE_ADMISSION_POLICY_VERSIONS = frozenset(
     f"newsroom.named-entity.v{version}+newsroom.cont-originality.v3+"
     "newsroom.zh-hant-hk-shape.v14"
     for version in (11, 12)
-)
+) | {
+    "newsroom.write-admission.v9+newsroom.evid-012.v7+"
+    "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+    "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+    "newsroom.named-entity.v13+newsroom.cont-originality.v3+"
+    "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1"
+}
+QUALIFICATION_RELATION_POLICY_VERSION = "newsroom.qualification-relation.v1"
 WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.write-admission.v9+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
     f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
-    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}"
+    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}+"
+    f"{QUALIFICATION_RELATION_POLICY_VERSION}"
 )
 WRITE_SELECTION_POLICY_VERSION = "newsroom.write-selection.v1"
 
@@ -142,8 +150,8 @@ _QUALIFICATION_CLASSIFIER_FIELDS = frozenset(
 )
 
 
-def _qualification_text_is_affirmative(text: str) -> bool:
-    if re.search(
+def _qualification_text_is_negative(text: str) -> bool:
+    return bool(re.search(
         r"\b(?:no|not|without|never|zero|unchanged|absent|unlikely|"
         r"may|might|could|propos\w*|consider\w*|plan\w*|intend\w*|"
         r"expect\w*|forecast\w*|"
@@ -165,7 +173,11 @@ def _qualification_text_is_affirmative(text: str) -> bool:
         r"傳聞|传闻|傳言|传言|據報|据报|據稱|据称|聲稱|声称|疑似|似乎",
         text,
         flags=re.IGNORECASE,
-    ):
+    ))
+
+
+def _qualification_text_is_affirmative(text: str) -> bool:
+    if _qualification_text_is_negative(text):
         return False
     return bool(
         re.match(
@@ -265,6 +277,52 @@ _MATERIAL_SUBJECT_SPAN_PATTERNS = {
 }
 
 
+def _operational_replacement_is_proven(span: str, claim: GovernedClaimEvidence) -> bool:
+    # This complete sentence carries one operational contrast; appositive commas
+    # are not separate claims. The ordinary clause/negation rules stay unchanged.
+    sentences = {
+        sentence.strip().rstrip(".")
+        for text in (claim.claim, claim.supporting_excerpt)
+        for sentence in re.split(r"[\n.;!?。；！？]+", text)
+    }
+    if span.strip().rstrip(".") not in sentences:
+        return False
+    match = re.fullmatch(
+        r"(?:These changes replace|This (?:change|policy|reform) replaces|"
+        r"The (?:policy|reform) replaces) "
+        r"(?P<old>[^,.;!?\n]{1,120}) with "
+        r"(?P<new>a new [^,.;!?\n]{1,120})"
+        r"(?:, called (?P<name>[^,.;!?\n]{1,120}))?, which allows "
+        r"(?P<operation>[a-z]+) to take place throughout "
+        r"(?P<scope>the [a-z]+(?: [a-z]+){0,5}) rather than only at the end\.?",
+        span, flags=re.IGNORECASE,
+    )
+    if match is None or re.search(
+        r"\b(?:unknown|unspecified|subject to|pending|if|unless)\b", span,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    operation = match["operation"]
+    operation_pattern = rf"\b{re.escape(operation)}\b"
+    if not all(re.search(operation_pattern, label, flags=re.IGNORECASE) for label in (
+        match["old"], match["name"] or match["new"],
+    )):
+        return False
+    negative_text = span
+    if operation.lower() == "assessment":
+        # Only the repeated operation noun in the proved old/new/effect slots is
+        # exempt from assess\w*. Assessing a proposal elsewhere remains a HOLD.
+        for group in ("operation", "name", "new", "old"):
+            start, end = match.span(group)
+            if start >= 0:
+                negative_text = (
+                    negative_text[:start]
+                    + re.sub(operation_pattern, "operation", negative_text[start:end], flags=re.IGNORECASE)
+                    + negative_text[end:]
+                )
+    return not _qualification_text_is_negative(negative_text)
+
+
 def _qualification_relation_is_proven(
     qualification: QualificationEvidence, claim: GovernedClaimEvidence
 ) -> bool:
@@ -343,6 +401,12 @@ def _qualification_relation_is_proven(
         and not explicit_official_deadline
     ):
         return False
+    if (
+        qualification.test is Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY
+        and qualification_fields.get("change_kind") == "PUBLIC_POLICY"
+        and _operational_replacement_is_proven(span, claim)
+    ):
+        return True
     if qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE:
         action_pattern = {
             "INSTRUCTION": re.compile(

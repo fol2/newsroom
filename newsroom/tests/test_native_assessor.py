@@ -1139,6 +1139,90 @@ def test_retained_qualification_validation_controls_existing_fresh_attempt(
         ).fetchone() == original_result
 
 
+@pytest.mark.parametrize("rendering_valid", [False, True])
+def test_cached_operational_replacement_revalidates_without_dispatch_or_relabelling(
+    tmp_path, monkeypatch, retained_22589_assessment, rendering_valid,
+):
+    from newsroom.control_plane.native_assessor import assessment_revalidation_due
+    from newsroom.control_plane.native_composition import ASSESSMENT_CONTRACT_VERSION
+    from newsroom.control_plane.native_evidence import rights_eligibility_digest
+    from newsroom.tests.test_operational_replacement_qualification import REPLACEMENT
+
+    candidate, base, source, acquired, raw = _qualification_assessor_inputs(
+        retained_22589_assessment, kind="policy",
+    )
+    claim = raw["package"]["governed_claims"][0]
+    rendering = "改動以新學徒評核方式取代終期評核（EPA），讓評核在整個學徒期進行，而非只在期末進行。"
+    if not rendering_valid:
+        rendering += " apprenticeship assessment"
+    claim.update(claim=REPLACEMENT, supporting_excerpt=REPLACEMENT,
+                 rendered_assertion_zh_hant_hk=rendering)
+    raw["package"]["substantive_new_information"] = [REPLACEMENT]
+    raw["package"]["qualification_evidence"][0]["test_evidence"].update(
+        material_relation_span=REPLACEMENT, new_state=REPLACEMENT,
+    )
+    body = REPLACEMENT.encode()
+    base = replace(base, passages=(REPLACEMENT,), observation_digests=(digest_bytes(body),))
+    acquired = SimpleNamespace(**{
+        **vars(acquired), "body": body, "body_digest": digest_bytes(body),
+        "rights_eligibility_digest": rights_eligibility_digest(
+            source.rights, body_digest=digest_bytes(body),
+            transport_digest=acquired.transport_evidence_digest,
+            exclusion_signals=(), text_only=True,
+        ),
+    })
+    facts = {
+        "reason": "ASSESSOR_QUALIFICATION_CONTRACT_HOLD",
+        "assessment_contract_version": ASSESSMENT_CONTRACT_VERSION.rsplit("+", 1)[0],
+    }
+    assert assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)
+    service, usage = _usage(tmp_path, monkeypatch)
+    execution = NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {
+        "usage_basis": "PROVIDER_REPORTED", "input_tokens": 1, "output_tokens": 1,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
+        "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2,
+    })
+    allocation = usage.begin(candidate, base, "retained operational replacement fixture")
+    dispatch_at = usage.mark_dispatch(allocation)
+    usage.retain_result(allocation, execution, dispatch_at=dispatch_at)
+    usage.complete(
+        allocation, outcome="ASSESSOR_VALIDATION_FAILED", execution=execution,
+        provider_dispatched=True, dispatch_at=dispatch_at,
+        failure_class="ASSESSMENT_VALIDATION_FAILED",
+    )
+
+    def retained_rows():
+        with sqlite3.connect(service.path) as connection:
+            return (
+                connection.execute("SELECT record_json FROM model_invocation_allocations").fetchall(),
+                connection.execute("SELECT record_json FROM model_invocation_terminals").fetchall(),
+                connection.execute("SELECT payload_digest,payload_json FROM ledger").fetchall(),
+            )
+
+    before = retained_rows()
+    assessor = AutonomousNativeEvidenceAssessor(
+        lambda *_: pytest.fail("consumer-only revalidation dispatched"),
+        usage=usage, dispatch_fence=nullcontext,
+    )
+    for _ in range(2):
+        if rendering_valid:
+            result = assessor.assess_with_boundary(
+                candidate, base, (source,), (acquired,),
+                before_dispatch=None, cached_only=True,
+            )
+            assert len(result.qualification_evidence) == 1
+        else:
+            with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+                assessor.assess_with_boundary(
+                    candidate, base, (source,), (acquired,),
+                    before_dispatch=None, cached_only=True,
+                )
+    assert retained_rows() == before
+    assert json.loads(before[0][0][0])["prompt_contract_version"] == VERSION
+    facts["assessment_contract_version"] = ASSESSMENT_CONTRACT_VERSION
+    assert not assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)
+
+
 def test_native_assessor_retains_precise_qualification_contract_hold(
     tmp_path, monkeypatch,
 ) -> None:
