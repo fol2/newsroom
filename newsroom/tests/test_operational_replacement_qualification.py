@@ -55,6 +55,40 @@ def test_exact_operational_replacement_sentence_passes_qualification():
     assert decision.decision == "WRITE_READY", decision.stable_reason_codes
 
 
+@pytest.mark.parametrize("source_prefix", [
+    "Officials deny that ", "Subject to approval, ", "Officials propose that ",
+    "Officials deny that\n",
+])
+def test_operational_replacement_cannot_excise_source_context(source_prefix):
+    candidate, package = _replacement_package()
+    # Model-selected claim, excerpt and witness remain unchanged and byte-bound.
+    # The authoritative source sentence, rather than that selection, governs.
+    package = replace(package, passages=(
+        package.passages[0].replace(REPLACEMENT, source_prefix + REPLACEMENT),
+    ))
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-09-20T00:00:00Z",
+    )
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+@pytest.mark.parametrize("new_state", ["a new approach", "apprenticeship assessment"])
+def test_operational_replacement_accepts_exact_parsed_new_regime(new_state):
+    candidate, package = _replacement_package()
+    qualification = package.qualification_evidence[1]
+    evidence = dict(qualification.test_evidence)
+    evidence["new_state"] = new_state
+    package = replace(package, qualification_evidence=(
+        package.qualification_evidence[0],
+        replace(qualification, test_evidence=tuple(evidence.items())),
+    ))
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-09-20T00:00:00Z",
+    )
+    assert decision.decision == "WRITE_READY", decision.stable_reason_codes
+
+
 @pytest.mark.parametrize("text", [
     REPLACEMENT.replace("assessment", "inspection"),
     REPLACEMENT.replace("These changes replace", "This policy replaces"),
@@ -94,7 +128,7 @@ def test_proposed_negated_unknown_renamed_or_unrelated_replacement_holds(text):
 
 @pytest.mark.parametrize("mutation", [
     "fragment", "excised_context", "missing_source", "wrong_claim",
-    "wrong_kind", "wrong_test", "unknown_kind", "rendering",
+    "wrong_kind", "wrong_test", "unknown_kind", "old_state", "rendering",
 ])
 def test_operational_replacement_preserves_other_boundaries(mutation):
     candidate, package = _replacement_package(
@@ -111,6 +145,8 @@ def test_operational_replacement_preserves_other_boundaries(mutation):
         evidence["material_relation_span"] = REPLACEMENT.split(", which allows")[0]
     elif mutation == "excised_context":
         evidence["material_relation_span"] = REPLACEMENT
+    elif mutation == "old_state":
+        evidence["new_state"] = "end-point assessment (EPA)"
     elif mutation == "wrong_kind":
         evidence["change_kind"] = "STATUS"
     elif mutation == "wrong_test":

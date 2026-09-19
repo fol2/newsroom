@@ -954,7 +954,7 @@ def test_retained_22589_qualification_matches_current_admission_contract(
         QualificationEvidence(
             item["test"], item["governed_claim_id"], "fixture-qualification",
             tuple(item["test_evidence"].items()), item["policy_version"],
-        ), by_id[item["governed_claim_id"]],
+        ), by_id[item["governed_claim_id"]], source_context=acquired.body.decode("utf-8"),
     ) for item in qualifications)
     # This asserts producer/consumer parity, not a new interpretation of the
     # retained policy language: the admission predicate remains unchanged.
@@ -1140,8 +1140,12 @@ def test_retained_qualification_validation_controls_existing_fresh_attempt(
 
 
 @pytest.mark.parametrize("rendering_valid", [False, True])
+@pytest.mark.parametrize(("source_prefix", "old_state"), [
+    ("", False), ("Officials deny that ", False), ("Subject to approval, ", False),
+    ("Officials propose that ", False), ("Officials deny that\n", False), ("", True),
+])
 def test_cached_operational_replacement_revalidates_without_dispatch_or_relabelling(
-    tmp_path, monkeypatch, retained_22589_assessment, rendering_valid,
+    tmp_path, monkeypatch, retained_22589_assessment, rendering_valid, source_prefix, old_state,
 ):
     from newsroom.control_plane.native_assessor import assessment_revalidation_due
     from newsroom.control_plane.native_composition import ASSESSMENT_CONTRACT_VERSION
@@ -1159,10 +1163,12 @@ def test_cached_operational_replacement_revalidates_without_dispatch_or_relabell
                  rendered_assertion_zh_hant_hk=rendering)
     raw["package"]["substantive_new_information"] = [REPLACEMENT]
     raw["package"]["qualification_evidence"][0]["test_evidence"].update(
-        material_relation_span=REPLACEMENT, new_state=REPLACEMENT,
+        material_relation_span=REPLACEMENT,
+        new_state="end-point assessment (EPA)" if old_state else REPLACEMENT,
     )
-    body = REPLACEMENT.encode()
-    base = replace(base, passages=(REPLACEMENT,), observation_digests=(digest_bytes(body),))
+    source_text = source_prefix + REPLACEMENT
+    body = source_text.encode()
+    base = replace(base, passages=(source_text,), observation_digests=(digest_bytes(body),))
     acquired = SimpleNamespace(**{
         **vars(acquired), "body": body, "body_digest": digest_bytes(body),
         "rights_eligibility_digest": rights_eligibility_digest(
@@ -1205,14 +1211,16 @@ def test_cached_operational_replacement_revalidates_without_dispatch_or_relabell
         usage=usage, dispatch_fence=nullcontext,
     )
     for _ in range(2):
-        if rendering_valid:
+        if rendering_valid and not source_prefix and not old_state:
             result = assessor.assess_with_boundary(
                 candidate, base, (source,), (acquired,),
                 before_dispatch=None, cached_only=True,
             )
             assert len(result.qualification_evidence) == 1
         else:
-            with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+            reason = ("ASSESSOR_QUALIFICATION_CONTRACT_HOLD" if rendering_valid
+                      else "ASSESSOR_RENDERING_CONTRACT_HOLD")
+            with pytest.raises(NativeEvidenceHold, match=reason):
                 assessor.assess_with_boundary(
                     candidate, base, (source,), (acquired,),
                     before_dispatch=None, cached_only=True,

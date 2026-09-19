@@ -277,7 +277,9 @@ _MATERIAL_SUBJECT_SPAN_PATTERNS = {
 }
 
 
-def _operational_replacement_is_proven(span: str, claim: GovernedClaimEvidence) -> bool:
+def _operational_replacement_is_proven(
+    span: str, claim: GovernedClaimEvidence, *, source_context: str, new_state: str
+) -> bool:
     # This complete sentence carries one operational contrast; appositive commas
     # are not separate claims. The ordinary clause/negation rules stay unchanged.
     sentences = {
@@ -285,7 +287,16 @@ def _operational_replacement_is_proven(span: str, claim: GovernedClaimEvidence) 
         for text in (claim.claim, claim.supporting_excerpt)
         for sentence in re.split(r"[\n.;!?。；！？]+", text)
     }
-    if span.strip().rstrip(".") not in sentences:
+    source_sentences = {
+        sentence.strip()
+        for sentence in re.split(r"[.;!?。；！？]+", source_context)
+    }
+    # A model-selected excerpt or a source line wrap must not remove a denial,
+    # condition or proposal from the complete authoritative sentence.
+    if (
+        span.strip().rstrip(".") not in sentences
+        or span.strip().rstrip(".") not in source_sentences
+    ):
         return False
     match = re.fullmatch(
         r"(?:These changes replace|This (?:change|policy|reform) replaces|"
@@ -301,6 +312,8 @@ def _operational_replacement_is_proven(span: str, claim: GovernedClaimEvidence) 
         r"\b(?:unknown|unspecified|subject to|pending|if|unless)\b", span,
         flags=re.IGNORECASE,
     ):
+        return False
+    if new_state not in (span, match["new"], match["name"]):
         return False
     operation = match["operation"]
     operation_pattern = rf"\b{re.escape(operation)}\b"
@@ -324,7 +337,7 @@ def _operational_replacement_is_proven(span: str, claim: GovernedClaimEvidence) 
 
 
 def _qualification_relation_is_proven(
-    qualification: QualificationEvidence, claim: GovernedClaimEvidence
+    qualification: QualificationEvidence, claim: GovernedClaimEvidence, *, source_context: str
 ) -> bool:
     spans = tuple(
         value
@@ -404,7 +417,10 @@ def _qualification_relation_is_proven(
     if (
         qualification.test is Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY
         and qualification_fields.get("change_kind") == "PUBLIC_POLICY"
-        and _operational_replacement_is_proven(span, claim)
+        and _operational_replacement_is_proven(
+            span, claim, source_context=source_context,
+            new_state=qualification_fields["new_state"],
+        )
     ):
         return True
     if qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE:
@@ -1092,7 +1108,10 @@ class DeterministicWriteAdmission:
             for item in package.qualification_evidence
             if item.governed_claim_id not in governed_claims
             or not _qualification_relation_is_proven(
-                item, governed_claims[item.governed_claim_id]
+                item, governed_claims[item.governed_claim_id],
+                source_context=package.passages[
+                    governed_claims[item.governed_claim_id].passage_index
+                ],
             )
             or any(
                 field not in _QUALIFICATION_CLASSIFIER_FIELDS

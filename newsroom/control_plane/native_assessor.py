@@ -1684,7 +1684,10 @@ class AutonomousNativeEvidenceAssessor:
             if claim is None:
                 raise EvidencePackageError("assessment qualification claim differs")
             if (
-                not _qualification_relation_is_proven(item, claim)
+                not _qualification_relation_is_proven(
+                    item, claim,
+                    source_context=acquired[claim.passage_index].body.decode("utf-8"),
+                )
                 or any(
                     field not in _QUALIFICATION_CLASSIFIER_FIELDS
                     and value not in claim.claim
