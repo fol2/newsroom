@@ -28,7 +28,7 @@ from newsroom.increment6.work_items import RetrievalContextAuthority
 from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 
-from .evidence import NAMED_ENTITY_POLICY_VERSION
+from .evidence import FACTUAL_LOCALISATION_POLICY_VERSION, NAMED_ENTITY_POLICY_VERSION
 from .govuk_evidence import GovUkEvidenceAcquisition, POLICY_DIGEST as GOVUK_TRANSPORT_POLICY
 from .govuk_rights import (
     LICENCE_URL, REUSE_URL, GovUkLicenceEvidence, retain_current_govuk_licence,
@@ -66,7 +66,7 @@ from .zh_hant import ZH_HANT_HK_SHAPE_POLICY_VERSION
 
 ASSESSMENT_CONTRACT_VERSION = (
     f"{ASSESSOR_CONTRACT_VERSION}+{NAMED_ENTITY_POLICY_VERSION}+"
-    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}"
 )
 
 TRANSPORT_POLICY = digest_canonical({

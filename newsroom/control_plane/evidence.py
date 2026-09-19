@@ -25,7 +25,8 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v12"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v13"
+FACTUAL_LOCALISATION_POLICY_VERSION = "newsroom.factual-localisation.v1"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -295,7 +296,7 @@ _ENGLISH_OFFICIAL_REFERENCE = re.compile(
     r"(?:\s+(?:and|of|the|for|[A-Z][a-z]+)){0,6})\b|"
     r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
 )
-_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA", "ETA"})
+_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"DWP", "ECAA", "EPA", "ETA"})
 _SOURCE_BOUND_ROUTE_TERM = re.compile(
     r"\b([A-Z]{2,5}(?:\s+[A-Z][A-Za-z-]+){1,5})(?=\s+route\b)"
 )
@@ -813,6 +814,24 @@ def _has_valid_origin_independence(
 
 def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
     value = value.strip()
+    english_month = re.fullmatch(r"([A-Za-z]+)(?:\s+(\d{4}))?", value)
+    if english_month:
+        month = _ENGLISH_MONTHS.get(english_month.group(1).casefold())
+        year = int(english_month.group(2)) if english_month.group(2) else None
+        if month is not None and (year is None or 1 <= year <= 9999):
+            return ("CALENDAR_MONTH", year, month)
+    chinese_month = re.fullmatch(
+        r"(?:(\d{4}|[零〇一二三四五六七八九十]+)年)?"
+        r"(\d{1,2}|[零〇一二三四五六七八九十]+)月", value,
+    )
+    if chinese_month:
+        year = _chinese_integer(chinese_month.group(1)) if chinese_month.group(1) else None
+        month = _chinese_integer(chinese_month.group(2))
+        if (
+            month is not None and 1 <= month <= 12
+            and (chinese_month.group(1) is None or (year is not None and 1 <= year <= 9999))
+        ):
+            return ("CALENDAR_MONTH", year, month)
     english_date = re.fullmatch(
         r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{4}))?"
         r"(?:\s+at\s+(\d{1,2}):(\d{2}))?",

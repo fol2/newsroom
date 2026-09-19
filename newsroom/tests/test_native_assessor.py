@@ -180,6 +180,19 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
             "University of Salford公布指引。",
             ("University of Salford",),
         ),
+        # Retained source-bound rendering failure, ledger result 25858.
+        (
+            "Responsibility for the overall apprenticeship programme now sits with the Department of Work and Pensions (DWP).",
+            "Responsibility for the overall apprenticeship programme now sits with the Department of Work and Pensions (DWP).",
+            "整體學徒計劃的責任現時由 Department of Work and Pensions（DWP）承擔。",
+            ("DWP", "Department of Work and Pensions"),
+        ),
+        (
+            "During this period, the EPA version of the apprenticeship will remain available until the new apprenticeship assessment version is formally released for starts.",
+            "During this period, the EPA version of the apprenticeship will remain available until the new apprenticeship assessment version is formally released for starts.",
+            "在此期間，該學徒計劃的 EPA 版本會繼續可供取用，直至新學徒評核版本正式開放予開辦為止。",
+            ("EPA",),
+        ),
     ),
 )
 def test_native_assessor_derives_entities_from_constructed_uk03_output(
@@ -328,7 +341,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
 
     decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
-    if expected_entities == ("University of Salford",):
+    if expected_entities != ("Home Office",):
+        connection.close()
         return
 
     ancestry_claim = (
