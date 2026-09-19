@@ -818,7 +818,10 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
     if english_month:
         month = _ENGLISH_MONTHS.get(english_month.group(1).casefold())
         year = int(english_month.group(2)) if english_month.group(2) else None
-        if month is not None and (year is None or 1 <= year <= 9999):
+        if (
+            month is not None and (year is None or 1 <= year <= 9999)
+            and (year is not None or english_month.group(1).istitle())
+        ):
             return ("CALENDAR_MONTH", year, month)
     chinese_month = re.fullmatch(
         r"(?:(\d{4}|[零〇一二三四五六七八九十]+)年)?"
@@ -1002,6 +1005,41 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
         }
         return ("COUNT", objects[chinese_count.group(2)], number)
     return None
+
+
+def _calendar_month_occurs(expression: str, text: str) -> bool:
+    # A calendar month must not be a substring of a word, another month or a
+    # more precise Chinese date. Bare May also needs calendar context, not a modal.
+    boundary = "A-Za-z0-9_零〇一二三四五六七八九十百千萬万億亿兩两年月日號号"
+    for match in re.finditer(
+        rf"(?<![{boundary}]){re.escape(expression)}(?![{boundary}])", text,
+    ):
+        if re.fullmatch(r"[A-Za-z]+(?:\s+\d{4})?", expression) and (
+            re.search(r"\d\s+$", text[:match.start()])
+            or re.match(r"\s+\d", text[match.end():])
+        ):
+            continue
+        if expression == "May" and not re.search(
+            r"\b(?:in|during|from|until|through|by|before|after|since|between|for)\s+$",
+            text[:match.start()], flags=re.IGNORECASE,
+        ):
+            continue
+        return True
+    return False
+
+
+def _localised_fact_is_bound(
+    source: str, target: str, claim: str, excerpt: str, rendered: str,
+) -> bool:
+    fact = _canonical_localised_fact(source)
+    if fact is None or fact != _canonical_localised_fact(target):
+        return False
+    if fact[0] == "CALENDAR_MONTH":
+        return (
+            _calendar_month_occurs(source, claim)
+            or _calendar_month_occurs(source, excerpt)
+        ) and _calendar_month_occurs(target, rendered)
+    return (source in claim or source in excerpt) and target in rendered
 
 
 class Evid012QualificationTest(StrEnum):
@@ -1190,17 +1228,10 @@ class GovernedClaimEvidence:
             len(set(localised_sources)) != len(localised_sources)
             or len(set(localised_targets)) != len(localised_targets)
             or any(
-                source not in self.claim and source not in self.supporting_excerpt
-                for source in localised_sources
-            )
-            or any(
-                target not in self.rendered_assertion_zh_hant_hk
-                for target in localised_targets
-            )
-            or any(
-                _canonical_localised_fact(source) is None
-                or _canonical_localised_fact(source)
-                != _canonical_localised_fact(target)
+                not _localised_fact_is_bound(
+                    source, target, self.claim, self.supporting_excerpt,
+                    self.rendered_assertion_zh_hant_hk,
+                )
                 for source, target in self.localised_factual_expressions
             )
         ):
