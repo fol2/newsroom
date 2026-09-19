@@ -63,6 +63,9 @@ NATIVE_EMBEDDING_TIMEOUT_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
 NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE = (
     "NATIVE_AUTONOMOUS_OPENROUTER_EMBEDDING_TIMEOUT"
 )
+NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE = (
+    "NATIVE_AUTONOMOUS_GRAPHITI_FALLBACK_CANCELLATION"
+)
 NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE = (
     "NATIVE_AUTONOMOUS_GRAPHITI_EMBEDDING_CANCELLATION"
 )
@@ -759,8 +762,12 @@ def _valid_native_disposition(
         NATIVE_AUTONOMOUS_USAGE_SCOPE,
         NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
         NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+        NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
     }:
-        if row[6] == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
+        if row[6] in {
+            NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+            NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
+        }:
             raise ModelUsageIntegrityError("native cancellation disposition scope differs")
         return None
     policy = _policy_for_allocation(connection, allocation)
@@ -794,6 +801,13 @@ def _valid_native_disposition(
             terminal=terminal,
             policy=policy,
             envelope=envelope,
+        )
+        conservative_total = policy.max_total_tokens
+    elif authority_scope == NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE:
+        if row[11] != _json(record):
+            raise ModelUsageIntegrityError("native fallback cancellation is not canonical")
+        expected_scope = _native_graphiti_fallback_cancellation_authority(
+            connection, allocation=allocation, terminal=terminal, policy=policy,
         )
         conservative_total = policy.max_total_tokens
     elif authority_scope == NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE:
@@ -850,6 +864,7 @@ def _valid_native_disposition(
     if authority_scope in {
         NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
         NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+        NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
     } and any(
         record.get(key) != value for key, value in expected_scope.items()
     ):
@@ -889,7 +904,7 @@ def _valid_native_disposition(
         or record.get("estimate_calculation")
         != (
             "QUALIFIED_POLICY_MAX_TOTAL_TOKENS_CONSERVATIVE_UPPER_BOUND"
-            if authority_scope == NATIVE_AUTONOMOUS_USAGE_SCOPE
+            if authority_scope in {NATIVE_AUTONOMOUS_USAGE_SCOPE, NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE}
             else "MAX_QUALIFIED_POLICY_TOTAL_OR_EXACT_REQUEST_UTF8_BYTES"
         )
         or record.get("exact_usage_remains_unknown") is not True
@@ -944,14 +959,34 @@ def _valid_native_graphiti_embedding_cancellation_disposition_record(
     return retained == dict(disposition_record)
 
 
+def _valid_native_graphiti_fallback_cancellation_disposition_record(
+    connection: sqlite3.Connection,
+    *,
+    allocation_record: Mapping[str, object],
+    terminal_record: Mapping[str, object],
+    disposition_record: Mapping[str, object],
+) -> bool:
+    if disposition_record.get("authority_scope") != NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE:
+        return False
+    try:
+        retained = _valid_native_disposition(
+            connection, allocation=_allocation_from_record(allocation_record),
+            terminal=_terminal_from_record(terminal_record),
+        )
+    except ModelUsageIntegrityError:
+        return False
+    return retained == dict(disposition_record)
+
+
 def _native_disposed_invocation_ids(connection: sqlite3.Connection) -> set[str]:
     rows = connection.execute(
         "SELECT invocation_id FROM model_usage_conservative_dispositions "
-        "WHERE json_extract(record_json,'$.authority_scope') IN (?,?,?)",
+        "WHERE json_extract(record_json,'$.authority_scope') IN (?,?,?,?)",
         (
             NATIVE_AUTONOMOUS_USAGE_SCOPE,
             NATIVE_EMBEDDING_TIMEOUT_USAGE_SCOPE,
             NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+            NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
         ),
     ).fetchall()
     result: set[str] = set()
@@ -1063,7 +1098,8 @@ def _require_native_fallback_failure_receipt(
     allocation: InvocationAllocation,
     terminal: InvocationTerminal,
     envelope: WorkEnvelope,
-) -> None:
+    cancelled: bool = False,
+) -> tuple[str, str]:
     outcome_row = connection.execute(
         "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
         "FROM model_work_outcomes WHERE envelope_id=?",
@@ -1087,6 +1123,8 @@ def _require_native_fallback_failure_receipt(
     unsigned_receipt = dict(receipt)
     receipt_digest = unsigned_receipt.pop("receipt_digest", None)
     invocations = receipt.get("chat_invocations")
+    expected_outcomes = {"GRAPHITI_TIMEOUT"} if cancelled else {"GRAPHITI_FAILED", "GRAPHITI_REJECTED_BINDING"}
+    expected_receipt = "TIMEOUT" if cancelled else "FAILED"
     if (
         outcome_digest != outcome_row[0]
         or digest_canonical(unsigned_outcome) != outcome_digest
@@ -1097,12 +1135,12 @@ def _require_native_fallback_failure_receipt(
             outcome.get("terminal_at"),
         )
         or outcome.get("envelope_id") != envelope.envelope_id
-        or outcome.get("outcome") not in {"GRAPHITI_FAILED", "GRAPHITI_REJECTED_BINDING"}
+        or outcome.get("outcome") not in expected_outcomes
         or _instant(str(outcome.get("terminal_at"))) < terminal.observed_at
         or outcome.get("outcome_record_id") != receipt_digest
-        or tuple(receipt_row[:3]) != (envelope.ingest_id, attempt, "FAILED")
+        or tuple(receipt_row[:3]) != (envelope.ingest_id, attempt, expected_receipt)
         or (receipt.get("ingest_id"), receipt.get("attempt_number"), receipt.get("outcome"))
-        != (envelope.ingest_id, attempt, "FAILED")
+        != (envelope.ingest_id, attempt, expected_receipt)
         or receipt_digest != receipt_row[3]
         or digest_bytes(canonical_json_bytes(unsigned_receipt)) != receipt_digest
         or not isinstance(invocations, list)
@@ -1117,6 +1155,20 @@ def _require_native_fallback_failure_receipt(
         ))
     ):
         raise ModelUsageIntegrityError("native fallback failure receipt differs")
+
+    if cancelled:
+        bound = [item for item in invocations if isinstance(item, dict)
+                 and item.get("model_invocation_id") == allocation.invocation_id]
+        if (
+            outcome_row[4] != _json(outcome)
+            or len(bound) != 1
+            or bound[0].get("outcome") != "CANCELLED"
+            or bound[0].get("model_work_envelope_id") != envelope.envelope_id
+            or bound[0].get("model_invocation_allocation_digest") != allocation.canonical_digest
+            or bound[0].get("model_invocation_terminal_digest") != terminal.terminal_digest
+        ):
+            raise ModelUsageIntegrityError("native fallback cancellation receipt differs")
+    return str(outcome_digest), str(receipt_digest)
 
 
 def _retained_graphiti_request_identity(
@@ -1380,6 +1432,80 @@ def _native_landed_source_unit(
         return None
     return matches[0]
 
+
+
+def _native_graphiti_fallback_cancellation_authority(
+    connection: sqlite3.Connection,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    policy: InvocationEfficiencyPolicy,
+) -> dict[str, object]:
+    """Prove one native subscription cancellation without changing circuit authority."""
+    if (
+        _native_conservative_subscription_leaf(allocation) is not GraphitiLeafClass.FALLBACK
+        or not policy.qualified or policy.calibration_only
+        or terminal.outcome != "CANCELLED"
+        or terminal.failure_class != "MISSING_PROVIDER_TELEMETRY"
+        or terminal.usage_status is not UsageStatus.UNREPORTED
+        or terminal.components.total_tokens is not None
+        or terminal.dispatch_at is None or terminal.policy_breach is not None
+        or terminal.provider_telemetry_digest is not None
+        or terminal.raw_telemetry_pointer is not None
+        or terminal.pre_dispatch_zero_proved
+        or terminal.subscription_cli_chat_not_cash_debited is not True
+        or allocation.prompt_bytes > policy.max_prompt_bytes
+        or allocation.max_output_tokens > policy.max_output_tokens
+        or allocation.context_identity not in policy.allowed_context_identities
+        or allocation.config_identity not in policy.allowed_config_identities
+        or any(getattr(allocation, key) != getattr(policy, key) for key in (
+            "reasoning", "prompt_contract_version", "output_schema_digest",
+            "one_turn", "exact_input", "skills_enabled", "tools_enabled",
+            "mcp_enabled", "prior_message_count",
+        ))
+    ):
+        raise ModelUsageIntegrityError("native fallback cancellation is ineligible")
+    if not _has_exact_dispatch(connection, terminal):
+        raise ModelUsageIntegrityError("native fallback cancellation lacks exact dispatch")
+    dispatches = connection.execute(
+        "SELECT observed_at,evidence_digest FROM model_transport_observations "
+        "WHERE invocation_id=? AND state='DISPATCH_STARTED'",
+        (allocation.invocation_id,),
+    ).fetchall()
+    if len(dispatches) != 1 or tuple(dispatches[0]) != (_utc_text(terminal.dispatch_at), digest_canonical({
+        "invocation_id": allocation.invocation_id, "provider": allocation.provider,
+        "route": allocation.route, "request_digest": allocation.request_digest,
+    })):
+        raise ModelUsageIntegrityError("native fallback cancellation dispatch binding differs")
+    envelope = _native_envelope(connection, allocation)
+    identity = _retained_graphiti_request_identity(connection, allocation)
+    if (
+        identity is None or identity.leaf_class is not GraphitiLeafClass.FALLBACK
+        or identity.primary_unavailable_event_digest is None
+    ):
+        raise ModelUsageIntegrityError("native fallback cancellation request authority differs")
+    unit = _native_landed_source_unit(
+        connection, ingest_id=envelope.ingest_id,
+        effective_revision_digest=identity.effective_revision_digest,
+    )
+    if unit is None or unit.proving_run_id != "native-source:" + unit.observation_digest:
+        raise ModelUsageIntegrityError("native fallback cancellation lacks native source landing")
+    outcome_digest, receipt_digest = _require_native_fallback_failure_receipt(
+        connection, allocation=allocation, terminal=terminal, envelope=envelope, cancelled=True,
+    )
+    return {
+        **{key: value for key, value in _native_disposition_authority(
+            allocation=allocation, terminal=terminal, policy=policy, envelope=envelope,
+        ).items() if key != "schema_version"},
+        "authority_schema_version": NATIVE_CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION,
+        "authority_scope": NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
+        "envelope_digest": envelope.canonical_digest,
+        "landed_unit_digest": digest_canonical(asdict(unit)),
+        "internal_request_digest": identity.canonical_digest,
+        "primary_unavailable_event_digest": identity.primary_unavailable_event_digest,
+        "work_outcome_digest": outcome_digest,
+        "attempt_receipt_digest": receipt_digest,
+    }
 
 
 def _native_graphiti_embedding_cancellation_authority(
@@ -4605,12 +4731,34 @@ class ModelUsageService:
             connection.close()
 
     def disposition_native_unreported_subscription_usage(
+        self, *, invocation_id: str, expected_terminal_digest: str,
+        expected_allocation_digest: str, observed_at: datetime,
+    ) -> dict[str, object]:
+        """Retain the native failed-call qualified-policy upper-bound estimate."""
+        return self._disposition_native_subscription_usage(
+            invocation_id=invocation_id, expected_terminal_digest=expected_terminal_digest,
+            expected_allocation_digest=expected_allocation_digest, observed_at=observed_at,
+        )
+
+    def disposition_native_graphiti_fallback_cancellation(
+        self, *, invocation_id: str, expected_terminal_digest: str,
+        expected_allocation_digest: str, observed_at: datetime,
+    ) -> dict[str, object]:
+        """Settle a proved cancelled fallback; route release remains separately authorised."""
+        return self._disposition_native_subscription_usage(
+            invocation_id=invocation_id, expected_terminal_digest=expected_terminal_digest,
+            expected_allocation_digest=expected_allocation_digest, observed_at=observed_at,
+            cancelled_fallback=True,
+        )
+
+    def _disposition_native_subscription_usage(
         self,
         *,
         invocation_id: str,
         expected_terminal_digest: str,
         expected_allocation_digest: str,
         observed_at: datetime,
+        cancelled_fallback: bool = False,
     ) -> dict[str, object]:
         """Retain the native pipeline's qualified-policy upper-bound estimate."""
 
@@ -4659,46 +4807,55 @@ class ModelUsageService:
             prior = _valid_native_disposition(
                 connection, allocation=allocation, terminal=terminal
             )
+            scope = (NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE
+                     if cancelled_fallback else NATIVE_AUTONOMOUS_USAGE_SCOPE)
             if prior is not None:
+                if prior.get("authority_scope") != scope:
+                    raise ModelUsageIntegrityError("native subscription disposition scope differs")
                 connection.rollback()
                 return prior
 
             policy = _policy_for_allocation(connection, allocation)
-            envelope = _native_envelope(connection, allocation)
-            leaf_class = _native_conservative_subscription_leaf(allocation)
-            if (
-                leaf_class is None
-                or not policy.qualified
-                or terminal.usage_status is not UsageStatus.UNREPORTED
-                or terminal.outcome not in {"FAILED", "TIMEOUT"}
-                or terminal.failure_class != "MISSING_PROVIDER_TELEMETRY"
-                or terminal.subscription_cli_chat_not_cash_debited is not True
-                or terminal.policy_breach is not None
-                or terminal.provider_telemetry_digest is not None
-                or terminal.raw_telemetry_pointer is not None
-                or terminal.pre_dispatch_zero_proved
-            ):
-                raise ModelUsageIntegrityError(
-                    "native conservative disposition target is ineligible"
+            if cancelled_fallback:
+                authority = _native_graphiti_fallback_cancellation_authority(
+                    connection, allocation=allocation, terminal=terminal, policy=policy,
                 )
-            if leaf_class is GraphitiLeafClass.FALLBACK:
-                identity = _retained_graphiti_request_identity(
-                    connection, allocation
-                )
+            else:
+                envelope = _native_envelope(connection, allocation)
+                leaf_class = _native_conservative_subscription_leaf(allocation)
                 if (
-                    identity is None
-                    or identity.leaf_class is not GraphitiLeafClass.FALLBACK
-                    or identity.primary_unavailable_event_digest is None
+                    leaf_class is None
+                    or not policy.qualified
+                    or terminal.usage_status is not UsageStatus.UNREPORTED
+                    or terminal.outcome not in {"FAILED", "TIMEOUT"}
+                    or terminal.failure_class != "MISSING_PROVIDER_TELEMETRY"
+                    or terminal.subscription_cli_chat_not_cash_debited is not True
+                    or terminal.policy_breach is not None
+                    or terminal.provider_telemetry_digest is not None
+                    or terminal.raw_telemetry_pointer is not None
+                    or terminal.pre_dispatch_zero_proved
                 ):
                     raise ModelUsageIntegrityError(
-                        "native fallback request authority differs"
+                        "native conservative disposition target is ineligible"
                     )
-                _require_native_fallback_failure_receipt(
-                    connection,
-                    allocation=allocation,
-                    terminal=terminal,
-                    envelope=envelope,
-                )
+                if leaf_class is GraphitiLeafClass.FALLBACK:
+                    identity = _retained_graphiti_request_identity(
+                        connection, allocation
+                    )
+                    if (
+                        identity is None
+                        or identity.leaf_class is not GraphitiLeafClass.FALLBACK
+                        or identity.primary_unavailable_event_digest is None
+                    ):
+                        raise ModelUsageIntegrityError(
+                            "native fallback request authority differs"
+                        )
+                    _require_native_fallback_failure_receipt(
+                        connection,
+                        allocation=allocation,
+                        terminal=terminal,
+                        envelope=envelope,
+                    )
             if observed_at < terminal.observed_at:
                 raise ModelUsageIntegrityError(
                     "native conservative disposition precedes terminal"
@@ -4717,16 +4874,18 @@ class ModelUsageService:
                     "native conservative disposition exact telemetry already exists"
                 )
 
-            authority = _native_disposition_authority(
-                allocation=allocation,
-                terminal=terminal,
-                policy=policy,
-                envelope=envelope,
-            )
+            if not cancelled_fallback:
+                authority = _native_disposition_authority(
+                    allocation=allocation,
+                    terminal=terminal,
+                    policy=policy,
+                    envelope=envelope,
+                )
             scope_digest = digest_canonical(authority)
             record_without_digest: dict[str, object] = {
+                **(authority if cancelled_fallback else {}),
                 "schema_version": CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
-                "authority_scope": NATIVE_AUTONOMOUS_USAGE_SCOPE,
+                "authority_scope": scope,
                 "native_scope_digest": scope_digest,
                 "invocation_id": invocation_id,
                 "terminal_digest": terminal.terminal_digest,
@@ -4767,8 +4926,8 @@ class ModelUsageService:
                     policy.canonical_digest,
                     scope_digest,
                     scope_digest,
-                    NATIVE_AUTONOMOUS_USAGE_SCOPE,
-                    NATIVE_AUTONOMOUS_USAGE_SCOPE,
+                    scope,
+                    scope,
                     observed_at_text,
                     observed_at_text,
                     UsageStatus.ESTIMATED.value,

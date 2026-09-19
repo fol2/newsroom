@@ -412,6 +412,12 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         (
             "Appendix O applies.", "適用Appendix O。", ("Appendix O",),
         ),
+        # Reproduce the omitted source-bound ETA token, not a complete live result.
+        (
+            "Applicants travelling to the UK must obtain an ETA.",
+            "前往UK的申請人必須取得ETA。",
+            ("ETA", "UK"),
+        ),
         (
             "This route is for ECAA workers, business persons and their family "
             "members who are in the UK and already hold permission in that capacity "
@@ -1712,3 +1718,14 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
     with sqlite3.connect(service.path) as retained:
         assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (2 if settled else 1,)
     connection.close()
+
+
+def test_named_entity_record_identity_binds_immutable_policy(monkeypatch):
+    from newsroom.control_plane import native_assessor as module
+
+    values = ("claim", "ETA", "OFFICIAL_TERM", "ETA")
+    old = module._named_entity_record_id(*values)
+    monkeypatch.setattr(module, "NAMED_ENTITY_POLICY_VERSION", "next-policy")
+    new = module._named_entity_record_id(*values)
+    assert new != old
+    assert module._named_entity_record_id(*values) == new

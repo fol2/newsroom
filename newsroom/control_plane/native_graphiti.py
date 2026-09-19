@@ -519,6 +519,29 @@ class NativeGraphitiProcessor:
                     expected_allocation_digest=allocation_digest,
                     observed_at=self._clock(),
                 )
+            cancelled_fallbacks = self._connection.execute(
+                "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest "
+                "FROM model_work_envelopes e INDEXED BY model_usage_native_graphiti_ingest "
+                "JOIN model_invocation_allocations a ON a.envelope_id=e.envelope_id "
+                "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+                "WHERE e.workload_class='GRAPHITI_CHAT_PRIMARY' "
+                "AND json_extract(e.record_json,'$.ingest_id')=? "
+                "AND a.workload_class='GRAPHITI_CHAT_FALLBACK' "
+                "AND a.provider='grok-build-cli' AND a.route='GRAPHITI_CHAT_FALLBACK' "
+                "AND t.outcome='CANCELLED' AND t.usage_status='UNREPORTED' "
+                "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+                "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+                "WHERE d.invocation_id=a.invocation_id)",
+                (ingest_id,),
+            ).fetchall()
+            for invocation_id, allocation_digest, terminal_digest in cancelled_fallbacks:
+                self._stop_check()
+                self._usage.disposition_native_graphiti_fallback_cancellation(
+                    invocation_id=invocation_id,
+                    expected_terminal_digest=terminal_digest,
+                    expected_allocation_digest=allocation_digest,
+                    observed_at=self._clock(),
+                )
             cancelled = self._connection.execute(
                 "SELECT a.invocation_id FROM model_work_envelopes e "
                 "INDEXED BY model_usage_native_graphiti_ingest "
