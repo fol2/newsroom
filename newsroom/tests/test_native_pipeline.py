@@ -859,39 +859,27 @@ def test_three_disjoint_turns_progress_with_revalidation_and_sustained_fresh_wor
         connection.close()
 
 
-def test_unattempted_revisions_precede_held_retries_without_partial_progress(
+def test_pending_land_order_resumes_route_hold_before_recurring_fresh_work_without_partial_progress(
     tmp_path, monkeypatch,
 ):
     pipeline, journal, connection, _, _calls, dispositions = _open(
         tmp_path, monkeypatch,
     )
-    held = _native("held-retry")
+    held = _native("old-route-held")
     fresh = _native("fresh")
     first_chunk = replace(_native("fresh-chunks"), chunk_count=2)
     second_chunk = replace(
         first_chunk, chunk_ordinal=2, predecessor_ingest_id=first_chunk.ingest_id,
     )
+    recurring = tuple(_native(f"recurring-fresh-{index}") for index in range(3))
     now = [0.0]
+    route_open = [True]
     completed = set()
     extracted = []
     pipeline._monotonic_clock = lambda: now[0]
     pipeline._reassessment_quantum = 300
     journal.land((held,))
-    journal.advance(held.revision_id, stage="GRAPHITI_HOLD", facts={
-        "graphiti_outcomes": [{"state": "GRAPHITI_HOLD"}],
-        "reason": "RETRY_PENDING",
-    })
-    held_progress = dict(journal.progress[held.revision_id])
-    dispositions[0] = (
-        NS(
-            source_id=fresh.source_id, status="READY", reason_code="RETAINED",
-            units=(fresh,),
-        ),
-        NS(
-            source_id=first_chunk.source_id, status="READY",
-            reason_code="RETAINED", units=(first_chunk, second_chunk),
-        ),
-    )
+    dispositions[0] = ()
 
     def graphiti(selected, *, cycle_id, defer_before_unit):
         results = []
@@ -899,6 +887,11 @@ def test_unattempted_revisions_precede_held_retries_without_partial_progress(
             if unit.ingest_id in completed:
                 results.append(NativeGraphitiOutcome(
                     unit.ingest_id, "GRAPHITI_COMPLETE", unit.observation_digest, None,
+                ))
+            elif route_open[0]:
+                results.append(NativeGraphitiOutcome(
+                    unit.ingest_id, "GRAPHITI_HOLD", None,
+                    "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN",
                 ))
             elif defer_before_unit(unit):
                 results.append(NativeGraphitiOutcome(
@@ -914,35 +907,53 @@ def test_unattempted_revisions_precede_held_retries_without_partial_progress(
                 ))
         return tuple(results)
 
+    def fresh_poll(units):
+        dispositions[0] = tuple(
+            NS(source_id=unit.source_id, status="READY", reason_code="RETAINED", units=(unit,))
+            for unit in units
+        )
+
     pipeline._graphiti = NS(advance=graphiti)
     try:
-        first = pipeline.tick(cycle_id="fresh-first")
-        dispositions[0] = ()
-        assert extracted == [(fresh.item_key, 1)]
-        assert first.unclassified_revisions == 1
-        assert first.revision_states == {
-            "GRAPHITI_COMPLETE": 1, "GRAPHITI_HOLD": 1, "QUEUED": 1,
-        }
-        assert journal.progress[held.revision_id] == held_progress
+        pipeline.tick(cycle_id="route-open")
+        assert extracted == [] and completed == set()
+        held_facts = journal.progress[held.revision_id]["facts"]
+        assert held_facts["reason"] == "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN"
+        assert not held_facts.get("graphiti_receipts")
+
+        route_open[0] = False
+        fresh_poll((fresh, first_chunk, second_chunk))
+        first = pipeline.tick(cycle_id="route-closed-oldest-first")
+        assert extracted == [(held.item_key, 1)]
+        assert first.unclassified_revisions == 2
+        assert first.revision_states == {"GRAPHITI_COMPLETE": 1, "QUEUED": 2}
+        assert journal.progress[held.revision_id]["stage"] == "GRAPHITI_COMPLETE"
+        assert fresh.revision_id not in journal.progress
         assert first_chunk.revision_id not in journal.progress
 
-        pipeline.tick(cycle_id="fresh-first-chunk")
-        assert extracted == [(fresh.item_key, 1), (first_chunk.item_key, 1)]
+        fresh_poll((recurring[0],))
+        pipeline.tick(cycle_id="next-landed-revision")
+        assert extracted == [(held.item_key, 1), (fresh.item_key, 1)]
         assert first_chunk.revision_id not in journal.progress
-        assert journal.progress[held.revision_id] == held_progress
+        assert recurring[0].revision_id not in journal.progress
 
-        pipeline.tick(cycle_id="fresh-second-chunk")
+        fresh_poll((recurring[1],))
+        pipeline.tick(cycle_id="first-chunk")
         assert extracted == [
-            (fresh.item_key, 1),
-            (first_chunk.item_key, 1),
-            (second_chunk.item_key, 2),
+            (held.item_key, 1), (fresh.item_key, 1), (first_chunk.item_key, 1),
+        ]
+        # A completed prefix plus a quantum-deferred suffix is not durable
+        # revision completion (or a failure/hold invented by scheduling).
+        assert first_chunk.revision_id not in journal.progress
+
+        fresh_poll((recurring[2],))
+        pipeline.tick(cycle_id="second-chunk")
+        assert extracted == [
+            (held.item_key, 1), (fresh.item_key, 1),
+            (first_chunk.item_key, 1), (second_chunk.item_key, 2),
         ]
         assert journal.progress[first_chunk.revision_id]["stage"] == "GRAPHITI_COMPLETE"
-        assert journal.progress[held.revision_id] == held_progress
-
-        pipeline.tick(cycle_id="held-after-fresh")
-        assert extracted[-1] == (held.item_key, 1)
-        assert journal.progress[held.revision_id]["stage"] == "GRAPHITI_COMPLETE"
+        assert all(unit.revision_id not in journal.progress for unit in recurring)
     finally:
         connection.close()
 
