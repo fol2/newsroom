@@ -25,7 +25,8 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v12"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v13"
+FACTUAL_LOCALISATION_POLICY_VERSION = "newsroom.factual-localisation.v1"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -295,7 +296,7 @@ _ENGLISH_OFFICIAL_REFERENCE = re.compile(
     r"(?:\s+(?:and|of|the|for|[A-Z][a-z]+)){0,6})\b|"
     r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
 )
-_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA", "ETA"})
+_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"DWP", "ECAA", "EPA", "ETA"})
 _SOURCE_BOUND_ROUTE_TERM = re.compile(
     r"\b([A-Z]{2,5}(?:\s+[A-Z][A-Za-z-]+){1,5})(?=\s+route\b)"
 )
@@ -813,6 +814,27 @@ def _has_valid_origin_independence(
 
 def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
     value = value.strip()
+    english_month = re.fullmatch(r"([A-Za-z]+)(?:\s+(\d{4}))?", value)
+    if english_month:
+        month = _ENGLISH_MONTHS.get(english_month.group(1).casefold())
+        year = int(english_month.group(2)) if english_month.group(2) else None
+        if (
+            month is not None and (year is None or 1 <= year <= 9999)
+            and (year is not None or english_month.group(1).istitle())
+        ):
+            return ("CALENDAR_MONTH", year, month)
+    chinese_month = re.fullmatch(
+        r"(?:(\d{4}|[零〇一二三四五六七八九十]+)年)?"
+        r"(\d{1,2}|[零〇一二三四五六七八九十]+)月", value,
+    )
+    if chinese_month:
+        year = _chinese_integer(chinese_month.group(1)) if chinese_month.group(1) else None
+        month = _chinese_integer(chinese_month.group(2))
+        if (
+            month is not None and 1 <= month <= 12
+            and (chinese_month.group(1) is None or (year is not None and 1 <= year <= 9999))
+        ):
+            return ("CALENDAR_MONTH", year, month)
     english_date = re.fullmatch(
         r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{4}))?"
         r"(?:\s+at\s+(\d{1,2}):(\d{2}))?",
@@ -983,6 +1005,42 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
         }
         return ("COUNT", objects[chinese_count.group(2)], number)
     return None
+
+
+def _calendar_month_occurs(expression: str, text: str) -> bool:
+    # A calendar month must not be a substring of a word, another month or a
+    # more precise date. A bare English month also needs calendar context: it
+    # could otherwise be a modal, action or name (May, March, August).
+    boundary = "A-Za-z0-9_零〇一二三四五六七八九十百千萬万億亿兩两年月日號号"
+    for match in re.finditer(
+        rf"(?<![{boundary}]){re.escape(expression)}(?![{boundary}])", text,
+    ):
+        if re.fullmatch(r"[A-Za-z]+(?:\s+\d{4})?", expression) and (
+            re.search(r"\d\s+$", text[:match.start()])
+            or re.match(r"\s+\d", text[match.end():])
+        ):
+            continue
+        if re.fullmatch(r"[A-Za-z]+", expression) and not re.search(
+            r"\b(?:in|during|from|until|through|by|before|after|since|between|for)\s+$",
+            text[:match.start()], flags=re.IGNORECASE,
+        ):
+            continue
+        return True
+    return False
+
+
+def _localised_fact_is_bound(
+    source: str, target: str, claim: str, excerpt: str, rendered: str,
+) -> bool:
+    fact = _canonical_localised_fact(source)
+    if fact is None or fact != _canonical_localised_fact(target):
+        return False
+    if fact[0] == "CALENDAR_MONTH":
+        return (
+            _calendar_month_occurs(source, claim)
+            or _calendar_month_occurs(source, excerpt)
+        ) and _calendar_month_occurs(target, rendered)
+    return (source in claim or source in excerpt) and target in rendered
 
 
 class Evid012QualificationTest(StrEnum):
@@ -1171,17 +1229,10 @@ class GovernedClaimEvidence:
             len(set(localised_sources)) != len(localised_sources)
             or len(set(localised_targets)) != len(localised_targets)
             or any(
-                source not in self.claim and source not in self.supporting_excerpt
-                for source in localised_sources
-            )
-            or any(
-                target not in self.rendered_assertion_zh_hant_hk
-                for target in localised_targets
-            )
-            or any(
-                _canonical_localised_fact(source) is None
-                or _canonical_localised_fact(source)
-                != _canonical_localised_fact(target)
+                not _localised_fact_is_bound(
+                    source, target, self.claim, self.supporting_excerpt,
+                    self.rendered_assertion_zh_hant_hk,
+                )
                 for source, target in self.localised_factual_expressions
             )
         ):

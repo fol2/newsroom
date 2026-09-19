@@ -37,6 +37,9 @@ from newsroom.increment10.evidence import (
 from .admission import (
     _APPROVED_CATEGORIES,
     _APPROVED_GEOGRAPHIES,
+    _QUALIFICATION_CLASSIFIER_FIELDS,
+    _duration_is_exactly_supported,
+    _qualification_relation_is_proven,
     _valid_zh_hant_hk_rendering,
 )
 
@@ -1298,16 +1301,17 @@ class AutonomousNativeEvidenceAssessor:
                 if any(item.base_digest != base.digest for item in retained):
                     raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
                 if cached_only:
-                    current = tuple(
+                    # Revalidate exact retained bytes under today's consumer
+                    # rules without rewriting their producer identity or spending.
+                    cached = tuple(
                         item for item in retained
-                        if item.contract_version == VERSION
-                        and item.execution is not None
+                        if item.execution is not None
                     )
-                    if not current:
+                    if not cached:
                         raise NativeEvidenceHold(
                             "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
                         )
-                    latest = max(current, key=lambda item: item.completed_at)
+                    latest = max(cached, key=lambda item: item.completed_at)
                     try:
                         return self._validated_execution(
                             latest.execution, candidate, base, sources, acquired,
@@ -1674,11 +1678,26 @@ class AutonomousNativeEvidenceAssessor:
             for source, result in zip(sources, acquired, strict=True)
         )
         claims_by_id = {claim.claim_id: claim for claim in package.governed_claims}
-        if any(
-            item.governed_claim_id not in claims_by_id
-            for item in package.qualification_evidence
-        ):
-            raise EvidencePackageError("assessment qualification claim differs")
+        for item in package.qualification_evidence:
+            claim = claims_by_id.get(item.governed_claim_id)
+            if claim is None:
+                raise EvidencePackageError("assessment qualification claim differs")
+            if (
+                not _qualification_relation_is_proven(item, claim)
+                or any(
+                    field not in _QUALIFICATION_CLASSIFIER_FIELDS
+                    and value not in claim.claim
+                    and value not in claim.supporting_excerpt
+                    for field, value in item.test_evidence
+                )
+                or (
+                    item.test is Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+                    and not _duration_is_exactly_supported(
+                        claim, dict(item.test_evidence)["duration_minutes"],
+                    )
+                )
+            ):
+                raise EvidencePackageError("assessment qualification evidence is not exact")
         assessment_records = [
             {
                 "record_id": claim.semantic_relation_evidence_id,

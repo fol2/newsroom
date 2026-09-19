@@ -12,8 +12,6 @@ from jsonschema import Draft202012Validator, ValidationError
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import DeterministicWriteAdmission
 from newsroom.control_plane.evidence import (
-    EVIDENCE_GATE_POLICY_VERSION,
-    EvidenceGateEvidence,
     EvidencePackage,
     bounded_named_entities,
     evidence_package_value,
@@ -180,6 +178,19 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
             "University of Salford公布指引。",
             ("University of Salford",),
         ),
+        # Retained source-bound rendering failure, ledger result 25858.
+        (
+            "Responsibility for the overall apprenticeship programme now sits with the Department of Work and Pensions (DWP).",
+            "Responsibility for the overall apprenticeship programme now sits with the Department of Work and Pensions (DWP).",
+            "整體學徒計劃的責任現時由 Department of Work and Pensions（DWP）承擔。",
+            ("DWP", "Department of Work and Pensions"),
+        ),
+        (
+            "During this period, the EPA version of the apprenticeship will remain available until the new apprenticeship assessment version is formally released for starts.",
+            "During this period, the EPA version of the apprenticeship will remain available until the new apprenticeship assessment version is formally released for starts.",
+            "在此期間，該學徒計劃的 EPA 版本會繼續可供取用，直至新學徒評核版本正式開放予開辦為止。",
+            ("EPA",),
+        ),
     ),
 )
 def test_native_assessor_derives_entities_from_constructed_uk03_output(
@@ -328,7 +339,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
 
     decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
-    if expected_entities == ("University of Salford",):
+    if expected_entities != ("Home Office",):
+        connection.close()
         return
 
     ancestry_claim = (
@@ -846,7 +858,8 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     connection.close()
 
 
-def test_retained_22589_inline_part_reference_reaches_write_admission(tmp_path) -> None:
+@pytest.fixture
+def retained_22589_assessment():
     fixture_root = Path(__file__).parent / "fixtures/native_assessor"
     raw_source = (fixture_root / "uk03-appendix-statelessness.json").read_bytes()
     execution_text = (fixture_root / "result-22589.json").read_text()
@@ -914,74 +927,216 @@ def test_retained_22589_inline_part_reference_reaches_write_admission(tmp_path) 
         body_digest=digest_bytes(body),
     )
 
-    assessment = AutonomousNativeEvidenceAssessor._validated_execution(
-        NativeAssessmentExecution(execution_text, {}),
-        SimpleNamespace(candidate_id=base.candidate_id),
-        base,
-        (source,),
-        (acquired,),
+    return base, source, acquired, NativeAssessmentExecution(execution_text, {})
+
+
+def test_retained_22589_qualification_matches_current_admission_contract(
+    retained_22589_assessment,
+) -> None:
+    from newsroom.control_plane.admission import _qualification_relation_is_proven
+    from newsroom.control_plane.evidence import QualificationEvidence
+
+    base, source, acquired, execution = retained_22589_assessment
+    candidate = SimpleNamespace(candidate_id=base.candidate_id)
+    raw = json.loads(execution.text)
+    qualifications = raw["package"].pop("qualification_evidence")
+    raw["package"]["qualification_evidence"] = []
+    # Preserve the independent retained inline-reference/rendering regression.
+    rendered = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {}),
+        candidate, base, (source,), (acquired,),
     )
-    assert tuple(claim.named_entities for claim in assessment.governed_claims) == (
-        ("Part 14: stateless persons",),
-        (),
+    assert tuple(claim.named_entities for claim in rendered.governed_claims) == (
+        ("Part 14: stateless persons",), (),
     )
-    governed = replace(
-        base,
-        substantive_new_information=assessment.substantive_new_information,
-        governed_claims=assessment.governed_claims,
-        qualification_evidence=assessment.qualification_evidence,
-        selection_rationale=assessment.selection_rationale,
-        geography=assessment.geography,
-        categories=assessment.categories,
-        explicit_exclusions=assessment.explicit_exclusions,
-    )
-    records = NativeEvidenceController._records(
-        base, governed, (source,), (acquired,), assessment
-    )
-    retained_rows = tuple(
-        (
-            record["record_id"], record["record_type"],
-            canonical_json_bytes(record).decode(),
-            digest_bytes(canonical_json_bytes(record)),
+    by_id = {claim.claim_id: claim for claim in rendered.governed_claims}
+    assert any(not _qualification_relation_is_proven(
+        QualificationEvidence(
+            item["test"], item["governed_claim_id"], "fixture-qualification",
+            tuple(item["test_evidence"].items()), item["policy_version"],
+        ), by_id[item["governed_claim_id"]],
+    ) for item in qualifications)
+    # This asserts producer/consumer parity, not a new interpretation of the
+    # retained policy language: the admission predicate remains unchanged.
+    with pytest.raises(EvidencePackageError, match="qualification"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            execution, candidate, base, (source,), (acquired,),
         )
-        for record in records
+
+
+def _qualification_assessor_inputs(retained_22589_assessment, *, kind="deadline"):
+    from newsroom.control_plane.native_evidence import (
+        PublicationRightsAssessment, rights_eligibility_digest,
     )
-    resolved = validate_governed_evidence_records(
-        candidate_id=base.candidate_id,
-        source_inventory=(("UK-03", acquired.canonical_url),),
-        base_package_digest=base.digest,
-        package=governed,
-        retained_records=retained_rows,
+
+    base, source, acquired, retained = retained_22589_assessment
+    raw = json.loads(retained.text)
+    body = acquired.body
+    if kind != "retained":
+        claim_text, rendering = {
+            "deadline": ("The deadline changed.", "限期已經更改。"),
+            "policy": ("The policy changed.", "政策已經更改。"),
+            "disruption": ("The service was suspended for 90 minutes.", "服務暫停90分鐘。"),
+        }[kind]
+        claim = raw["package"]["governed_claims"][0]
+        claim.update({
+            "claim": claim_text, "supporting_excerpt": claim_text,
+            "rendered_assertion_zh_hant_hk": rendering,
+            "localised_factual_expressions": [],
+        })
+        test, witnesses = {
+            "deadline": ("OFFICIAL_ACTION_OR_DEADLINE", {
+                "action_class": "OFFICIAL_DEADLINE", "event_polarity": "AFFIRMED",
+                "action_relation": "NEW_OR_CHANGED_OFFICIAL_ACTION",
+                "material_relation_span": claim_text, "reader_action": claim_text,
+            }),
+            "policy": ("LAW_RIGHT_STATUS_POLICY", {
+                "change_kind": "PUBLIC_POLICY", "event_polarity": "AFFIRMED",
+                "change_relation": "NEW_OR_CHANGED_STATE",
+                "material_relation_span": claim_text, "new_state": claim_text,
+            }),
+            "disruption": ("ESSENTIAL_SERVICE_DISRUPTION", {
+                "service_kind": "TRANSPORT", "event_polarity": "AFFIRMED",
+                "duration_relation": "DISRUPTION_DURATION", "duration_minutes": "90",
+                "affected_group": claim_text,
+            }),
+        }[kind]
+        raw["package"].update({
+            "substantive_new_information": [claim_text], "governed_claims": [claim],
+            "qualification_evidence": [{
+                "test": test, "governed_claim_id": claim["claim_id"],
+                "test_evidence": witnesses, "policy_version": "newsroom.evid-012.v7",
+            }],
+        })
+        body = claim_text.encode()
+        base = replace(base, passages=(claim_text,), observation_digests=(digest_bytes(body),))
+    rights = PublicationRightsAssessment.create(
+        decision="PERMITTED", permitted_use="PUBLICATION_EVIDENCE",
+        policy_digest="sha256:" + "d" * 64, evidence_digest="sha256:" + "e" * 64,
     )
-    assert resolved is not None
-    claim_ids = tuple(claim.claim_id for claim in governed.governed_claims)
-    evaluated = replace(
-        governed,
-        resolved_evidence_records=resolved,
-        evidence_gate_results=(
-            ("CLAIM_TRACEABILITY", "PASS"),
-            ("EVIDENCE_SUFFICIENCY", "PASS"),
-            ("SOURCE_AUTHORITY", "PASS"),
+    source = SimpleNamespace(**{**vars(source), "rights": rights})
+    acquired = SimpleNamespace(**{
+        **vars(acquired), "body": body, "body_digest": digest_bytes(body),
+        "currentness_basis": "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
+        "text_only": True, "exclusion_signals": (), "licence_attribution": "fixture",
+        "rights_eligibility_digest": rights_eligibility_digest(
+            rights, body_digest=digest_bytes(body),
+            transport_digest=acquired.transport_evidence_digest,
+            exclusion_signals=(), text_only=True,
         ),
-        evidence_gate_evidence=tuple(
-            EvidenceGateEvidence(
-                gate, "PASS", claim_ids, EVIDENCE_GATE_POLICY_VERSION,
-            )
-            for gate in (
-                "CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY",
-            )
-        ),
-        freshness_result="PASS",
-        integrity_result="PASS",
+    })
+    candidate = SimpleNamespace(
+        candidate_id=base.candidate_id, version_id="fixture-candidate-version",
+        governing_manifest=SimpleNamespace(canonical_digest="sha256:" + "f" * 64),
+        canonical_bytes=canonical_json_bytes({"candidate_id": base.candidate_id}),
     )
-    decision = DeterministicWriteAdmission().decide_candidate_identity(
-        candidate_id=base.candidate_id,
-        hypothesis_id=base.hypothesis_id,
-        package=evaluated,
-        decided_at="2026-09-13T04:26:06.683263Z",
+    return candidate, base, source, acquired, raw
+
+
+@pytest.mark.parametrize("mutation", ["valid", "relation", "witness", "duration_valid", "duration_invalid"])
+def test_assessor_qualification_witnesses_match_admission_helpers(
+    retained_22589_assessment, mutation,
+):
+    candidate, base, source, acquired, raw = _qualification_assessor_inputs(
+        retained_22589_assessment,
+        kind=("disruption" if mutation.startswith("duration") else "policy" if mutation == "witness" else "deadline"),
     )
-    assert decision.decision == "HOLD"
-    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+    evidence = raw["package"]["qualification_evidence"][0]["test_evidence"]
+    if mutation == "relation":
+        evidence["material_relation_span"] = "deadline"
+    elif mutation == "witness":
+        evidence["new_state"] = "invented changed state"
+    elif mutation == "duration_invalid":
+        evidence["duration_minutes"] = "120"
+    execution = NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {})
+    if mutation in {"valid", "duration_valid"}:
+        result = AutonomousNativeEvidenceAssessor._validated_execution(
+            execution, candidate, base, (source,), (acquired,),
+        )
+        assert len(result.qualification_evidence) == 1
+    else:
+        with pytest.raises(EvidencePackageError, match="qualification"):
+            AutonomousNativeEvidenceAssessor._validated_execution(
+                execution, candidate, base, (source,), (acquired,),
+            )
+
+
+@pytest.mark.parametrize("prior_contract", ["newsroom.native-evidence-assessor.v7", VERSION])
+@pytest.mark.parametrize("cached_only", [False, True])
+@pytest.mark.parametrize("valid", [False, True])
+def test_retained_qualification_validation_controls_existing_fresh_attempt(
+    tmp_path, monkeypatch, retained_22589_assessment, prior_contract, cached_only, valid,
+):
+    from newsroom.control_plane import native_assessor as module
+
+    candidate, base, source, acquired, raw = _qualification_assessor_inputs(
+        retained_22589_assessment, kind="deadline" if valid else "retained",
+    )
+    current_contract = VERSION
+    valid_text = canonical_json_bytes(
+        raw if valid else {"package": _model_package_value(base)}
+    ).decode()
+    execution = NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {
+        "usage_basis": "PROVIDER_REPORTED", "input_tokens": 1, "output_tokens": 1,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
+        "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2,
+    })
+    monkeypatch.setattr(module, "VERSION", prior_contract)
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", prior_contract)
+    service, prior_usage = _usage(tmp_path, monkeypatch)
+    # Seed the actual old acceptance shape without invoking an older validator:
+    # a settled, exact retained raw result whose structural contract was accepted.
+    allocation = prior_usage.begin(candidate, base, "retained assessor fixture")
+    dispatched = prior_usage.mark_dispatch(allocation)
+    assert prior_usage.retain_result(allocation, execution, dispatch_at=dispatched)
+    prior_usage.complete(allocation, outcome="ASSESSOR_ACCEPTED", execution=execution,
+                         provider_dispatched=True, dispatch_at=dispatched)
+    with sqlite3.connect(service.path) as retained:
+        original_allocation = retained.execute(
+            "SELECT record_json FROM model_invocation_allocations WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone()
+        original_result = retained.execute(
+            "SELECT payload_digest,payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'",
+        ).fetchone()
+    assert json.loads(original_allocation[0])["prompt_contract_version"] == prior_contract
+    monkeypatch.setattr(module, "VERSION", current_contract)
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", current_contract)
+    _, usage = _usage(tmp_path, monkeypatch)
+    calls = []
+
+    def dispatch(_prompt):
+        calls.append("fixture-dispatch")
+        return NativeAssessmentExecution(valid_text, execution.usage)
+
+    assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
+    old = prior_contract != current_contract
+    for _ in range(2):
+        if not valid and (cached_only or not old):
+            with pytest.raises(NativeEvidenceHold, match="ASSESSOR_QUALIFICATION_CONTRACT_HOLD"):
+                assessor.assess_with_boundary(candidate, base, (source,), (acquired,),
+                                              before_dispatch=None, cached_only=cached_only)
+        else:
+            result = assessor.assess_with_boundary(candidate, base, (source,), (acquired,),
+                                                  before_dispatch=None, cached_only=cached_only)
+            if valid:
+                assert dict(result.qualification_evidence[0].test_evidence)["reader_action"] == "The deadline changed."
+            else:
+                assert result.qualification_evidence == ()
+    expected_dispatches = int(old and not valid and not cached_only)
+    assert len(calls) == expected_dispatches
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (1 + expected_dispatches,)
+        assert retained.execute("SELECT COUNT(*) FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'").fetchone() == (1 + expected_dispatches,)
+        assert retained.execute(
+            "SELECT record_json FROM model_invocation_allocations WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone() == original_allocation
+        assert retained.execute(
+            "SELECT payload_digest,payload_json FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT' "
+            "AND json_extract(payload_json,'$.invocation_id')=?",
+            (allocation.invocation_id,),
+        ).fetchone() == original_result
 
 
 def test_native_assessor_retains_precise_qualification_contract_hold(
@@ -1582,6 +1737,9 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
         _, usage = _usage(tmp_path, monkeypatch)
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
     assert assessor(candidate, base, (), ()) == first
+    assert assessor.assess_with_boundary(
+        candidate, base, (), (), before_dispatch=None, cached_only=True,
+    ) == first
     assert calls == ["provider"]
     with sqlite3.connect(service.path) as retained:
         assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (1,)
@@ -1599,7 +1757,7 @@ def test_retained_assessment_revalidation_reuses_output_without_provider(tmp_pat
     connection.close()
 
 
-def test_consumer_only_revalidation_requires_exact_current_cached_input(
+def test_consumer_only_revalidation_requires_exact_cached_input(
     tmp_path, monkeypatch,
 ) -> None:
     import newsroom.control_plane.native_assessor as module
@@ -1620,7 +1778,7 @@ def test_consumer_only_revalidation_requires_exact_current_cached_input(
     monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v11")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     service, old_usage = _usage(tmp_path, monkeypatch)
-    AutonomousNativeEvidenceAssessor(
+    first = AutonomousNativeEvidenceAssessor(
         dispatch, usage=old_usage, dispatch_fence=nullcontext,
     )(candidate, base, (), ())
     monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
@@ -1630,10 +1788,9 @@ def test_consumer_only_revalidation_requires_exact_current_cached_input(
         dispatch, usage=usage, dispatch_fence=nullcontext,
     )
 
-    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD"):
-        assessor.assess_with_boundary(
-            candidate, base, (), (), before_dispatch=None, cached_only=True,
-        )
+    assert assessor.assess_with_boundary(
+        candidate, base, (), (), before_dispatch=None, cached_only=True,
+    ) == first
     changed = replace(base, passages=(base.passages[0] + " changed",))
     with pytest.raises(NativeEvidenceHold, match="ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD"):
         assessor.assess_with_boundary(
