@@ -19,6 +19,7 @@ from newsroom.control_plane.native_evidence import (
         ("Hong Kong", "PLACE"),
         ("British National (Overseas)", "OFFICIAL_TERM"),
         ("ATAS", "OFFICIAL_TERM"),
+        ("ETA", "OFFICIAL_TERM"),
         ("eVisa", "OFFICIAL_TERM"),
     ),
 )
@@ -35,7 +36,7 @@ def test_source_bound_operational_names_can_be_preserved_in_hk_copy(name, kind):
 
 
 def test_short_registry_names_do_not_match_other_latin_words():
-    assert evidence.bounded_named_entities("UKVI and ATASX") == frozenset()
+    assert evidence.bounded_named_entities("UKVI and ATASX and ETAX and XETA") == frozenset()
 
 
 def test_university_of_name_is_complete_and_drops_the_determiner():

@@ -712,6 +712,9 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
         connection.commit()
 
     monkeypatch.setattr(usage, "disposition_native_unreported_subscription_usage", settle, raising=False)
+    cancelled_fallbacks = []
+    monkeypatch.setattr(usage, "disposition_native_graphiti_fallback_cancellation",
+                        lambda **kwargs: cancelled_fallbacks.append(kwargs["invocation_id"]))
     monkeypatch.setattr(
         n, "graphiti_required_route_holds", lambda _, **_values: ()
     )
@@ -725,6 +728,7 @@ def test_native_advance_settles_subscription_usage_before_or_after_dispatch(
     assert [item["invocation_id"] for item in settled] == (
         ["1", "5"] if retained else ["5", "1"]
     )
+    assert set(cancelled_fallbacks) == {"57"}
     assert outcomes[0].state == "GRAPHITI_HOLD"
     assert connection.execute(
         "SELECT usage_status FROM model_invocation_terminals WHERE invocation_id='1'"

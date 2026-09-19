@@ -25,7 +25,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v11"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v12"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -295,7 +295,7 @@ _ENGLISH_OFFICIAL_REFERENCE = re.compile(
     r"(?:\s+(?:and|of|the|for|[A-Z][a-z]+)){0,6})\b|"
     r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
 )
-_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA"})
+_BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"ECAA", "ETA"})
 _SOURCE_BOUND_ROUTE_TERM = re.compile(
     r"\b([A-Z]{2,5}(?:\s+[A-Z][A-Za-z-]+){1,5})(?=\s+route\b)"
 )

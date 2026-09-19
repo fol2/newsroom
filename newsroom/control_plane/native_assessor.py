@@ -85,6 +85,7 @@ REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
     "ASSESSOR_OUTPUT_CONTRACT_HOLD", "ASSESSOR_RENDERING_CONTRACT_HOLD",
+    "ASSESSOR_LOCALISATION_CONTRACT_HOLD",
     "SOURCE_AUTHORITY_HOLD",
 })
 
@@ -357,7 +358,7 @@ def _qualification_record_id(
 def _named_entity_record_id(
     claim_id: str, text: str, entity_type: str, rendered: str
 ) -> str:
-    return _assessment_id("NAMED_ENTITY", claim_id, text, entity_type, rendered)
+    return _assessment_id("NAMED_ENTITY", NAMED_ENTITY_POLICY_VERSION, claim_id, text, entity_type, rendered)
 
 
 def _contract_hold_reason(error: EvidencePackageError) -> str:

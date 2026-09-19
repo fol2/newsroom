@@ -409,7 +409,7 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
         evidence_controller=object.__new__(NativeEvidenceController),
         sources={unit.revision_id: (_source(unit),)},
         assessment_contract_version=(
-            "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v11+"
+            "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v12+"
             "newsroom.zh-hant-hk-shape.v14"
         ),
         clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
@@ -421,7 +421,7 @@ def test_superseded_assessment_revalidation_keeps_intake_and_prior_evidence(tmp_
         facts = journal.progress[unit.revision_id]["facts"]
         assert facts["assessment_superseded"]["package_admission_id"] == old_package
         assert facts["assessment_contract_version"] == (
-            "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v11+"
+            "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v12+"
             "newsroom.zh-hant-hk-shape.v14"
         )
         assert calls == ["already-acknowledged"]

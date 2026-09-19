@@ -21,11 +21,13 @@ from .model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
     ModelUsageService,
     NATIVE_GRAPHITI_EMBEDDING_CANCELLATION_USAGE_SCOPE,
+    NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE,
     WorkloadClass,
     _policy_for_allocation,
     _retained_terminal_allocation,
     _valid_native_embedding_timeout_disposition_record,
     _valid_native_graphiti_embedding_cancellation_disposition_record,
+    _valid_native_graphiti_fallback_cancellation_disposition_record,
 )
 from .native_progress import LAND, PORTFOLIO, STATE, NativeRevisionJournal
 from .store import LEDGER_GENESIS, append_ledger
@@ -518,6 +520,15 @@ def _invocations(
                 terminal_record=terminal, disposition_record=disposition,
             ):
                 raise NativeQualificationError("native embedding cancellation disposition differs")
+            if (
+                disposition_row[4] == NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE
+                or disposition.get("authority_scope")
+                == NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE
+            ) and not _valid_native_graphiti_fallback_cancellation_disposition_record(
+                connection, allocation_record=allocations[invocation_id],
+                terminal_record=terminal, disposition_record=disposition,
+            ):
+                raise NativeQualificationError("native fallback cancellation disposition differs")
             if (
                 retained_digest != disposition_row[0]
                 or digest_canonical(unsigned) != retained_digest
