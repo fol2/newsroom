@@ -8,9 +8,14 @@ import pytest
 from newsroom.authority import AuthorityPersistenceError, canonical_json_bytes
 from newsroom.authority import authorization_request_storage_migrations as request_migration
 from newsroom.authority import graphiti_recovered_ambiguous_migrations as recovery_migration
+from newsroom.authority import relationship_open_index_migrations as index_migration
 from newsroom.authority import security_record_migrations as migration
 from newsroom.authority.canonical import digest_bytes
-from newsroom.authority.migrations import apply_pending_migrations, schema_fingerprint
+from newsroom.authority.migrations import (
+    SCHEMA_VERSION,
+    apply_pending_migrations,
+    schema_fingerprint,
+)
 
 from .authority_event_helpers import open_test_system
 from .authority_helpers import command, proof
@@ -28,7 +33,7 @@ def test_current_security_storage_is_compact_with_exact_public_provenance(tmp_pa
         before = system.events.provenance(result.event_id, proof=proof())
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 39
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         auth = connection.execute('SELECT * FROM authentication_contexts').fetchone()
         request = connection.execute('SELECT * FROM authorization_requests').fetchone()
         assert bytes(auth['storage_context_marker']) == b'v37'
@@ -54,6 +59,8 @@ def test_current_security_storage_is_compact_with_exact_public_provenance(tmp_pa
              request_migration.AUTHORIZATION_REQUEST_STORAGE_MIGRATION_CHECKSUM),
             (39, recovery_migration.GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_NAME,
              recovery_migration.GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_CHECKSUM),
+            (40, index_migration.RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+             index_migration.RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM),
         )
         assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
     with open_test_system(path) as system:
@@ -320,7 +327,7 @@ def test_v38_request_conversion_streams_without_fetchall(tmp_path):
         apply_pending_migrations(
             connection, applied_at='2026-09-13T00:00:00.000000Z'
         )
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 39
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
     with open_test_system(path) as system:
         for original in originals:
             assert system.events.provenance(

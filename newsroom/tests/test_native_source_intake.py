@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.authority import ObjectAdmissionId
-from newsroom.authority.canonical import digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.govuk_rights import GovUkLicenceEvidence, POLICY_DIGEST
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
 from newsroom.control_plane.graphiti_operational_readiness import (
@@ -306,11 +306,14 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
 
 
 def test_native_source_reobservation_reuses_journal_units_after_current_checks(tmp_path, monkeypatch):
+    import newsroom.control_plane.corpus as corpus
+    import newsroom.control_plane.native_source_intake as intake_module
+
     args = _args(tmp_path, monkeypatch)
     args["principal_id"] = OPERATOR_PRINCIPAL_ID
     args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
     retained, admitted, fetched = {}, [], []
-    page = [_document()]
+    page = [_document(body="Complete retained text. " * 750)]
     permitted = [True]
     instant = [datetime(2026, 9, 8, 12, tzinfo=UTC)]
     licence = _licence()
@@ -338,10 +341,29 @@ def test_native_source_reobservation_reuses_journal_units_after_current_checks(t
         )
         first = intake.poll()[0]
         assert first.status == "READY", first
+        assert len(first.units) == 3
         retained[first.units[0].revision_id] = first.units
         admitted.clear()
-        replay = intake.poll()[0]
+        hashed_sizes = []
+        original_digest = corpus.content_digest
+
+        def count_digest(**value):
+            hashed_sizes.append(len(canonical_json_bytes(value)))
+            return original_digest(**value)
+
+        unit = first.units[0]
+        revision_bytes = len(canonical_json_bytes({
+            "headline": unit.headline, "body": unit.body,
+            "canonical_url": unit.canonical_url,
+        }))
+        with monkeypatch.context() as counting:
+            counting.setattr(corpus, "content_digest", count_digest)
+            counting.setattr(intake_module, "content_digest", count_digest)
+            replay = intake.poll()[0]
         assert replay.units == first.units
+        # One current observation, one integrity hash and one representation
+        # binding per retained chunk; no repeated first-chunk baseline hash.
+        assert hashed_sizes == [revision_bytes] * (1 + 2 * len(first.units))
         assert fetched == [SOURCE_URLS["UK-01"], "https://www.gov.uk/api/content/item-1"] * 2
         # Fresh observations remain governed; unchanged corpus chunks are not re-admitted.
         assert admitted == ["source.native-observation", "source.native-observation"]

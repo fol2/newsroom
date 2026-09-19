@@ -376,6 +376,7 @@ def _drop_v39_recovered_ambiguous_guards(
 ) -> None:
     """Restore the exact v38 Graphiti progression triggers."""
 
+    _drop_v40_relationship_open_index(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 39:
         return
     from newsroom.authority.graphiti_accounted_zero_migrations import (
@@ -427,6 +428,45 @@ def _drop_v39_recovered_ambiguous_guards(
         connection.execute("RELEASE SAVEPOINT checked_graphiti_guard_downgrade")
         raise
     connection.execute("RELEASE SAVEPOINT checked_graphiti_guard_downgrade")
+
+
+def _drop_v40_relationship_open_index(connection: sqlite3.Connection) -> None:
+    """Remove the exact v40 partial index from an older-schema fixture."""
+
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 40:
+        return
+    from newsroom.authority.relationship_open_index_migrations import (
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM,
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_STATEMENTS,
+    )
+
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=40"
+    ).fetchone() != (
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM,
+    ) or connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='index' AND name='idx_ledger_events_relationship_event_type'"
+    ).fetchone() != (RELATIONSHIP_OPEN_INDEX_MIGRATION_STATEMENTS[0],):
+        raise sqlite3.DatabaseError("downgrade requires exact v40 relationship index")
+    connection.execute("SAVEPOINT checked_relationship_index_downgrade")
+    try:
+        guard = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='immutable_authority_migrations_delete'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+        connection.execute("DROP INDEX idx_ledger_events_relationship_event_type")
+        connection.execute("DELETE FROM authority_migrations WHERE version=40")
+        connection.execute(guard)
+        connection.execute("PRAGMA user_version=39")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT checked_relationship_index_downgrade")
+        connection.execute("RELEASE SAVEPOINT checked_relationship_index_downgrade")
+        raise
+    connection.execute("RELEASE SAVEPOINT checked_relationship_index_downgrade")
 
 
 def _drop_v36_shared_scope_schema(connection: sqlite3.Connection) -> None:

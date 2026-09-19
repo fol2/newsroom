@@ -46,6 +46,29 @@ def test_native_journal_retains_old_binding_on_unchanged_reobservation(tmp_path)
     connection.close()
 
 
+@pytest.mark.parametrize("field", ["headline", "body", "canonical_url"])
+@pytest.mark.parametrize("ordinal", [1, 3])
+def test_native_journal_rechecks_changed_chunk_content_before_reobservation(
+    tmp_path, field, ordinal,
+):
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    unit = replace(_native(), body="Complete retained text. " * 750, chunk_count=3)
+    units = tuple(replace(unit, chunk_ordinal=index) for index in range(1, 4))
+    journal.land(units)
+    changed = tuple(
+        replace(item, **{field: getattr(item, field) + " changed"})
+        if item.chunk_ordinal == ordinal else item
+        for item in units
+    )
+    with pytest.raises(ValueError, match="chunk coverage"):
+        journal.land(changed)
+    assert journal.units[unit.revision_id] == units
+    assert connection.execute("SELECT count(*) FROM ledger").fetchone()[0] == 1
+    assert NativeRevisionJournal(connection).units[unit.revision_id] == units
+    connection.close()
+
+
 def test_native_journal_reopen_retains_one_body_per_multichunk_revision(tmp_path):
     connection = connect(str(tmp_path / "private.sqlite3"))
     unit = replace(_native(), body="A complete retained paragraph. " * 1000, chunk_count=3)
