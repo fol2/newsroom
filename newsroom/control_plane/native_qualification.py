@@ -520,10 +520,17 @@ def _invocations(
                 terminal_record=terminal, disposition_record=disposition,
             ):
                 raise NativeQualificationError("native embedding cancellation disposition differs")
+            # Scope markers are mutable: the immutable cancelled leaf must
+            # still select this proof after a coherently rehashed downgrade.
             if (
                 disposition_row[4] == NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE
                 or disposition.get("authority_scope")
                 == NATIVE_GRAPHITI_FALLBACK_CANCELLATION_USAGE_SCOPE
+                or (
+                    allocations[invocation_id].get("workload_class")
+                    == WorkloadClass.GRAPHITI_CHAT_FALLBACK.value
+                    and terminal.get("outcome") == "CANCELLED"
+                )
             ) and not _valid_native_graphiti_fallback_cancellation_disposition_record(
                 connection, allocation_record=allocations[invocation_id],
                 terminal_record=terminal, disposition_record=disposition,

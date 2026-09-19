@@ -228,14 +228,19 @@ def test_cancelled_fallback_rejects_ineligible_or_changed_evidence(tmp_path, mon
         connection.close()
 
 
-@pytest.mark.parametrize("field", ["authority_scope", "native_scope_digest", "work_outcome_digest", "attempt_receipt_digest", "components"])
+@pytest.mark.parametrize("field", ["authority_scope", "scope-downgrade", "native_scope_digest", "work_outcome_digest", "attempt_receipt_digest", "components"])
 def test_fallback_cancellation_qualification_reproves_retained_authority(tmp_path, monkeypatch, field):
     case = _cancelled(tmp_path, monkeypatch)
     try:
         record = _dispose(case)
         record.pop("disposition_digest")
-        record[field] = (m.UsageComponents(total_tokens=0, provenance="BOUNDED_ESTIMATE").as_record()
-                         if field == "components" else digest_canonical({"wrong": field}))
+        if field == "scope-downgrade":
+            record["authority_scope"] = m.NATIVE_AUTONOMOUS_USAGE_SCOPE
+            case.connection.execute("UPDATE model_usage_conservative_dispositions SET approved_by=?",
+                                    (m.NATIVE_AUTONOMOUS_USAGE_SCOPE,))
+        else:
+            record[field] = (m.UsageComponents(total_tokens=0, provenance="BOUNDED_ESTIMATE").as_record()
+                             if field == "components" else digest_canonical({"wrong": field}))
         record["disposition_digest"] = digest_canonical(record)
         case.connection.execute("UPDATE model_usage_conservative_dispositions SET disposition_digest=?,record_json=?",
                                 (record["disposition_digest"], canonical_json_bytes(record).decode()))
