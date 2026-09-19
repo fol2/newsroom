@@ -239,6 +239,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "graphiti_recovered_ambiguous_progression_v39",
         "sha256:40a2d6a969e6759ad76fa950d122dda1552a81f44f6a65c30c4b1e8389ccc3ed",
     ),
+    (
+        40,
+        "relationship_open_index_v40",
+        "sha256:1f126c29773eded31cb36abcf6f6101dd827e0032c9e379adabbbaffd06c1c79",
+    ),
 )
 
 
@@ -340,7 +345,7 @@ def _checked_registry() -> tuple[MigrationLike, ...]:
             "EXPECTED_MIGRATION_HISTORY differs from independent literal release pins"
         )
     versions = tuple(record[0] for record in record_history)
-    if versions != (*range(1, 33), 34, 35, 36, 37, 38, 39):
+    if versions != (*range(1, 33), 34, 35, 36, 37, 38, 39, 40):
         raise MigrationCompatibilityError(
             "authority migration registry differs from the central release sequence"
         )

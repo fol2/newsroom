@@ -80,24 +80,32 @@ def test_reopen_logs_each_existing_validation_phase(tmp_path, caplog) -> None:
     assert [r.args[0] for r in completed] == [
         *phases[:4], *phases[5:8], "relational_invariants", *phases[8:], "validation",
     ]
-    assert all(type(r.args[-1]) is int and r.args[-1] >= 0 for r in completed)
+    assert all(len(r.args) == 4 and all(type(v) is int and v >= 0 for v in r.args[2:])
+               for r in completed)
     assert len(records) == 2 * (len(phases) + 1)
 
 
-@pytest.mark.parametrize("failure", [ValueError("private detail"), KeyboardInterrupt()])
+@pytest.mark.parametrize("failure", [None, ValueError("private detail"), KeyboardInterrupt()])
 def test_validation_timing_preserves_original_failure(monkeypatch, caplog, failure) -> None:
     from newsroom.authority import _event_store_base as private
 
     ticks = iter((1_000_000, 3_999_999))
+    cpu_ticks = iter((7_000_000, 8_999_999))
     monkeypatch.setattr(private, "perf_counter_ns", lambda: next(ticks), raising=False)
+    monkeypatch.setattr(private, "process_time_ns", lambda: next(cpu_ticks), raising=False)
     with caplog.at_level(logging.INFO, logger="newsroom.authority.open"):
-        with pytest.raises(type(failure)) as raised:
+        if failure is None:
             with private._validation_stage("quick_check"):
-                raise failure
-    assert raised.value is failure
+                pass
+        else:
+            with pytest.raises(type(failure)) as raised:
+                with private._validation_stage("quick_check"):
+                    raise failure
+            assert raised.value is failure
+    status = "COMPLETE" if failure is None else "FAILED"
     assert [r.getMessage() for r in caplog.records] == [
         "authority_open stage=quick_check status=STARTED",
-        "authority_open stage=quick_check status=FAILED elapsed_ms=2",
+        f"authority_open stage=quick_check status={status} elapsed_ms=2 cpu_ms=1",
     ]
 
 

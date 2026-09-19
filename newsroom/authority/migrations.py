@@ -237,6 +237,13 @@ from .graphiti_recovered_ambiguous_migrations import (
     GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_STATEMENTS,
     GRAPHITI_RECOVERED_AMBIGUOUS_SCHEMA_VERSION,
 )
+from .relationship_open_index_migrations import (
+    RELATIONSHIP_OPEN_INDEX_MIGRATION,
+    RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM,
+    RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+    RELATIONSHIP_OPEN_INDEX_MIGRATION_STATEMENTS,
+    RELATIONSHIP_OPEN_INDEX_SCHEMA_VERSION,
+)
 from .graphiti_evaluation_migrations import (
     GRAPHITI_EVALUATION_MIGRATION,
     GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
@@ -343,7 +350,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = GRAPHITI_RECOVERED_AMBIGUOUS_SCHEMA_VERSION
+SCHEMA_VERSION = RELATIONSHIP_OPEN_INDEX_SCHEMA_VERSION
 ISOLATED_SCHEMA_VERSION_RESERVATIONS = frozenset({33})
 MIGRATION_NAME = "authority_event_foundation_v1"
 
@@ -1699,6 +1706,20 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                 ),
             )
             current = GRAPHITI_RECOVERED_AMBIGUOUS_SCHEMA_VERSION
+        if current == GRAPHITI_RECOVERED_AMBIGUOUS_SCHEMA_VERSION:
+            for statement in RELATIONSHIP_OPEN_INDEX_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    RELATIONSHIP_OPEN_INDEX_SCHEMA_VERSION,
+                    RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+                    RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM,
+                    applied_at,
+                ),
+            )
+            current = RELATIONSHIP_OPEN_INDEX_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1747,6 +1768,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     SECURITY_RECORD_MIGRATION,
     AUTHORIZATION_REQUEST_STORAGE_MIGRATION,
     GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION,
+    RELATIONSHIP_OPEN_INDEX_MIGRATION,
 )
 
 
@@ -1938,6 +1960,11 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         GRAPHITI_RECOVERED_AMBIGUOUS_SCHEMA_VERSION,
         GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_NAME,
         GRAPHITI_RECOVERED_AMBIGUOUS_MIGRATION_CHECKSUM,
+    ),
+    (
+        RELATIONSHIP_OPEN_INDEX_SCHEMA_VERSION,
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_NAME,
+        RELATIONSHIP_OPEN_INDEX_MIGRATION_CHECKSUM,
     ),
 )
 # fmt: on

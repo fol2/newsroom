@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import threading
-from time import perf_counter_ns
+from time import perf_counter_ns, process_time_ns
 from typing import Any, Iterator
 
 try:
@@ -40,8 +40,9 @@ _OPEN_LOG = logging.getLogger("newsroom.authority.open")
 
 @contextmanager
 def _validation_stage(stage: str) -> Iterator[None]:
-    """Log inclusive elapsed time; nested phase durations are not additive."""
+    """Log inclusive wall and process CPU time; nested phases are not additive."""
     started = perf_counter_ns()
+    cpu_started = process_time_ns()
     _OPEN_LOG.info("authority_open stage=%s status=STARTED", stage)
     status = "FAILED"
     try:
@@ -49,8 +50,9 @@ def _validation_stage(stage: str) -> Iterator[None]:
         status = "COMPLETE"
     finally:
         _OPEN_LOG.info(
-            "authority_open stage=%s status=%s elapsed_ms=%d",
+            "authority_open stage=%s status=%s elapsed_ms=%d cpu_ms=%d",
             stage, status, (perf_counter_ns() - started) // 1_000_000,
+            (process_time_ns() - cpu_started) // 1_000_000,
         )
 
 

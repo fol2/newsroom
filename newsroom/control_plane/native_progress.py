@@ -167,8 +167,10 @@ class NativeRevisionJournal:
             tuple(unit.chunk_ordinal for unit in units) != tuple(range(1, first.chunk_count + 1))
             or any(unit.revision_id != first.revision_id or unit.chunk_count != first.chunk_count for unit in units)
             or any(not unit.proving_run_id.startswith("native-source:") for unit in units)
-            or any(unit.revision_digest != first.revision_digest for unit in units)
         ):
+            raise ValueError("native progress revision chunk coverage differs")
+        revision_digest = first.revision_digest
+        if any(unit.revision_digest != revision_digest for unit in units[1:]):
             raise ValueError("native progress revision chunk coverage differs")
 
     def _retain(self, kind: str, value: dict) -> None:

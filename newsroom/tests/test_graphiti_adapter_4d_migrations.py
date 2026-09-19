@@ -36,6 +36,7 @@ from .extraction_4a_helpers import (
     seed_extraction_fixture,
 )
 from .graphiti_adapter_4d_migration_helpers import (
+    _drop_v40_relationship_open_index,
     _drop_v39_recovered_ambiguous_guards,
     downgrade_empty_graphiti_adapter_schema_to_v15,
 )
@@ -81,6 +82,7 @@ def test_v39_replaces_only_graphiti_progression_guards(tmp_path: Path) -> None:
     state = seed_extraction_fixture(tmp_path)
     conn = sqlite3.connect(state.database, isolation_level=None)
     try:
+        _drop_v40_relationship_open_index(conn)
         before = {
             (str(kind), str(name)): str(sql)
             for kind, name, sql in conn.execute(
@@ -109,7 +111,7 @@ def test_v39_replaces_only_graphiti_progression_guards(tmp_path: Path) -> None:
         apply_pending_migrations(
             conn, applied_at="2042-03-12T10:00:00.000000Z"
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert schema_fingerprint(conn) == EXPECTED_SCHEMA_FINGERPRINT
     finally:
         conn.close()
