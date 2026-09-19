@@ -289,7 +289,7 @@ def _operational_replacement_is_proven(
     }
     source_sentences = {
         sentence.strip()
-        for sentence in re.split(r"[.;!?。；！？]+", source_context)
+        for sentence in re.split(r"[.!?。！？]+", source_context)
     }
     # A model-selected excerpt or a source line wrap must not remove a denial,
     # condition or proposal from the complete authoritative sentence.

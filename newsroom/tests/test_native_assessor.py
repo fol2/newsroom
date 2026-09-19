@@ -1143,6 +1143,9 @@ def test_retained_qualification_validation_controls_existing_fresh_attempt(
 @pytest.mark.parametrize(("source_prefix", "old_state"), [
     ("", False), ("Officials deny that ", False), ("Subject to approval, ", False),
     ("Officials propose that ", False), ("Officials deny that\n", False), ("", True),
+    pytest.param("Subject to approval; ", False, id="conditional-semicolon"),
+    pytest.param("Officials deny the following; ", False, id="denial-semicolon"),
+    pytest.param("須經批准；", False, id="conditional-fullwidth-semicolon"),
 ])
 def test_cached_operational_replacement_revalidates_without_dispatch_or_relabelling(
     tmp_path, monkeypatch, retained_22589_assessment, rendering_valid, source_prefix, old_state,

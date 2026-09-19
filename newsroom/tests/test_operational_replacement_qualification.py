@@ -58,6 +58,9 @@ def test_exact_operational_replacement_sentence_passes_qualification():
 @pytest.mark.parametrize("source_prefix", [
     "Officials deny that ", "Subject to approval, ", "Officials propose that ",
     "Officials deny that\n",
+    pytest.param("Subject to approval; ", id="conditional-semicolon"),
+    pytest.param("Officials deny the following; ", id="denial-semicolon"),
+    pytest.param("須經批准；", id="conditional-fullwidth-semicolon"),
 ])
 def test_operational_replacement_cannot_excise_source_context(source_prefix):
     candidate, package = _replacement_package()
