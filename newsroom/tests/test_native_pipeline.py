@@ -517,6 +517,7 @@ def test_native_pipeline_retries_a_bounded_acquisition_hold_next_cycle(tmp_path,
 @pytest.mark.parametrize("reason", (
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "ASSESSOR_LOCALISATION_CONTRACT_HOLD",
+    "QUALIFICATION_EVIDENCE_NOT_EXACT",
     "NO_QUALIFYING_NEW_INFORMATION",
     "EDITORIAL_ADMISSION_HOLD",
 ))
@@ -635,7 +636,7 @@ def test_native_pipeline_time_slices_changed_contract_reassessment_without_starv
         connection.close()
 
 
-@pytest.mark.parametrize("reason", ["ASSESSOR_RENDERING_CONTRACT_HOLD", "ASSESSOR_LOCALISATION_CONTRACT_HOLD"])
+@pytest.mark.parametrize("reason", ["ASSESSOR_RENDERING_CONTRACT_HOLD", "ASSESSOR_LOCALISATION_CONTRACT_HOLD", "QUALIFICATION_EVIDENCE_NOT_EXACT"])
 def test_fresh_graphiti_crosses_real_queue_before_old_contract_reassessment(
     tmp_path, monkeypatch, reason,
 ):
