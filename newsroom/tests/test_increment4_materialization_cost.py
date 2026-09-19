@@ -115,7 +115,8 @@ def _boundary(io: _MemoryIO) -> _Increment4Neo4jBoundary:
 
 def _run(boundary, request):
     return boundary._materialize_generation(
-        request=request, batches=(), source_watermark=request.snapshot.through_ledger_seq,
+        request=request, snapshot_digest=request.snapshot.canonical_digest,
+        batches=(), source_watermark=request.snapshot.through_ledger_seq,
         proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture-only"),
     )
 
@@ -207,9 +208,11 @@ def test_previously_ignored_seq_cannot_gain_an_admitted_batch():
     )
     batch = SimpleNamespace(ledger_seq=1)
     boundary = _boundary(io)
+    request = _request(3)
     with pytest.raises(ProjectionStateError, match="previously ignored"):
         boundary._materialize_generation(
-            request=_request(3),
+            request=request,
+            snapshot_digest=request.snapshot.canonical_digest,
             batches=(batch,),
             source_watermark=3,
             proof=AuthenticationProof(
@@ -256,6 +259,7 @@ def test_materialization_final_guards_remain_closed(field, value, message):
 
 def test_materialization_rejects_nonbuilding_before_hashing(monkeypatch):
     request = _request(3)
+    snapshot_digest = request.snapshot.canonical_digest
     io = _MemoryIO(3)
     io.metadata.generation.state = ProjectionGenerationState.ACTIVE
 
@@ -264,7 +268,11 @@ def test_materialization_rejects_nonbuilding_before_hashing(monkeypatch):
 
     monkeypatch.setattr(snapshot_models, "_event_digest", unexpected)
     with pytest.raises(ProjectionStateError, match="BUILDING generation"):
-        _run(_boundary(io), request)
+        _boundary(io)._materialize_generation(
+            request=request, snapshot_digest=snapshot_digest, batches=(),
+            source_watermark=request.snapshot.through_ledger_seq,
+            proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture-only"),
+        )
     assert not io.deliveries
 
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.authority.persistence import LedgerEventRecord
 from newsroom.authority.types import TrustScope
 from newsroom.entities.models import (
@@ -211,18 +212,7 @@ class Increment4AdmittedProjectionSnapshot:
         if event_sequences != tuple(sorted(set(event_sequences))):
             raise Increment4ProofContractError("proof events must be sequence-sorted and unique")
         event_ids = {item.event_id for item in self.events}
-        required_event_ids: set[str] = set()
-        for state in self.entities:
-            required_event_ids.update(
-                {
-                    str(state.entity.authority_event_id),
-                    str(state.version.authority_event_id),
-                    str(state.projection_event.source_event_id),
-                }
-            )
-            required_event_ids.update(str(alias.authority_event_id) for alias in state.aliases)
-        for state in self.relations:
-            required_event_ids.add(str(state.projection_event.source_event_id))
+        required_event_ids = _required_event_ids(self.entities, self.relations)
         missing = required_event_ids - event_ids
         if missing:
             raise Increment4ProofContractError(
@@ -282,6 +272,76 @@ class Increment4AdmittedProjectionSnapshot:
                 "events": [_event_digest(item) for item in self.events],
             }
         )
+
+
+def _required_event_ids(entities, relations) -> set[str]:
+    required_event_ids: set[str] = set()
+    for state in entities:
+        required_event_ids.update(
+            {
+                str(state.entity.authority_event_id),
+                str(state.version.authority_event_id),
+                str(state.projection_event.source_event_id),
+            }
+        )
+        required_event_ids.update(str(alias.authority_event_id) for alias in state.aliases)
+    for state in relations:
+        required_event_ids.add(str(state.projection_event.source_event_id))
+    return required_event_ids
+
+
+def _stream_admitted_provenance(
+    *,
+    entities: tuple[Increment4EntityProjectionState, ...],
+    relations: tuple[Increment4RelationProjectionState, ...],
+    events: Iterable[LedgerEventRecord],
+    through_ledger_seq: int,
+    hash_history: bool = True,
+) -> tuple[Increment4AdmittedProjectionSnapshot, str | None]:
+    """Hash complete history; retain only mapping provenance and the final event.
+
+    The returned tuple snapshot is only for the existing state validator/mapper.
+    Its subset digest is NOT the full-history identity returned alongside it.
+    """
+    required = _required_event_ids(entities, relations)
+    retained = []
+    last = None
+    digest = hashlib.sha256() if hash_history else None
+    # Exactly canonical_json_bytes(snapshot digest value), in sorted key order,
+    # but without retaining the full list of event digests or its JSON encoding.
+    if digest is not None:
+        digest.update(canonical_json_bytes({
+            "contract": "newsroom.increment4.admitted-snapshot.v1",
+            "entities": [item.canonical_digest for item in entities],
+        })[:-1])
+        digest.update(b',"events":[')
+    for event in events:
+        if last is not None:
+            if event.ledger_seq <= last.ledger_seq:
+                raise Increment4ProofContractError("proof events must be sequence-sorted and unique")
+        if digest is not None:
+            if last is not None:
+                digest.update(b",")
+            digest.update(canonical_json_bytes(_event_digest(event)))
+        if event.event_id in required:
+            retained.append(event)
+        last = event
+    if last is None or last.ledger_seq != through_ledger_seq:
+        raise Increment4ProofContractError("proof watermark lacks an exact retained event")
+    if last.event_id not in required:
+        retained.append(last)
+    # Reuse all current entity, relation, endpoint and provenance checks.
+    provenance = Increment4AdmittedProjectionSnapshot(
+        entities, relations, tuple(retained), through_ledger_seq,
+    )
+    if digest is None:
+        return provenance, None
+    digest.update(b'],"relations":')
+    digest.update(canonical_json_bytes([item.canonical_digest for item in relations]))
+    digest.update(b',"through_ledger_seq":')
+    digest.update(canonical_json_bytes(through_ledger_seq))
+    digest.update(b"}")
+    return provenance, "sha256:" + digest.hexdigest()
 
 
 def sorted_snapshot(

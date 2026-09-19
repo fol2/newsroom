@@ -43,7 +43,9 @@ from newsroom.projection.neo4j.models import (
 )
 from newsroom.projection.neo4j.qualification import neo4j_compatibility_digest
 
-from ._increment4_projection_store import _Increment4ProjectionAuthorityStore
+from ._increment4_projection_store import (
+    _Increment4CurrentBuildInputs, _Increment4ProjectionAuthorityStore,
+)
 from ._projection_system import _ProjectionBoundary
 
 
@@ -180,7 +182,7 @@ class _Increment4Neo4jBoundary:
     def _create_generation(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
         snapshot_digest: str,
         proof: AuthenticationProof,
         legacy_identity: bool = False,
@@ -210,7 +212,8 @@ class _Increment4Neo4jBoundary:
     def _retry_active_predecessor_cleanup(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
+        snapshot_digest: str,
         proof: AuthenticationProof,
     ) -> tuple[Any | None, int | None]:
         metadata = self._metadata_or_none(request.generation_id)
@@ -227,7 +230,7 @@ class _Increment4Neo4jBoundary:
         try:
             self._create_generation(
                 request=request,
-                snapshot_digest=request.snapshot.canonical_digest,
+                snapshot_digest=snapshot_digest,
                 proof=proof,
             )
         except ExpectedVersionConflict:
@@ -242,7 +245,7 @@ class _Increment4Neo4jBoundary:
                 # purge=True. A false request never receives this fallback.
                 self._create_generation(
                     request=request,
-                    snapshot_digest=request.snapshot.canonical_digest,
+                    snapshot_digest=snapshot_digest,
                     proof=proof,
                     legacy_identity=True,
                 )
@@ -353,7 +356,8 @@ class _Increment4Neo4jBoundary:
     def _materialize_generation(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
+        snapshot_digest: str,
         batches: tuple[StructuralBatch, ...],
         source_watermark: int,
         proof: AuthenticationProof,
@@ -374,9 +378,7 @@ class _Increment4Neo4jBoundary:
             raise ProjectionStateError(
                 "Increment 4 unfinished delivery requires a BUILDING generation"
             )
-        # The request owns one immutable snapshot, including all ledger events.
-        # Hash it once so a later delivery key and canonical refusal share identity.
-        snapshot_digest = request.snapshot.canonical_digest
+        # Every delivery key retains the prepared full-history snapshot identity.
         projected = 0
         states = self._store.projection_rebuild_delivery_states(
             request.generation_id
@@ -483,7 +485,7 @@ class _Increment4Neo4jBoundary:
     def _transition_to_validating(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
         source_watermark: int,
         proof: AuthenticationProof,
     ) -> Any:
@@ -523,7 +525,8 @@ class _Increment4Neo4jBoundary:
     def _validate(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
+        snapshot_digest: str,
         batches: tuple[StructuralBatch, ...],
         source_watermark: int,
         proof: AuthenticationProof,
@@ -561,7 +564,7 @@ class _Increment4Neo4jBoundary:
                         {
                             "generation_id": str(request.generation_id),
                             "source_watermark": source_watermark,
-                            "snapshot_digest": request.snapshot.canonical_digest,
+                            "snapshot_digest": snapshot_digest,
                         },
                     ),
                 ),
@@ -597,7 +600,7 @@ class _Increment4Neo4jBoundary:
     def _promote(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
         batches: tuple[StructuralBatch, ...],
         source_watermark: int,
         validation: Any,
@@ -687,7 +690,8 @@ class _Increment4Neo4jBoundary:
     def _result(
         self,
         *,
-        request: Increment4Neo4jBuildRequest,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
+        snapshot_digest: str,
         source_watermark: int,
         batches: tuple[StructuralBatch, ...],
         deleted_target: int,
@@ -725,7 +729,7 @@ class _Increment4Neo4jBoundary:
             ignored_optional_count=ignored,
             deleted_target_graph_record_count=deleted_target,
             purged_retired_graph_record_count=purged_prior,
-            source_snapshot_digest=request.snapshot.canonical_digest,
+            source_snapshot_digest=snapshot_digest,
             projection_state_digest=state_digest,
             serving_time=metadata.serving_time,
         )
@@ -738,154 +742,171 @@ class _Increment4Neo4jBoundary:
         if not isinstance(request, Increment4Neo4jBuildRequest):
             raise TypeError("Increment 4 build requires a typed request")
         with self._operation_lock:
-            # Register the immutable family and authorize this operation before
-            # authority reads. New generation and serving-graph mutation wait for
-            # the exact current snapshot. The sole pre-gate graph effect is an
-            # exact-command retry of a retained ACTIVE promotion's failed cleanup
-            # against its immutable RETIRED predecessor namespace.
             self._register_family(proof)
-            self._authenticate_management(
+            snapshot_digest = request.snapshot.canonical_digest
+            self._authenticate_build(request, snapshot_digest, request.snapshot.through_ledger_seq, proof)
+            # Exact ACTIVE replay may retry its immutable predecessor cleanup
+            # before the current-source gate, as in the public tuple contract.
+            active_promotion, pre_purged_prior = self._retry_active_predecessor_cleanup(
+                request=request, snapshot_digest=snapshot_digest, proof=proof,
+            )
+            source_watermark, authoritative = self._require_source_snapshot(request)
+            batches = build_increment4_admitted_batches(
+                authoritative,
                 generation_id=request.generation_id,
-                operation="increment4-build-and-promote",
-                semantic_value={
-                    "generation_id": str(request.generation_id),
-                    "snapshot_digest": request.snapshot.canonical_digest,
-                    "source_watermark": request.snapshot.through_ledger_seq,
-                    "purge_retired_generation": request.purge_retired_generation,
-                },
-                proof=proof,
+                family=self._store.projection_family_definition(INCREMENT4_ADMITTED_FAMILY_ID),
             )
-            active_promotion, pre_purged_prior = (
-                self._retry_active_predecessor_cleanup(
-                    request=request,
-                    proof=proof,
-                )
-            )
-            source_watermark, authoritative_snapshot = (
-                self._require_source_snapshot(request)
-            )
-            family = self._store.projection_family_definition(
-                INCREMENT4_ADMITTED_FAMILY_ID
+            return self._build_prepared(
+                request, _Increment4CurrentBuildInputs(source_watermark, snapshot_digest, batches),
+                active_promotion, pre_purged_prior, proof,
             )
 
-            # New and unfinished generations replay the exact immutable
-            # creation command only after the source gate. ACTIVE generations
-            # already replayed it before their bounded predecessor cleanup.
-            if active_promotion is None:
-                self._create_generation(
-                    request=request,
-                    snapshot_digest=authoritative_snapshot.canonical_digest,
-                    proof=proof,
-                )
-            metadata = self._store.projection_generation_metadata(
+    def _authenticate_build(self, request, snapshot_digest, source_watermark, proof):
+        self._authenticate_management(
+            generation_id=request.generation_id,
+            operation="increment4-build-and-promote",
+            semantic_value={
+                "generation_id": str(request.generation_id),
+                "snapshot_digest": snapshot_digest,
+                "source_watermark": source_watermark,
+                "purge_retired_generation": request.purge_retired_generation,
+            },
+            proof=proof,
+        )
+
+    def _build_prepared(
+        self,
+        request: Increment4Neo4jBuildRequest | Increment4Neo4jCurrentBuildRequest,
+        inputs: _Increment4CurrentBuildInputs,
+        active_promotion,
+        pre_purged_prior,
+        proof: AuthenticationProof,
+    ) -> Increment4Neo4jBuildResult:
+        source_watermark = inputs.source_watermark
+        snapshot_digest = inputs.snapshot_digest
+        batches = inputs.batches
+        # New and unfinished generations replay the exact immutable
+        # creation command only after the source gate. ACTIVE generations
+        # already replayed it before their bounded predecessor cleanup.
+        if active_promotion is None:
+            self._create_generation(
+                request=request,
+                snapshot_digest=snapshot_digest,
+                proof=proof,
+            )
+        metadata = self._store.projection_generation_metadata(
+            request.generation_id
+        )
+        self._require_family(metadata)
+        if metadata.generation.state in {
+            ProjectionGenerationState.RETIRED,
+            ProjectionGenerationState.FAILED,
+        }:
+            raise ProjectionStateError(
+                "Increment 4 cannot rebuild a terminal generation identity"
+            )
+
+        if metadata.generation.state is ProjectionGenerationState.ACTIVE:
+            validation = self._store.projection_generation_validation(
                 request.generation_id
             )
-            self._require_family(metadata)
-            if metadata.generation.state in {
-                ProjectionGenerationState.RETIRED,
-                ProjectionGenerationState.FAILED,
-            }:
-                raise ProjectionStateError(
-                    "Increment 4 cannot rebuild a terminal generation identity"
-                )
-
-            # Batches are always built from the fresh authority-owned object, never
-            # from the caller instance even after exact optimistic comparison.
-            batches = build_increment4_admitted_batches(
-                authoritative_snapshot,
-                generation_id=request.generation_id,
-                family=family,
+            compatibility_digest = neo4j_compatibility_digest(
+                self._adapter.verify_compatibility()
             )
-            if metadata.generation.state is ProjectionGenerationState.ACTIVE:
-                validation = self._store.projection_generation_validation(
-                    request.generation_id
+            if (
+                validation.checkpoint_ledger_seq
+                != metadata.contiguous_ledger_seq
+                or metadata.generation.validated_through_ledger_seq
+                != validation.checkpoint_ledger_seq
+                or validation.service_compatibility_digest
+                != compatibility_digest
+            ):
+                raise Neo4jIdentityConflict(
+                    "Increment 4 active generation differs from retained validation"
                 )
-                compatibility_digest = neo4j_compatibility_digest(
-                    self._adapter.verify_compatibility()
-                )
-                if (
-                    validation.checkpoint_ledger_seq
-                    != metadata.contiguous_ledger_seq
-                    or metadata.generation.validated_through_ledger_seq
-                    != validation.checkpoint_ledger_seq
-                    or validation.service_compatibility_digest
-                    != compatibility_digest
-                ):
-                    raise Neo4jIdentityConflict(
-                        "Increment 4 active generation differs from retained validation"
-                    )
-                state_digest = self._adapter.reconcile_generation(
-                    generation_id=str(request.generation_id),
-                    expected_batches=batches,
-                )
-                if state_digest != validation.projection_state_digest:
-                    raise Neo4jIdentityConflict(
-                        "Increment 4 active graph differs from retained validation"
-                    )
-                promotion = (
-                    active_promotion
-                    if active_promotion is not None
-                    else self._promotion_for_generation(request.generation_id)
-                )
-                # The serving generation remains reconciliation-only. A retained
-                # promotion may still name a retired predecessor whose requested
-                # cleanup failed after the atomic SQLite promotion, so result
-                # assembly must retry only that retired namespace.
-                result = self._result(
-                    request=request,
-                    source_watermark=source_watermark,
-                    batches=batches,
-                    deleted_target=0,
-                    ignored=source_watermark - len(batches),
-                    validation=validation,
-                    promotion=promotion,
-                    state_digest=state_digest,
-                    purged_prior=pre_purged_prior,
-                )
-                # Authority commands do not share the graph operation lock. Re-read
-                # after reconciliation and retired cleanup so a concurrent rights,
-                # tombstone or lineage change cannot be reported as current.
-                self._require_source_snapshot(request)
-                return result
-
-            deleted_target, _projected, ignored = self._materialize_generation(
-                request=request,
-                batches=batches,
-                source_watermark=source_watermark,
-                proof=proof,
+            state_digest = self._adapter.reconcile_generation(
+                generation_id=str(request.generation_id),
+                expected_batches=batches,
             )
-            validation, state_digest = self._validate(
-                request=request,
-                batches=batches,
-                source_watermark=source_watermark,
-                proof=proof,
+            if state_digest != validation.projection_state_digest:
+                raise Neo4jIdentityConflict(
+                    "Increment 4 active graph differs from retained validation"
+                )
+            promotion = (
+                active_promotion
+                if active_promotion is not None
+                else self._promotion_for_generation(request.generation_id)
             )
-            promotion = self._promote(
+            # The serving generation remains reconciliation-only. A retained
+            # promotion may still name a retired predecessor whose requested
+            # cleanup failed after the atomic SQLite promotion, so result
+            # assembly must retry only that retired namespace.
+            result = self._result(
                 request=request,
-                batches=batches,
-                source_watermark=source_watermark,
-                validation=validation,
-                state_digest=state_digest,
-                proof=proof,
-            )
-            return self._result(
-                request=request,
+                snapshot_digest=snapshot_digest,
                 source_watermark=source_watermark,
                 batches=batches,
-                deleted_target=deleted_target,
-                ignored=ignored,
+                deleted_target=0,
+                ignored=source_watermark - len(batches),
                 validation=validation,
                 promotion=promotion,
                 state_digest=state_digest,
+                purged_prior=pre_purged_prior,
             )
+            # Authority commands do not share the graph operation lock. Re-read
+            # after reconciliation and retired cleanup so a concurrent rights,
+            # tombstone or lineage change cannot be reported as current.
+            if isinstance(request, Increment4Neo4jBuildRequest):
+                self._require_source_snapshot(request)
+            elif self._store._increment4_current_build_inputs(
+                generation_id=request.generation_id,
+                family=self._store.projection_family_definition(INCREMENT4_ADMITTED_FAMILY_ID),
+            ) != inputs:
+                raise ProjectionStateError(
+                    "Increment 4 snapshot differs from exact retained admitted authority"
+                )
+            return result
+
+        deleted_target, _projected, ignored = self._materialize_generation(
+            request=request,
+            snapshot_digest=snapshot_digest,
+            batches=batches,
+            source_watermark=source_watermark,
+            proof=proof,
+        )
+        validation, state_digest = self._validate(
+            request=request,
+            snapshot_digest=snapshot_digest,
+            batches=batches,
+            source_watermark=source_watermark,
+            proof=proof,
+        )
+        promotion = self._promote(
+            request=request,
+            batches=batches,
+            source_watermark=source_watermark,
+            validation=validation,
+            state_digest=state_digest,
+            proof=proof,
+        )
+        return self._result(
+            request=request,
+            snapshot_digest=snapshot_digest,
+            source_watermark=source_watermark,
+            batches=batches,
+            deleted_target=deleted_target,
+            ignored=ignored,
+            validation=validation,
+            promotion=promotion,
+            state_digest=state_digest,
+        )
 
     def build_current_and_promote(
         self,
         request: Increment4Neo4jCurrentBuildRequest,
         proof: AuthenticationProof,
     ) -> Increment4Neo4jBuildResult:
-        """Build from one authority-owned snapshot of all current admissions."""
-
+        """Prepare current authority once, without retaining historical events."""
         if not isinstance(request, Increment4Neo4jCurrentBuildRequest):
             raise TypeError("Increment 4 current build requires a typed request")
         with self._operation_lock:
@@ -899,16 +920,16 @@ class _Increment4Neo4jBoundary:
                 },
                 proof=proof,
             )
-            snapshot = self._store.increment4_admitted_snapshot()
-            return self.build_and_promote(
-                Increment4Neo4jBuildRequest(
-                    generation_id=request.generation_id,
-                    snapshot=snapshot,
-                    reason_code=request.reason_code,
-                    idempotency_key=request.idempotency_key,
-                    purge_retired_generation=request.purge_retired_generation,
-                ),
-                proof,
+            inputs = self._store._increment4_current_build_inputs(
+                generation_id=request.generation_id,
+                family=self._store.projection_family_definition(INCREMENT4_ADMITTED_FAMILY_ID),
+            )
+            self._authenticate_build(request, inputs.snapshot_digest, inputs.source_watermark, proof)
+            active_promotion, pre_purged_prior = self._retry_active_predecessor_cleanup(
+                request=request, snapshot_digest=inputs.snapshot_digest, proof=proof,
+            )
+            return self._build_prepared(
+                request, inputs, active_promotion, pre_purged_prior, proof,
             )
 
     def generation_status(
@@ -953,8 +974,7 @@ class _Increment4Neo4jBoundary:
             metadata = self._store.projection_active_generation_metadata(
                 INCREMENT4_ADMITTED_FAMILY_ID
             )
-            expected = build_increment4_admitted_batches(
-                self._store.increment4_admitted_snapshot(),
+            expected = self._store._increment4_current_batches(
                 generation_id=metadata.generation.generation_id,
                 family=metadata.family,
             )

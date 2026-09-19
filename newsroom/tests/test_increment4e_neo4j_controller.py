@@ -409,21 +409,26 @@ def test_increment4_replacement_retires_and_purges_prior_generation(
     } == serving_before_retry
 
 
+@pytest.mark.parametrize("current_build", [False, True])
 def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_closed(
-    tmp_path: Path,
+    tmp_path: Path, current_build: bool,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
     adapter = _SourceRaceAdapter()
-    request = _request(GENERATION_1, snapshot, key="increment4-replay-v1")
+    request = (
+        _current_request(GENERATION_1, key="increment4-replay-v1")
+        if current_build else _request(GENERATION_1, snapshot, key="increment4-replay-v1")
+    )
 
     with open_increment4_neo4j_system(state, adapter) as system:
-        first = system.increment4.build_and_promote(
+        build = system.increment4.build_current_and_promote if current_build else system.increment4.build_and_promote
+        first = build(
             request, proof=extraction_proof()
         )
         before_apply = adapter.apply_count
         before_cleanup = adapter.cleanup_count
         before_reconcile = adapter.reconcile_count
-        replay = system.increment4.build_and_promote(
+        replay = build(
             request, proof=extraction_proof()
         )
         assert replay.promotion.promotion_digest == first.promotion.promotion_digest
@@ -440,7 +445,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
         failed_apply = adapter.apply_count
         failed_cleanup = adapter.cleanup_count
         with pytest.raises(Neo4jIdentityConflict):
-            system.increment4.build_and_promote(
+            build(
                 request, proof=extraction_proof()
             )
         assert adapter.apply_count == failed_apply
@@ -465,7 +470,7 @@ def test_increment4_exact_active_replay_is_non_mutating_and_graph_loss_fails_clo
             ProjectionStateError,
             match="differs from exact retained admitted authority",
         ):
-            system.increment4.build_and_promote(
+            build(
                 request, proof=extraction_proof()
             )
         status = system.increment4.generation_status(
@@ -541,13 +546,15 @@ class _SourceRaceAdapter(MemoryNeo4jAdapter):
         )
 
 
+@pytest.mark.parametrize("current_build", [False, True])
 def test_increment4_source_watermark_change_fails_atomic_validation(
-    tmp_path: Path,
+    tmp_path: Path, current_build: bool,
 ) -> None:
     state, snapshot = admitted_increment4_fixture(tmp_path)
     adapter = _SourceRaceAdapter()
 
     with open_increment4_neo4j_system(state, adapter) as system:
+        build = system.increment4.build_current_and_promote if current_build else system.increment4.build_and_promote
         adapter.before_first_reconcile = lambda: system.commands.execute(
             authority_command(
                 key="increment4-source-race-v1",
@@ -561,8 +568,9 @@ def test_increment4_source_watermark_change_fails_atomic_validation(
             ProjectionStateError,
             match="source watermark changed before authority commit",
         ):
-            system.increment4.build_and_promote(
-                _request(GENERATION_1, snapshot, key="increment4-race-v1"),
+            build(
+                (_current_request(GENERATION_1, key="increment4-race-v1") if current_build else
+                 _request(GENERATION_1, snapshot, key="increment4-race-v1")),
                 proof=extraction_proof(),
             )
         status = system.increment4.generation_status(
@@ -672,3 +680,69 @@ def test_increment4_expected_batches_remain_exact_after_controller_build(
     assert tuple(item.batch_digest for item in actual) == tuple(
         item.batch_digest for item in expected
     )
+
+
+def test_current_build_streams_once_and_releases_read_transaction_before_graph(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from newsroom.authority._increment4_projection_store import _Increment4ProjectionAuthorityStore
+
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+    calls = []
+    original = getattr(_Increment4ProjectionAuthorityStore, "_increment4_current_build_inputs", None)
+    assert original is not None
+
+    def prepare(store, **kwargs):
+        value = original(store, **kwargs)
+        assert not store._connection.in_transaction
+        calls.append(value)
+        return value
+
+    def forbid_full_snapshot(_store):
+        raise AssertionError("current build must not materialise full ledger history")
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        monkeypatch.setattr(_Increment4ProjectionAuthorityStore, "_increment4_current_build_inputs", prepare)
+        monkeypatch.setattr(_Increment4ProjectionAuthorityStore, "increment4_admitted_snapshot", forbid_full_snapshot)
+        result = system.increment4.build_current_and_promote(
+            _current_request(GENERATION_1, key="stream-current-v1"), proof=extraction_proof(),
+        )
+        assert result.source_snapshot_digest == snapshot.canonical_digest
+        assert len(calls) == 1
+        replay = system.increment4.build_current_and_promote(
+            _current_request(GENERATION_1, key="stream-current-v1"), proof=extraction_proof(),
+        )
+        assert replay.promotion.promotion_digest == result.promotion.promotion_digest
+        assert len(calls) == 3  # ACTIVE replay also freshly checks current rights/state.
+
+        import newsroom.increment4.models as model_module
+        def forbid_history_hash(_event):
+            raise AssertionError("reconciliation must not add full-history hashing")
+        monkeypatch.setattr(model_module, "_event_digest", forbid_history_hash)
+        reconciliation = system.increment4.reconcile_active(proof=extraction_proof())
+        assert reconciliation.projection_state_digest == result.projection_state_digest
+
+
+def test_streamed_current_provenance_preserves_mapping_and_requires_every_witness(tmp_path):
+    from newsroom.increment4.models import _stream_admitted_provenance, _required_event_ids
+
+    _, complete = admitted_increment4_fixture(tmp_path)
+    family = increment4_admitted_contract_registry().family("graph.increment4.admitted")
+    provenance, digest = _stream_admitted_provenance(
+        entities=complete.entities, relations=complete.relations,
+        events=iter(complete.events), through_ledger_seq=complete.through_ledger_seq,
+    )
+    assert digest == complete.canonical_digest
+    required = _required_event_ids(complete.entities, complete.relations)
+    assert {item.event_id for item in provenance.events} == required | {complete.events[-1].event_id}
+    assert len(provenance.events) < len(complete.events)
+    assert build_increment4_admitted_batches(provenance, generation_id=GENERATION_1, family=family) == build_increment4_admitted_batches(complete, generation_id=GENERATION_1, family=family)
+    missing_id = str(complete.entities[0].entity.authority_event_id)
+    for hash_history in (False, True):
+        with pytest.raises(ValueError, match="lacks exact retained event provenance"):
+            _stream_admitted_provenance(
+                entities=complete.entities, relations=complete.relations,
+                events=(item for item in complete.events if item.event_id != missing_id),
+                through_ledger_seq=complete.through_ledger_seq, hash_history=hash_history,
+            )
