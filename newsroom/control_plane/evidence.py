@@ -1009,7 +1009,8 @@ def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
 
 def _calendar_month_occurs(expression: str, text: str) -> bool:
     # A calendar month must not be a substring of a word, another month or a
-    # more precise Chinese date. Bare May also needs calendar context, not a modal.
+    # more precise date. A bare English month also needs calendar context: it
+    # could otherwise be a modal, action or name (May, March, August).
     boundary = "A-Za-z0-9_零〇一二三四五六七八九十百千萬万億亿兩两年月日號号"
     for match in re.finditer(
         rf"(?<![{boundary}]){re.escape(expression)}(?![{boundary}])", text,
@@ -1019,7 +1020,7 @@ def _calendar_month_occurs(expression: str, text: str) -> bool:
             or re.match(r"\s+\d", text[match.end():])
         ):
             continue
-        if expression == "May" and not re.search(
+        if re.fullmatch(r"[A-Za-z]+", expression) and not re.search(
             r"\b(?:in|during|from|until|through|by|before|after|since|between|for)\s+$",
             text[:match.start()], flags=re.IGNORECASE,
         ):
