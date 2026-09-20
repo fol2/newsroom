@@ -7,7 +7,7 @@ records. No beta Candidate identifier is promoted into editorial authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Callable, Mapping
 import sqlite3
 
@@ -51,6 +51,29 @@ def _identity(kind, phase: str, value: object):
     return deterministic_uuid4(
         kind, namespace=f"{POLICY_VERSION}:{phase}", semantic_value=value,
     )
+
+
+def _same_gate_assessment(previous: GateDecisionRequest, current: GateDecisionRequest) -> bool:
+    """Compare effective decisions, not fresh observation or command identities."""
+    def normalise(request):
+        reasons = []
+        for reason in request.supporting_reasons:
+            if reason.code == "RIGHTS.CURRENT_ASSESSMENT" and tuple(
+                ref.reference_type for ref in reason.references
+            ) == ("RIGHTS_ASSESSMENT", "RIGHTS_OBSERVATION"):
+                reason = replace(reason, references=reason.references[:1])
+            reasons.append(reason)
+        return replace(
+            request,
+            decision_id=previous.decision_id,
+            decision_ordinal=previous.decision_ordinal,
+            previous_decision_id=previous.previous_decision_id,
+            decided_at=previous.decided_at,
+            idempotency_key=previous.idempotency_key,
+            supporting_reasons=tuple(reasons),
+        )
+
+    return normalise(previous) == normalise(current)
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,18 +435,6 @@ class NativeDiscovery:
         repeated = transition.kind is ObservableTransitionKind.REOBSERVED
         ordinal = 1 if current is None else current.current_gate.request.decision_ordinal + 1
         state_key = {"transition": key, "current_version": str(summary.version_id), "time_validity": time_validity.value}
-        if current is not None and (
-            current.current_gate.request.basis.rights_current == rights_current
-            and current.current_gate.request.basis.policy_current == current_version
-            and current.current_gate.request.basis.time_validity == time_validity
-            and current.current_gate.request.supporting_reasons == supporting_reasons
-        ):
-            if current.lead is not None and current.current_disposition is None:
-                self._ensure_queued_disposition(
-                    current.lead, current.current_gate, proof=proof
-                )
-                return self.discovery.current_status(signal_id, proof=proof)
-            return current
         state_key["rights_packet"] = None if rights is None else rights["packet_digest"]
         state_key["ordinal"] = ordinal
         gate_id = _identity(GateDecisionId, "gate", state_key)
@@ -472,6 +483,15 @@ class NativeDiscovery:
             reason_taxonomy_version=POLICY_VERSION, outcome_taxonomy_version=POLICY_VERSION,
             next_action=action, decided_at=now, idempotency_key=f"native-gate:{gate_id}",
         )
+        # Rights, definition and freshness have been checked again above. Keep
+        # the original decision/provenance when only its observation clock moved.
+        if current is not None and _same_gate_assessment(current.current_gate.request, gate):
+            if current.lead is not None and current.current_disposition is None:
+                self._ensure_queued_disposition(
+                    current.lead, current.current_gate, proof=proof
+                )
+                return self.discovery.current_status(signal_id, proof=proof)
+            return current
         urgency = UrgencyBasis(UrgencyRoute.ROUTINE, reason)
         lead = None
         disposition = None
