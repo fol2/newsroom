@@ -329,6 +329,12 @@ def _operational_replacement_is_proven(
     # object slots without repeating the optional operational-effect clause.
     operation = match["operation"] or "assessment"
     operation_pattern = rf"\b{re.escape(operation)}\b"
+    # Without an effect clause, the new object itself must name the operation:
+    # a generic approach plus a new label does not establish a changed model.
+    if match["operation"] is None and not re.search(
+        operation_pattern, match["new"], flags=re.IGNORECASE,
+    ):
+        return False
     if not all(re.search(operation_pattern, label, flags=re.IGNORECASE) for label in (
         match["old"], match["name"] or match["new"],
     )):
