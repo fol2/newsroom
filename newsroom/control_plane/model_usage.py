@@ -2696,6 +2696,54 @@ def _native_immutable_replay_proof(
     ):
         return True, None
 
+    # Snapshot recovery copies every provider result/effect field. It changes
+    # only the attempt identity and recomputed raw digest; each attempt also
+    # carries its own freshly retained rights evidence and spend accounting.
+    stable_rights = ("policy_digest", "scope", "source_id", "source_url")
+    fresh_rights = (
+        "assessment_admission_id", "assessment_blob_digest",
+        "observation_admission_id", "observation_blob_digest",
+        "packet_digest", "rights_decision_id",
+    )
+    replay_rights = receipt.get("dispatch_rights")
+    provider_rights = provider_receipt.get("dispatch_rights")
+    replay_raw_digest = receipt.get("raw_output_digest")
+    provider_raw_digest = provider_receipt.get("raw_output_digest")
+    try:
+        validate_sha256_digest(str(replay_raw_digest), field="replay raw output")
+        validate_sha256_digest(str(provider_raw_digest), field="provider raw output")
+        for rights in (replay_rights, provider_rights):
+            if not isinstance(rights, Mapping):
+                raise ValueError("replay rights evidence is absent")
+            for field in fresh_rights:
+                value = rights.get(field)
+                if type(value) is not str or not value:
+                    raise ValueError("replay rights evidence differs")
+                if field.endswith("digest") or field == "rights_decision_id":
+                    validate_sha256_digest(value, field=field)
+    except ValueError:
+        return True, None
+    if (
+        set(replay_rights) != set(stable_rights) | set(fresh_rights)
+        or set(provider_rights) != set(stable_rights) | set(fresh_rights)
+        or any(replay_rights[field] != provider_rights[field] for field in stable_rights)
+        or replay_raw_digest == provider_raw_digest
+    ):
+        return True, None
+    normalised_replay = dict(unsigned)
+    normalised_provider = dict(provider_unsigned)
+    for value in (normalised_replay, normalised_provider):
+        value.pop("accounting", None)
+        value.pop("attempt_number", None)
+        value.pop("raw_output_digest", None)
+        value["dispatch_rights"] = {
+            field: value["dispatch_rights"][field] for field in stable_rights
+        }
+    if canonical_json_bytes(normalised_replay) != canonical_json_bytes(
+        normalised_provider
+    ):
+        return True, None
+
     provider_envelope = WorkEnvelope.create(
         cycle_id=native_graphiti_usage_cycle_id(
             ingest_id=ingest_id, attempt_number=provider_attempt_number
@@ -2788,10 +2836,12 @@ def _native_immutable_replay_proof(
         (ingest_id, attempt_number),
     ).fetchone()
     provider_spend = connection.execute(
-        "SELECT status FROM unpublished_graphiti_spend WHERE ingest_id=? "
-        "AND attempt_number=?",
+        "SELECT status,usage_basis,actual_usd_microunits,"
+        "actual_gbp_microunits FROM unpublished_graphiti_spend "
+        "WHERE ingest_id=? AND attempt_number=?",
         (ingest_id, provider_attempt_number),
     ).fetchone()
+    provider_accounting = provider_receipt.get("accounting")
     embedding = receipt.get("embedding_usage")
     if (
         tuple(envelope_row[:4])
@@ -2828,17 +2878,29 @@ def _native_immutable_replay_proof(
         or current_spend is None
         or tuple(current_spend) != ("RECONCILED", "NO_EMBEDDING_CALL", 0, 0)
         or provider_spend is None
+        or not isinstance(provider_accounting, Mapping)
+        or provider_accounting.get("spend_id")
+        != f"{ingest_id}:{provider_attempt_number}"
+        or provider_accounting.get("status") != provider_spend[0]
+        or provider_accounting.get("usage_basis") != provider_spend[1]
+        or provider_accounting.get("actual_usd_microunits") != provider_spend[2]
+        or provider_accounting.get("actual_gbp_microunits") != provider_spend[3]
         or provider_attempt.get("spend_id")
         != f"{ingest_id}:{provider_attempt_number}"
         or provider_attempt.get("status") != provider_spend[0]
         or provider_attempt.get("retained_attempt_receipt") is not True
         or provider_attempt.get("reconciled_again") is not False
+        or provider_attempt.get("accounting") is not None
         or current_attempt.get("spend_id") != f"{ingest_id}:{attempt_number}"
         or current_attempt.get("status") != "RECONCILED"
         or current_attempt.get("usage_basis") != "NO_EMBEDDING_CALL"
         or current_attempt.get("actual_usd_microunits") != 0
         or current_attempt.get("actual_gbp_microunits") != 0
         or current_attempt.get("unused_reservation_released") is not True
+        or (
+            "provider_dispatch_state" in receipt
+            and receipt.get("provider_dispatch_state") != "NOT_DISPATCHED"
+        )
         or not isinstance(embedding, Mapping)
         or embedding.get("request_count") != 0
         or embedding.get("requests") != []

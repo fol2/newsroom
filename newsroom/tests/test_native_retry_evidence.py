@@ -111,6 +111,33 @@ def _recovered_ambiguous_pattern(service, policy, shape, unit):
             "request_count": 0, "requests": [], "embedding_tokens": 0,
             "cost_usd_microunits": 0, "usage_basis": "NO_EMBEDDING_CALL",
         },
+        "token_usage": {
+            "chat_request_count": 1, "observed_total_tokens": 0,
+            "usage_basis": "NO_PROVIDER_CALL",
+        },
+        "raw_output_digest": usage_module.digest_canonical({"raw": "original"}),
+        "dispatch_rights": {
+            "assessment_admission_id": "assessment-original",
+            "assessment_blob_digest": usage_module.digest_canonical(
+                {"assessment": "original"}
+            ),
+            "observation_admission_id": "observation-original",
+            "observation_blob_digest": usage_module.digest_canonical(
+                {"observation": "original"}
+            ),
+            "packet_digest": usage_module.digest_canonical({"packet": "original"}),
+            "policy_digest": usage_module.digest_canonical({"policy": "same"}),
+            "rights_decision_id": usage_module.digest_canonical(
+                {"decision": "original"}
+            ),
+            "scope": "NATIVE_RETAINED_SOURCE_TEXT", "source_id": unit.source_id,
+            "source_url": unit.source_definition_url,
+        },
+        "accounting": {
+            "spend_id": f"{unit.ingest_id}:1", "status": "RECONCILED",
+            "usage_basis": "NO_EMBEDDING_CALL", "actual_usd_microunits": 0,
+            "actual_gbp_microunits": 0, "unused_reservation_released": True,
+        },
     }
     connection = connect(service.path)
     insert_graphiti_attempt_receipt(
@@ -132,6 +159,22 @@ def _recovered_ambiguous_pattern(service, policy, shape, unit):
     connection = connect(service.path)
     replay = {
         **original, "attempt_number": 2, "provider_attempt_number": 1,
+        "raw_output_digest": usage_module.digest_canonical({"raw": "recovered"}),
+        "dispatch_rights": {
+            **original["dispatch_rights"],
+            "assessment_admission_id": "assessment-replay",
+            "assessment_blob_digest": usage_module.digest_canonical(
+                {"assessment": "replay"}
+            ),
+            "observation_admission_id": "observation-replay",
+            "observation_blob_digest": usage_module.digest_canonical(
+                {"observation": "replay"}
+            ),
+            "packet_digest": usage_module.digest_canonical({"packet": "replay"}),
+            "rights_decision_id": usage_module.digest_canonical(
+                {"decision": "replay"}
+            ),
+        },
         "accounting": {
             "recovery_classification": "RECOVERED_IMMUTABLE_COMPLETE",
             "provider_attempt": {
@@ -445,7 +488,7 @@ def test_recovered_ambiguous_usage_accepts_exact_provider_free_immutable_replay(
     "corruption",
     (
         "impostor", "wrong-receipt", "unknown-original", "wrong-context",
-        "second-dispatch",
+        "wrong-effect", "wrong-amount", "second-dispatch",
     ),
 )
 def test_recovered_ambiguous_usage_rejects_unproved_immutable_replay(
@@ -514,6 +557,31 @@ def test_recovered_ambiguous_usage_rejects_unproved_immutable_replay(
                 "UPDATE model_work_outcomes SET outcome_digest=?,record_json=? "
                 "WHERE envelope_id=?",
                 (digest, json.dumps(outcome, sort_keys=True), second.envelope_id),
+            )
+        elif corruption in {"wrong-effect", "wrong-amount"}:
+            row = connection.execute(
+                "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts "
+                "WHERE ingest_id=? AND attempt_number=2",
+                (unit.ingest_id,),
+            ).fetchone()
+            receipt = json.loads(row[0])
+            if corruption == "wrong-effect":
+                receipt["token_usage"]["observed_total_tokens"] = 1
+            else:
+                receipt["accounting"]["current_attempt"][
+                    "actual_usd_microunits"
+                ] = 1
+            unsigned = dict(receipt)
+            unsigned.pop("receipt_digest")
+            digest = usage_module.digest_bytes(
+                usage_module.canonical_json_bytes(unsigned)
+            )
+            receipt["receipt_digest"] = digest
+            connection.execute(
+                "UPDATE unpublished_graphiti_attempt_receipts "
+                "SET receipt_digest=?,receipt_json=? WHERE ingest_id=? "
+                "AND attempt_number=2",
+                (digest, json.dumps(receipt, sort_keys=True), unit.ingest_id),
             )
     if corruption == "second-dispatch":
         allocation, identity = _bound_request(
