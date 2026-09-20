@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from ._event_store_base import _validation_stage
+from ._projection_retention import (
+    RETIRED_IGNORED_STATE_ROWS, retired_ignored_attempt, retired_ignored_attempt_from_state,
+)
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -1402,7 +1405,7 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
         ))
         attempt = next(attempts, None)
         for state in conn.execute(
-            "SELECT * FROM projection_delivery_states ORDER BY generation_id,ledger_seq"
+            RETIRED_IGNORED_STATE_ROWS + "ORDER BY s.generation_id,s.ledger_seq"
         ):
             source = self._require_delivery_source_integrity(conn, state)
             key = (str(state["generation_id"]), int(state["ledger_seq"]))
@@ -1469,6 +1472,21 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
                     )
                 latest = attempt
                 attempt = next(attempts, None)
+            if latest is None and count == 0:
+                latest = retired_ignored_attempt_from_state(state)
+                if latest is not None:
+                    try:
+                        self._validate_delivery_outcome(
+                            mapping, ProjectionDeliveryOutcome.IGNORED_OPTIONAL,
+                            complete_required=complete_required,
+                        )
+                    except ProjectionStateError as exc:
+                        raise AuthorityPersistenceError(
+                            "retired ignored delivery violates retained mapping"
+                        ) from exc
+                    if required:
+                        raise AuthorityPersistenceError("retired ignored delivery is required")
+                    count = 1
             if latest is None or count != int(state["attempt_count"]):
                 raise AuthorityPersistenceError(
                     "projection delivery attempt history is not contiguous"
@@ -3146,6 +3164,8 @@ class _ProjectionAuthorityStore(_EventAuthorityStore):
             "WHERE a.authority_event_id=?",
             (event_id,),
         ).fetchone()
+        if row is None:
+            row = retired_ignored_attempt(conn, event_id)
         if row is None:
             raise AuthorityPersistenceError(
                 "projection command replay lacks delivery result"

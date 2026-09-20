@@ -79,7 +79,8 @@ class _StreamingConnection:
             if " ".join(sql.split()).startswith(prefix):
                 self.lookups[kind] += 1
         for table, kind in (("projection_delivery_attempts", "attempt"), ("projection_delivery_states", "state")):
-            if " ".join(sql.split()).startswith(f"SELECT * FROM {table}"):
+            if (" ".join(sql.split()).startswith(f"SELECT * FROM {table}")
+                    or (kind == "state" and sql.startswith(projection_store.RETIRED_IGNORED_STATE_ROWS))):
                 return _StreamingCursor(cursor, self, kind)
         return cursor
 

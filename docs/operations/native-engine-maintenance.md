@@ -30,9 +30,20 @@ disposable-workspace scope. Historical campaign authorisations are excluded.
 The UTC expiry cutoff is recorded in the report. An access ID or canonical
 digest referenced by authority, private receipts or CAS remains protected at
 any age; otherwise-unreferenced security chains are reclaimed with the read.
-No source/admission, command, attempt, provider accounting or ACK is deleted.
+No source/admission, command, Graphiti attempt, provider accounting or ACK is deleted.
 Ordinary `hydrate` still records new deliveries; `rehydrate` authenticates and
 checks current rights and bytes again, but can return its unchanged receipt.
+
+Retired projection no-op detail has a separate narrow retention rule. Once a
+generation has been `RETIRED` for seven days, an unreferenced, finalized,
+single-attempt `IGNORED_OPTIONAL` delivery may discard its duplicated attempt
+row. Its exact delivery-state summary and canonical command, payload, event,
+checkpoint and lifecycle remain. OPEN validates the source and mapping plus
+that canonical delivery payload; replay reconstructs the identical public
+delivery receipt. Active/building generations, required deliveries, applied
+work, failures, retries and partial histories are not eligible. Referenced
+attempt IDs remain protected. Every non-deleted attempt row has its own
+before/after content hash, in addition to the other business-row hash.
 
 Application uses SQLite's transaction rollback and in-place VACUUM, not a full
 store backup. Ensure space for SQLite's temporary sort/journal/compaction files.
