@@ -90,6 +90,13 @@ _PRIOR_V9_WRITE_ADMISSION_POLICY_VERSIONS = frozenset(
     "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
     "newsroom.named-entity.v13+newsroom.cont-originality.v3+"
     "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1"
+} | {
+    "newsroom.write-admission.v9+newsroom.evid-012.v7+"
+    "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
+    "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
+    "newsroom.named-entity.v13+newsroom.cont-originality.v3+"
+    "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1+"
+    "newsroom.qualification-relation.v1"
 }
 QUALIFICATION_RELATION_POLICY_VERSION = "newsroom.qualification-relation.v1"
 WRITE_ADMISSION_POLICY_VERSION = (
