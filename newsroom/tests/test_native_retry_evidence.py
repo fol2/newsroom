@@ -479,9 +479,22 @@ def test_recovered_ambiguous_usage_accepts_exact_provider_free_immutable_replay(
 
     assert digest.startswith("sha256:")
     evidence = _proof(service, unit, 4)
-    assert evidence.zero_dispatch_attempts == (1,)
-    assert evidence.settled_provider_attempts == (3,)
-    assert evidence.unresolved_attempts == (2, 4)
+    # Consume the proof through the real queue, not just its digest producer.
+    connection = connect(service.path)
+    try:
+        _failures(connection, unit, count=4)
+        before = connection.execute("SELECT count(*) FROM model_invocation_allocations").fetchone()[0]
+        queued = _queue(connection, (unit,), model_usage=service,
+                        recovered_ambiguous_attempts={unit.ingest_id: 5},
+                        authenticated_rejected_attempts={unit.ingest_id: (4,)})
+        assert [item[-1].ingest_id for item in queued] == [unit.ingest_id]
+        assert evidence.zero_dispatch_attempts == (1, 2)
+        assert evidence.settled_provider_attempts == (3,)
+        assert evidence.unresolved_attempts == (4,)
+        assert connection.execute("SELECT count(*) FROM model_invocation_allocations").fetchone()[0] == before
+        assert connection.execute("SELECT status FROM unpublished_graphiti_spend WHERE ingest_id=? AND attempt_number=4", (unit.ingest_id,)).fetchone()[0] == "UNRECONCILED"
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize(
