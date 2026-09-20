@@ -4231,16 +4231,31 @@ class ModelUsageService:
                 attempt_numbers = tuple(sorted(set(selected_attempts.values()) | missing))
                 unresolved = sorted(set(unresolved) | missing)
                 settled_attempts = tuple(settled)
-                result[ingest_id] = (
-                    GraphitiIngestRetryEvidence(
-                        attempt_numbers=attempt_numbers,
-                        zero_dispatch_attempts=tuple(zero),
-                        settled_provider_attempts=settled_attempts,
-                        latest_settled_provider_attempt=(
-                            settled_attempts[-1] if settled_attempts else None
-                        ),
-                        unresolved_attempts=tuple(unresolved),
+                retry = GraphitiIngestRetryEvidence(
+                    attempt_numbers=attempt_numbers,
+                    zero_dispatch_attempts=tuple(zero),
+                    settled_provider_attempts=settled_attempts,
+                    latest_settled_provider_attempt=(
+                        settled_attempts[-1] if settled_attempts else None
                     ),
+                    unresolved_attempts=tuple(unresolved),
+                )
+                if native_attempts is not None:
+                    # All consumers, including the queue, must see the same
+                    # authenticated provider-free replay classification.
+                    for number in retry.unresolved_attempts:
+                        _claimed, replay = _native_immutable_replay_proof(
+                            connection, ingest_id=ingest_id,
+                            attempt_number=number, evidence=retry,
+                        )
+                        if replay is not None:
+                            retry = replace(
+                                retry,
+                                zero_dispatch_attempts=tuple(sorted((*retry.zero_dispatch_attempts, number))),
+                                unresolved_attempts=tuple(n for n in retry.unresolved_attempts if n != number),
+                            )
+                result[ingest_id] = (
+                    retry,
                     sum(len(leaves) for key, leaves in by_attempt.items()
                         if envelopes[key].ingest_id == ingest_id),
                 )
