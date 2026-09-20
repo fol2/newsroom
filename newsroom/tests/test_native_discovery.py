@@ -289,8 +289,9 @@ def test_native_rights_lookup_does_not_mint_or_consume_beta_fixture_packets(tmp_
         )
         refreshed_admission = "121d3431-fbdd-49c9-aa69-67a59024da56"
         refreshed_digest = "sha256:" + "c" * 64
-        # Unchanged terms preserve semantic assessment identity, while this
-        # later Gate must cite the new real observation, not the prior clock.
+        # A fresh observation of identical rights does not change the Gate.
+        # Its original provenance remains immutable; the new observation is
+        # independently retained by the rights service.
         rights_snapshot[0] = {
             **rights_snapshot[0],
             "observation_admission_id": refreshed_admission,
@@ -301,19 +302,20 @@ def test_native_rights_lookup_does_not_mint_or_consume_beta_fixture_packets(tmp_
             now=LATER,
             proof=proof(),
         )
-        assert refreshed.current_gate.request.decision_ordinal == 2
+        assert refreshed.current_gate == status.current_gate
+        assert calls[-1] == (unit.source_id, unit.source_definition_url, LATER)
         assert refreshed.current_disposition is not None
         assert (
             refreshed.current_disposition.request.gate_decision_id
             == refreshed.current_gate.request.decision_id
         )
-        assert refreshed.current_disposition.request.decision_ordinal == 2
+        assert refreshed.current_disposition == status.current_disposition
         assert refreshed.current_gate.request.supporting_reasons[0].references == (
             ReasonReference(
                 "RIGHTS_ASSESSMENT", RIGHTS_ADMISSION_ID, RIGHTS_BLOB_DIGEST
             ),
             ReasonReference(
-                "RIGHTS_OBSERVATION", refreshed_admission, refreshed_digest
+                "RIGHTS_OBSERVATION", RIGHTS_OBSERVATION_ID, RIGHTS_OBSERVATION_DIGEST
             ),
         )
         before_replay = system.discovery.dispositions(
@@ -371,6 +373,7 @@ def test_reopen_repairs_a_current_gate_missing_its_queued_disposition(tmp_path):
             assert initial.current_disposition is not None
             rights[0] = {
                 **rights[0],
+                "assessment_blob_digest": "sha256:" + "d" * 64,
                 "observation_admission_id": (
                     "121d3431-fbdd-49c9-aa69-67a59024da56"
                 ),
@@ -421,3 +424,94 @@ def test_reopen_repairs_a_current_gate_missing_its_queued_disposition(tmp_path):
             assert system.discovery.dispositions(
                 repaired.lead.request.lead_id, limit=10, proof=proof()
             ) == before_replay
+
+
+@pytest.mark.parametrize("fresh", (True, False))
+def test_fresh_rights_observations_do_not_repeat_gate_commands(tmp_path, fresh):
+    database = tmp_path / "authority.sqlite3"
+    clock = [NOW if fresh else UtcTimestamp.parse("2026-09-12T12:00:00.000000Z")]
+    rights = _current_rights()
+    calls = []
+
+    def current_rights(*args):
+        calls.append(args)
+        return rights
+
+    def command_count():
+        with sqlite3.connect(database) as connection:
+            return connection.execute("SELECT count(*) FROM authority_commands").fetchone()[0]
+
+    with sqlite3.connect(":memory:") as proving, open_discovery_system(
+        database, clock=lambda: clock[0]
+    ) as system:
+        unit = _unit()
+        _seed(system, unit)
+        controller = NativeDiscovery(
+            sources=system.sources, checks=system.checks, discovery=system.discovery,
+            proving=proving, rights_for=current_rights,
+        )
+        delivered = controller.deliver(unit, now=clock[0], proof=proof())
+        initial = controller.admit_lead(delivered, now=clock[0], proof=proof())
+        before = command_count()
+        rights.update(observation_admission_id="121d3431-fbdd-49c9-aa69-67a59024da56",
+                      observation_blob_digest="sha256:" + "c" * 64)
+        for _ in range(2):
+            current = controller.admit_lead(delivered, now=clock[0], proof=proof())
+            assert current.current_gate == initial.current_gate
+            assert current.current_disposition == initial.current_disposition
+        assert len(calls) == 3
+        assert command_count() == before
+
+        # Changed terms/policy/expiry change the retained assessment, so reuse ends.
+        rights["assessment_blob_digest"] = "sha256:" + "d" * 64
+        changed = controller.admit_lead(delivered, now=clock[0], proof=proof())
+        assert changed.current_gate.request.decision_ordinal == 2
+        assert command_count() > before
+        assert changed.current_gate.request.supporting_reasons[0].references[1] == (
+            ReasonReference("RIGHTS_OBSERVATION", rights["observation_admission_id"],
+                            rights["observation_blob_digest"])
+        )
+
+
+        # No current observation must still hold, even if the assessment exists.
+        del rights["observation_admission_id"]
+        held = controller.admit_lead(delivered, now=clock[0], proof=proof())
+        assert held.current_gate.request.decision_ordinal == 3
+        assert held.current_gate.request.outcome is GateOutcome.OPERATIONAL_HOLD
+        before = command_count()
+        assert controller.admit_lead(
+            delivered, now=clock[0], proof=proof()
+        ).current_gate == held.current_gate
+        assert command_count() == before
+
+
+def test_gate_reuse_rechecks_freshness_and_compares_effective_policy(tmp_path, monkeypatch):
+    import newsroom.control_plane.native_discovery as native
+
+    clock = [NOW]
+    with sqlite3.connect(":memory:") as proving, open_discovery_system(
+        tmp_path / "authority.sqlite3", clock=lambda: clock[0]
+    ) as system:
+        unit = _unit()
+        _seed(system, unit)
+        controller = NativeDiscovery(
+            sources=system.sources, checks=system.checks, discovery=system.discovery,
+            proving=proving, rights_for=lambda *_: _current_rights(),
+        )
+        delivered = controller.deliver(unit, now=NOW, proof=proof())
+        initial = controller.admit_lead(delivered, now=NOW, proof=proof())
+        original_policy = native.policy
+        monkeypatch.setattr(native, "policy", lambda name: (
+            native.VersionedPolicyRef("hermes-delivered-gate", "v2")
+            if name == "gate" else original_policy(name)
+        ))
+        changed = controller.admit_lead(delivered, now=NOW, proof=proof())
+        assert changed.current_gate.request.decision_ordinal == 2
+        assert changed.current_gate.request.basis == initial.current_gate.request.basis
+        assert changed.current_gate.request.gate_policy == native.policy("gate")
+
+        clock[0] = UtcTimestamp.parse("2026-09-12T12:00:00.000000Z")
+        stale = controller.admit_lead(delivered, now=clock[0], proof=proof())
+        assert stale.current_gate.request.decision_ordinal == 3
+        assert stale.current_gate.request.basis.time_validity.value == "STALE"
+        assert stale.current_gate.request.outcome is GateOutcome.OPERATIONAL_HOLD
