@@ -2210,6 +2210,15 @@ def test_proved_hko_representation_upgrade_has_one_new_accounted_contract_attemp
             assessor.assess_with_boundary(candidate, current, (), (), before_dispatch=None, cached_only=True)
         result = assessor(candidate, current, (), ())
         assert assessor(candidate, current, (), ()) == result
+        assert assessor.assess_with_boundary(
+            candidate, current, (), (), before_dispatch=None, cached_only=True,
+        ) == result
+        monkeypatch.setattr(module, "_legacy_hko_base_digests", lambda *_: frozenset())
+        for cached_only in (True, False):
+            with pytest.raises(NativeEvidenceHold, match="INPUT_CHANGED"):
+                assessor.assess_with_boundary(
+                    candidate, current, (), (), before_dispatch=None, cached_only=cached_only,
+                )
         assert calls == ["provider", "provider"]
         with sqlite3.connect(service.path) as retained:
             assert retained.execute("SELECT count(*) FROM model_invocation_allocations").fetchone() == (2,)

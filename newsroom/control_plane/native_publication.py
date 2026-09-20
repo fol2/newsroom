@@ -32,6 +32,7 @@ from newsroom.control_plane.native_evidence import (
 )
 from newsroom.control_plane.native_assessor import (
     assessment_revalidation_due,
+    same_assessment_producer,
     RetainedAssessorContractFailure,
     RetainedAssessorPreDispatchFailure,
 )
@@ -727,11 +728,8 @@ class NativePublicationContinuation:
                     if isinstance(superseded, dict)
                     else None
                 )
-                consumer_only_revalidation = (
-                    type(prior_contract) is str
-                    and self._assessment_contract_version is not None
-                    and prior_contract.split("+", 1)[0]
-                    == self._assessment_contract_version.split("+", 1)[0]
+                consumer_only_revalidation = same_assessment_producer(
+                    prior_contract, self._assessment_contract_version,
                 )
                 evidence = self._evidence.acquire_and_retain(
                     candidate_version_id=candidate_version_id,

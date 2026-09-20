@@ -70,6 +70,30 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         connection.close()
 
 
+@pytest.mark.parametrize("same_producer", (True, False))
+def test_exact_consumer_revalidation_precedes_new_provider_work(tmp_path, monkeypatch, same_producer):
+    pipeline, journal, connection, units, calls, _ = _open(tmp_path, monkeypatch)
+    pipeline._assessment_contract_version = "assessor.v15+new-consumer"
+    journal.land((units[0],))
+    journal.advance(units[0].revision_id, stage="EVIDENCE_HOLD", facts={
+        "graphiti_receipts": [{"retained": True}],
+        "candidate_version_id": "candidate:one",
+        "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        "assessment_contract_version": (
+            "assessor.v15+old-consumer" if same_producer else "assessor.v14+old-consumer"
+        ),
+    })
+    try:
+        pipeline.tick(cycle_id="first")
+        publication = calls.index(("publish", units[0].revision_id))
+        provider = calls.index(("graphiti", units[1].item_key))
+        assert (publication < provider) is same_producer
+        pipeline.tick(cycle_id="unchanged")
+        assert calls.count(("publish", units[0].revision_id)) == 1
+    finally:
+        connection.close()
+
+
 def test_first_empty_source_poll_retains_one_reopenable_terminal_reference(tmp_path, monkeypatch):
     pipeline, journal, connection, _units, _calls, dispositions = _open(tmp_path, monkeypatch)
     dispositions[0] = ()
