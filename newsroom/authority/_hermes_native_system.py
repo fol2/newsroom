@@ -22,6 +22,7 @@ from newsroom.increment6.collision import CurrentCollisionEffectEnforcer
 from newsroom.increment6.dispositions import (
     CurrentCandidateCitationReadPort,
     ProposalDispositionStore,
+    _require_verification_snapshot,
 )
 from newsroom.increment6.hypotheses import _compose_event_hypothesis_authority
 from newsroom.increment6.lineage import (
@@ -404,19 +405,30 @@ def open_hermes_native_authority_system(
                 work_items=work_items,
             )
             executions._TriageExecutionAuthority__store._transaction_lock = operation_lock
+            verified_dispositions = []
             dispositions = ProposalDispositionStore(
                 connection,
                 retrieval_authority,
                 authenticator,
                 current_candidate_citations,
                 work_items=work_items,
+                _open_verification=verified_dispositions,
             )
+            # The root Event store holds the lifetime POSIX writer lock, so no
+            # compliant writer can commit after this verified snapshot. The
+            # in-transaction checks below also reject noncompliant changes.
+            disposition_values, disposition_snapshot = verified_dispositions[0]
+            verified_hypotheses = []
             hypothesis_store = _HypothesisStore(
                 connection, retrieval_authority, authenticator, clock,
                 current_candidate_citations,
                 dispositions=dispositions,
+                verified_dispositions=disposition_values,
+                verified_disposition_snapshot=disposition_snapshot,
+                _open_verification=verified_hypotheses,
             )
             hypothesis_store._lock = operation_lock
+            hypothesis_values, hypothesis_snapshot = verified_hypotheses[0]
 
         relationship_store = _share_store(_SharedRelationshipStore, root)
         with relationship_store._hypothesis_rows():
@@ -449,11 +461,14 @@ def open_hermes_native_authority_system(
         # These facades share one writer and one stable validation transaction.
         # Pass its verified upstream values directly; retain nothing across calls.
         with operation_lock, relationship_store._transaction():
+            _require_verification_snapshot(connection, hypothesis_snapshot)
             relationship_store._adopt()
             try:
                 with _validation_stage("native_relationships"):
                     _verify_relationship_event_coverage(connection)
-                    relationship_inputs = relationship_store._verify_relationships()
+                    relationship_inputs = relationship_store._verify_relationships(
+                        verified_versions=hypothesis_values
+                    )
                 with _validation_stage("native_lineage"):
                     lineage_store._verify_global_event_coverage()
                     lineage_store._verify(relationship_inputs=relationship_inputs)

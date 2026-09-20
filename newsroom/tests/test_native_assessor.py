@@ -2216,3 +2216,95 @@ def test_proved_hko_representation_upgrade_has_one_new_accounted_contract_attemp
             assert retained.execute("SELECT count(*) FROM model_invocation_terminals").fetchone() == (2,)
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("declared", (True, False))
+def test_source_declared_acronym_revalidates_retained_output_without_dispatch(
+    tmp_path, monkeypatch, retained_22589_assessment, declared,
+):
+    from newsroom.control_plane.native_evidence import rights_eligibility_digest
+
+    candidate, base, source, acquired, raw = _qualification_assessor_inputs(
+        retained_22589_assessment,
+    )
+    claim_text = "Official deadline changed for GCO."
+    raw_claim = raw["package"]["governed_claims"][0]
+    raw_claim.update(claim=claim_text, supporting_excerpt=claim_text,
+                     rendered_assertion_zh_hant_hk="GCO限期已更改。")
+    raw["package"]["substantive_new_information"] = [claim_text]
+    raw["package"]["qualification_evidence"][0]["test_evidence"].update(
+        material_relation_span=claim_text, reader_action=claim_text,
+    )
+    text = ("General Consent Order (GCO).\n\n" if declared else "") + claim_text
+    body = text.encode()
+    base = replace(base, passages=(text,), observation_digests=(digest_bytes(body),))
+    acquired = SimpleNamespace(**{
+        **vars(acquired), "body": body, "body_digest": digest_bytes(body),
+        "rights_eligibility_digest": rights_eligibility_digest(
+            source.rights, body_digest=digest_bytes(body),
+            transport_digest=acquired.transport_evidence_digest,
+            exclusion_signals=(), text_only=True,
+        ),
+    })
+    service, usage = _usage(tmp_path, monkeypatch)
+    execution = NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {
+        "usage_basis": "PROVIDER_REPORTED", "input_tokens": 1, "output_tokens": 1,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
+        "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2,
+    })
+    allocation = usage.begin(candidate, base, "retained declared acronym fixture")
+    dispatch_at = usage.mark_dispatch(allocation)
+    usage.retain_result(allocation, execution, dispatch_at=dispatch_at)
+    usage.complete(allocation, outcome="ASSESSOR_VALIDATION_FAILED", execution=execution,
+                   provider_dispatched=True, dispatch_at=dispatch_at,
+                   failure_class="ASSESSMENT_VALIDATION_FAILED")
+    def retained_rows():
+        with sqlite3.connect(service.path) as connection:
+            return tuple(connection.execute(f"SELECT * FROM {table}").fetchall()
+                         for table in ("model_invocation_allocations", "model_invocation_terminals", "ledger"))
+    before = retained_rows()
+    assessor = AutonomousNativeEvidenceAssessor(
+        lambda _: pytest.fail("consumer correction dispatched provider"),
+        usage=usage, dispatch_fence=nullcontext,
+    )
+    if declared:
+        result = assessor.assess_with_boundary(
+            candidate, base, (source,), (acquired,), before_dispatch=None, cached_only=True,
+        )
+        assert result.governed_claims[0].named_entities == ("GCO",)
+        assert len(result.qualification_evidence) == 1
+        package = replace(base, **{
+            name: getattr(result, name) for name in (
+                "substantive_new_information", "governed_claims", "qualification_evidence",
+                "selection_rationale", "geography", "categories", "explicit_exclusions",
+            )
+        })
+        records = NativeEvidenceController._records(base, package, (source,), (acquired,), result)
+        retained = tuple((record["record_id"], record["record_type"],
+                          canonical_json_bytes(record).decode(), digest_bytes(canonical_json_bytes(record)))
+                         for record in records)
+        assert validate_governed_evidence_records(
+            candidate_id=base.candidate_id, source_inventory=((source.unit.source_id, acquired.canonical_url),),
+            base_package_digest=base.digest, package=package, retained_records=retained,
+        ) is not None
+    else:
+        with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+            assessor.assess_with_boundary(
+                candidate, base, (source,), (acquired,), before_dispatch=None, cached_only=True,
+            )
+    assert retained_rows() == before
+
+
+def test_weather_record_metadata_failure_revalidates_once_per_consumer_contract():
+    from newsroom.control_plane.native_assessor import assessment_revalidation_due
+    from newsroom.control_plane.native_composition import ASSESSMENT_CONTRACT_VERSION
+
+    facts = {
+        "reason": "EVIDENCE_VALIDATION_HOLD",
+        "assessment_contract_version": ASSESSMENT_CONTRACT_VERSION.replace(
+            "newsroom.named-entity.v15", "newsroom.named-entity.v14",
+        ),
+    }
+    assert assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)
+    facts["assessment_contract_version"] = ASSESSMENT_CONTRACT_VERSION
+    assert not assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)

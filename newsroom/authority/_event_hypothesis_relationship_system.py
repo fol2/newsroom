@@ -6,7 +6,7 @@ import json
 import sqlite3
 import stat
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
@@ -278,6 +278,7 @@ def _verify_relationship_reads_in_transaction(
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
     validate_retained_event: Callable[[str], None],
+    verified_versions: Mapping[str, EventHypothesisVersion] | None = None,
 ) -> tuple[
     dict[str, EventHypothesisVersion],
     dict[str, RetainedRelationshipDecisionReceipt],
@@ -286,8 +287,18 @@ def _verify_relationship_reads_in_transaction(
         raise RelationshipContractError(
             "relationship verification requires an active transaction"
         )
-    with _transaction_hypothesis_rows(connection):
-        versions = hypotheses._verify()
+    if verified_versions is None:
+        with _transaction_hypothesis_rows(connection):
+            versions = hypotheses._verify()
+    elif type(verified_versions) is not dict or any(
+        type(value) is not EventHypothesisVersion or key != value.version_id
+        for key, value in verified_versions.items()
+    ):
+        raise RelationshipContractError(
+            "verified Hypothesis versions differ"
+        )
+    else:
+        versions = dict(verified_versions)
     receipts: dict[str, RetainedRelationshipDecisionReceipt] = {}
     rows = connection.execute(
         "SELECT decision_id,authority_event_id FROM "
@@ -432,7 +443,11 @@ class _RelationshipEventStore(_EventAuthorityStore):
     def _load_row(self, decision_id: str) -> RelationshipAssessment:
         return self._load_receipt(decision_id).assessment
 
-    def _verify_relationships(self) -> tuple[
+    def _verify_relationships(
+        self,
+        *,
+        verified_versions: Mapping[str, EventHypothesisVersion] | None = None,
+    ) -> tuple[
         dict[str, EventHypothesisVersion],
         dict[str, RetainedRelationshipDecisionReceipt],
     ]:
@@ -442,6 +457,7 @@ class _RelationshipEventStore(_EventAuthorityStore):
             self._command_registry,
             self._payload_schemas,
             self._validate_retained_event,
+            verified_versions=verified_versions,
         )
         _verify_relationship_event_coverage(
             self._connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE

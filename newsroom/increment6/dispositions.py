@@ -56,6 +56,22 @@ VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING = (
     "EXACT_PROPOSAL_FINDING_SET_AND_CURRENT_LEAD_HEAD"
 )
 
+
+def _verification_snapshot(connection: sqlite3.Connection) -> tuple[int, int, int]:
+    return (
+        connection.total_changes,
+        int(connection.execute("PRAGMA data_version").fetchone()[0]),
+        int(connection.execute("PRAGMA schema_version").fetchone()[0]),
+    )
+
+
+def _require_verification_snapshot(
+    connection: sqlite3.Connection, expected: tuple[int, int, int]
+) -> None:
+    if _verification_snapshot(connection) != expected:
+        raise RuntimeError("native semantic verification snapshot changed")
+
+
 _FINDING_SET_SCHEMA_VERSION = "newsroom.increment6.triage-proposal-finding-set.v1"
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,255}\Z")
 # #356 has no public raw-byte constant. Its closed field bounds permit up to
@@ -1427,6 +1443,9 @@ class ProposalDispositionStore:
         current_candidate_citations: "CurrentCandidateCitationReadPort | None" = None,
         *,
         work_items: TriageWorkItemStore | None = None,
+        _open_verification: list[
+            tuple[dict[str, ProposalDisposition], tuple[int, int, int]]
+        ] | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -1446,6 +1465,10 @@ class ProposalDispositionStore:
                     or work_items._retrieval_authority is not retrieval_authority
                 )
             )
+            or (
+                _open_verification is not None
+                and (type(_open_verification) is not list or _open_verification)
+            )
         ):
             raise DispositionContractError(
                 "disposition store requires exact trusted collaborators"
@@ -1463,8 +1486,11 @@ class ProposalDispositionStore:
                 connection, retrieval_authority
             )
             self._begin()
-            self._verify_integrity()
+            verified = self._verify_integrity()
+            snapshot = _verification_snapshot(connection)
             connection.execute("COMMIT")
+            if _open_verification is not None:
+                _open_verification.append((verified, snapshot))
         except BaseException as exc:
             self._rollback()
             if not isinstance(exc, Exception):
