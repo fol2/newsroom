@@ -713,6 +713,14 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
     )
     candidate_connection.execute("BEGIN IMMEDIATE")
     try:
+        # A v2 default must also replay the original v1 admission request,
+        # including a restart after object retention but before acknowledgement.
+        replayed_receipt, replayed_story = reopened.admit_story_version(
+            request, package_admission_id=retained.package_admission_id,
+            decision_reference=decision_reference, candidate_port=candidate_port,
+            proof=proof(),
+        )
+        assert (replayed_receipt, replayed_story) == (receipt, story)
         assert reopened.read_story_version(
             receipt, candidate_port=candidate_port, proof=proof()
         ) == story

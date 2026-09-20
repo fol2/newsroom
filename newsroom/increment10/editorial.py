@@ -610,14 +610,25 @@ class NativeEditorial:
             raise EditorialHold(reason="EDITORIAL_POLICY_DECISION_MISSING") from None
         story = self._build_story(request, retained, decision, decision_reference)
         raw = story.canonical_bytes()
-        admitted = self._objects.admit(
+        admission = self._objects.admit(
             ObjectAdmissionRequest(
                 STORY_ADMISSION_TYPE,
                 f"story-version:{request.story_id}:{story.aggregate_version}",
             ),
             raw,
             proof=proof,
-        ).admission
+        )
+        admitted = admission.admission
+        if admission.replayed and admitted.blob.blob_digest != story.digest:
+            # Object admission can predate the writer upgrade or a crash before
+            # its Story event. Accept only the exact old bytes reconstructed
+            # from these same immutable package/decision/request identities.
+            legacy = self._build_story(
+                request, retained, decision, decision_reference,
+                writer_id="newsroom.offline-exact-copy.v1",
+            )
+            if legacy.digest == admitted.blob.blob_digest:
+                story = legacy
         if (
             admitted.definition_digest != self._story_admission_definition
             or admitted.object_class != STORY_CLASS
