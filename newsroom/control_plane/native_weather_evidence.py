@@ -67,6 +67,42 @@ UK10_ATTRIBUTION = (
 HKO_COMPLETED_EVENT_PREFIX = "Official status changed for completed historical event: "
 
 
+def _hko_time_expressions(value: str) -> tuple[str, str]:
+    instant = datetime.fromisoformat(value)
+    if instant.tzinfo is None:
+        raise ValueError("HKO warning time lacks a zone")
+    local = instant.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    clock = local.strftime("%H:%M:%S" if local.second or local.microsecond else "%H:%M")
+    rendered_clock = local.strftime(
+        "%H時%M分%S秒" if local.second or local.microsecond else "%H時%M分"
+    )
+    if local.microsecond:
+        fraction = f".{local.microsecond:06d}"
+        clock += fraction
+        rendered_clock = rendered_clock.removesuffix("秒") + fraction + "秒"
+    months = (
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    )
+    return (
+        f"{local.day} {months[local.month - 1]} {local.year} at {clock}",
+        f"{local.year}年{local.month}月{local.day}日{rendered_clock}",
+    )
+
+
+def _hko_warning(raw: bytes) -> tuple[dict, str]:
+    value = json.loads(raw, object_pairs_hook=_unique_object)
+    if type(value) is not dict or len(value) != 1:
+        raise ValueError("one exact HKO warning is required")
+    warning = next(iter(value.values()))
+    if type(warning) is not dict:
+        raise ValueError("HKO warning differs")
+    name, kind = warning.get("name"), warning.get("type", "")
+    if type(name) is not str or not name.strip() or type(kind) is not str:
+        raise ValueError("HKO warning name/type differs")
+    return warning, name if not kind or kind in name else kind + name
+
+
 def hko_evidence_body(raw: bytes) -> bytes:
     """Expose documented structured facts without losing the exact source JSON.
 
@@ -74,32 +110,16 @@ def hko_evidence_body(raw: bytes) -> bytes:
     or an absent warning is not evidence of cancellation or improved safety.
     https://data.weather.gov.hk/weatherAPI/doc/HKO_Open_Data_API_Documentation.pdf
     """
-    value = json.loads(raw, object_pairs_hook=_unique_object)
-    if type(value) is not dict or len(value) != 1:
-        raise ValueError("one exact HKO warning is required")
-    warning = next(iter(value.values()))
+    warning, label = _hko_warning(raw)
     verbs = {"ISSUE": "issued", "REISSUE": "reissued", "CANCEL": "cancelled", "EXTEND": "extended"}
-    if type(warning) is not dict or warning.get("actionCode") not in {*verbs, "UPDATE"}:
+    if warning.get("actionCode") not in {*verbs, "UPDATE"}:
         raise ValueError("HKO warning action is unsupported")
-    name, kind = warning.get("name"), warning.get("type", "")
-    if type(name) is not str or not name.strip() or type(kind) is not str:
-        raise ValueError("HKO warning name/type differs")
-    label = name if not kind or kind in name else kind + name
     action = warning["actionCode"]
     facts = ([] if action == "UPDATE" else [
         f"Official status changed: 香港天文台 {verbs[action]} the {label}."
     ])
-    months = ("January", "February", "March", "April", "May", "June", "July",
-              "August", "September", "October", "November", "December")
     for field, description in (("issueTime", "issued"), ("updateTime", "updated")):
-        instant = datetime.fromisoformat(warning[field])
-        if instant.tzinfo is None:
-            raise ValueError("HKO warning time lacks a zone")
-        local = instant.astimezone(ZoneInfo("Asia/Hong_Kong"))
-        clock = local.strftime("%H:%M:%S" if local.second or local.microsecond else "%H:%M")
-        if local.microsecond:
-            clock += f".{local.microsecond:06d}"
-        date = f"{local.day} {months[local.month - 1]} {local.year} at {clock}"
+        date, _rendered = _hko_time_expressions(warning[field])
         facts.append(f"The {label} warning record was {description} on {date} (香港時間).")
     return raw + b"\n\n" + "\n".join(facts).encode("utf-8")
 
@@ -123,26 +143,31 @@ def hko_completed_event_body(raw: bytes) -> bytes:
     """Add one dated terminal-event span without inventing a cancellation time."""
 
     body = hko_evidence_body(raw)
-    value = json.loads(raw, object_pairs_hook=_unique_object)
-    warning = next(iter(value.values()))
-    if warning.get("actionCode") != "CANCEL":
-        raise ValueError("completed HKO event is not an explicit cancellation")
-    name, kind = warning["name"], warning.get("type", "")
-    label = name if not kind or kind in name else kind + name
-    updated = body.decode("utf-8").splitlines()[-1]
-    prefix = f"The {label} warning record was updated on "
-    if not updated.startswith(prefix) or not updated.endswith("."):
-        raise ValueError("completed HKO event update time differs")
-    date = updated.removeprefix(prefix).removesuffix(".")
-    sentence = (
-        f"{HKO_COMPLETED_EVENT_PREFIX}香港天文台 cancelled the {label} "
-        f"(record updated on {date})."
+    sentence, _rendered, _source_date, _rendered_date = (
+        hko_completed_event_claim(raw)
     )
     disclaimer = (
         "The timestamp above is the record update time and no exact "
         "cancellation time is asserted."
     )
     return body + b"\n" + sentence.encode("utf-8") + b"\n" + disclaimer.encode("utf-8")
+
+
+def hko_completed_event_claim(raw: bytes) -> tuple[str, str, str, str]:
+    """Return the sole exact dated source/rendering pair for retained CANCEL."""
+
+    warning, label = _hko_warning(raw)
+    if warning.get("actionCode") != "CANCEL":
+        raise ValueError("completed HKO event is not an explicit cancellation")
+    source_date, rendered_date = _hko_time_expressions(warning["updateTime"])
+    source = (
+        f"{HKO_COMPLETED_EVENT_PREFIX}香港天文台 cancelled the {label} "
+        f"(record updated on {source_date} (香港時間))."
+    )
+    rendered = (
+        f"香港天文台已取消{label}；官方紀錄於香港時間{rendered_date}更新。"
+    )
+    return source, rendered, source_date, rendered_date
 
 
 class NativeWeatherEvidenceAcquisition:

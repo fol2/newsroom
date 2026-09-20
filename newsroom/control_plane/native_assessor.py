@@ -129,6 +129,10 @@ SYSTEM = (
     "Do not infer present safety, the absence of other warnings or an exact "
     "cancellation time from that historical record. Apply the same substantive "
     "news test; old observation alone is not new information. "
+    "If required_historical_headline is supplied and the event qualifies, copy "
+    "its exact claim, rendering and localised date pair for the HEADLINE. This "
+    "fixed field rendering preserves the record-update relationship; it does "
+    "not require selecting an otherwise unqualified event. "
     "The claim "
     "and supporting_excerpt fields must each be copied byte-for-byte as an exact "
     "contiguous source-language span of the same UTF-8 source body. Every "
@@ -1310,6 +1314,19 @@ def _legacy_hko_base_digests(base, sources, acquired) -> frozenset[str]:
     ) if changed else frozenset()
 
 
+def _required_historical_headline(result) -> dict | None:
+    if result.currentness_basis != "RETAINED_AUTHORITATIVE_COMPLETED_EVENT":
+        return None
+    from .native_weather_evidence import hko_completed_event_body, hko_completed_event_claim
+
+    raw = result.body.partition(b"\n\n")[0]
+    if hko_completed_event_body(raw) != result.body:
+        raise NativeEvidenceHold("HISTORICAL_TIME_RELATION_HOLD", result.canonical_url)
+    claim, rendered, source_date, rendered_date = hko_completed_event_claim(raw)
+    return {"claim": claim, "rendered_assertion_zh_hant_hk": rendered,
+            "localised_factual_expressions": [[source_date, rendered_date]]}
+
+
 class AutonomousNativeEvidenceAssessor:
     """Dispatch one fixed-schema transform, then prove its output locally."""
 
@@ -1459,6 +1476,8 @@ class AutonomousNativeEvidenceAssessor:
                         "currentness_basis": result.currentness_basis,
                         **({"source_observed_time": result.source_observed_time}
                            if getattr(result, "source_observed_time", "") else {}),
+                        **({"required_historical_headline": required}
+                           if (required := _required_historical_headline(result)) else {}),
                         "body": result.body.decode("utf-8"),
                         "recognised_named_entities": sorted(
                             bounded_named_entities(
@@ -1744,6 +1763,22 @@ class AutonomousNativeEvidenceAssessor:
         package_value["governed_claims"] = governed_claims
         package_value["qualification_evidence"] = qualifications
         package = _package_from_value(package_value)
+        if package.substantive_new_information:
+            for source, result in zip(sources, acquired, strict=True):
+                required = _required_historical_headline(result)
+                if required is None:
+                    continue
+                heads = tuple(claim for claim in package.governed_claims
+                              if claim.claim_role == "HEADLINE")
+                if len(heads) != 1 or (
+                    heads[0].source_ids != (source.unit.source_id,)
+                    or heads[0].claim != required["claim"]
+                    or heads[0].rendered_assertion_zh_hant_hk
+                    != required["rendered_assertion_zh_hant_hk"]
+                    or heads[0].localised_factual_expressions
+                    != tuple(tuple(pair) for pair in required["localised_factual_expressions"])
+                ):
+                    raise NativeEvidenceHold("HISTORICAL_TIME_RELATION_HOLD", source.unit.source_id)
         if _base_package(package) != base:
             raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
         for claim in package.governed_claims:
