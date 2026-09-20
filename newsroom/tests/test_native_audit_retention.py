@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 import sqlite3
 
 import pytest
 
 from newsroom.authority import HydrationRequest, ObjectAdmissionRequest
+from newsroom.authority import UtcTimestamp
+from newsroom.tests.authority_helpers import FIXED_NOW
 from newsroom.authority import audit_retention as retention
 from newsroom.authority.persistence import AuthorityWriterBusy
 from newsroom.control_plane.native_runtime import open_native_runtime
@@ -76,6 +79,82 @@ def _ids(root, table="object_access_decisions"):
         return {r[0] for r in conn.execute(f'SELECT "{retention._AUDIT_KEYS[table]}" FROM "{table}"')}
 
 
+def _graphiti_read(args, key):
+    with open_native_runtime(**args) as runtime:
+        admission = runtime.authority.objects.admit(
+            ObjectAdmissionRequest("graphiti.evaluation.passage", key), b"source bytes",
+            proof=runtime.proof,
+        ).admission
+        return runtime.authority.objects.hydrate(
+            HydrationRequest(admission.admission_id, "graphiti.corpus-ingest"),
+            proof=runtime.proof,
+        ).decision
+
+
+def test_expired_unused_native_graphiti_read_is_not_permanent(audit_fixture):
+    root, args, _ = audit_fixture
+    old = _graphiti_read(args, "old-unused-read")
+    recent_args = dict(args, clock=lambda: UtcTimestamp(FIXED_NOW.value + timedelta(days=7)))
+    recent = _graphiti_read(recent_args, "recent-unused-read")
+    with _connect(root) as conn:
+        business = retention._scan_business(conn, exclude_audit=True)
+    report = retention.prune_native_diagnostic_audit(
+        root, apply=True,
+        clock=lambda: UtcTimestamp(FIXED_NOW.value + timedelta(days=8)),
+    )
+    assert report["counts"]["expired_graphiti_access"] == 1
+    assert str(old.access_decision_id) not in _ids(root)
+    assert str(recent.access_decision_id) in _ids(root)
+    with _connect(root) as conn:
+        assert retention._scan_business(conn, exclude_audit=True) == business
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    # Expiring unused read diagnostics does not delete the admitted source.
+    with open_native_runtime(**recent_args) as runtime:
+        assert runtime.authority.objects.rehydrate(
+            HydrationRequest(old.admission_id, "graphiti.corpus-ingest"),
+            proof=runtime.proof,
+        ).data == b"source bytes"
+
+
+@pytest.mark.parametrize("age_days", [6, 7])
+def test_native_graphiti_read_expiry_boundary_is_strict(audit_fixture, age_days):
+    root, args, _ = audit_fixture
+    read = _graphiti_read(args, "boundary-read")
+    report = retention.prune_native_diagnostic_audit(
+        root, apply=True,
+        clock=lambda: UtcTimestamp(FIXED_NOW.value + timedelta(days=age_days)),
+    )
+    assert report["counts"]["expired_graphiti_access"] == 0
+    assert str(read.access_decision_id) in _ids(root)
+
+
+@pytest.mark.parametrize("field", ["access_decision_id", "canonical_digest"])
+def test_expired_graphiti_read_keeps_embedded_receipt_reference(audit_fixture, field):
+    root, args, _ = audit_fixture
+    read = _graphiti_read(args, "referenced-read")
+    with _connect(root) as conn:
+        token = conn.execute(
+            f"SELECT {field} FROM object_access_decisions WHERE access_decision_id=?",
+            (str(read.access_decision_id),),
+        ).fetchone()[0]
+    with sqlite3.connect(root / "unpublished_store.sqlite3") as conn:
+        conn.execute("INSERT INTO retained_receipts VALUES (?)", (
+            json.dumps({"passages": [{field: token}]}).encode(),
+        ))
+    report = retention.prune_native_diagnostic_audit(
+        root, apply=True,
+        clock=lambda: UtcTimestamp(FIXED_NOW.value + timedelta(days=8)),
+    )
+    assert report["counts"]["expired_graphiti_access"] == 1
+    assert str(read.access_decision_id) in _ids(root)
+    # The dependent security chain is also retained, not independently swept.
+    with open_native_runtime(**args) as runtime:
+        assert runtime.authority.objects.rehydrate(
+            HydrationRequest(read.admission_id, "graphiti.corpus-ingest"),
+            proof=runtime.proof,
+        ).data == b"source bytes"
+
+
 def test_prunes_real_native_diagnostics_preserves_latest_and_reopens(audit_fixture):
     root, args, accesses = audit_fixture
     with _connect(root) as conn:
@@ -120,7 +199,7 @@ def test_dry_run_and_cli_default_do_not_change_database(audit_fixture, capsys):
     assert main(["--data-root", str(root)]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["mode"] == "dry-run" and not report["committed"]
-    assert report["counts"]["superseded_access_candidates"] == 12
+    assert report["counts"]["prunable_access_candidates"] == 12
     assert path.read_bytes() == before
 
 

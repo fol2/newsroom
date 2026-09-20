@@ -1,4 +1,4 @@
-"""Inspect or reclaim obsolete native retrieval hydration diagnostics offline."""
+"""Reclaim superseded retrieval reads and unreferenced Graphiti reads older than seven days."""
 from __future__ import annotations
 
 import argparse

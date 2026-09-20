@@ -17,8 +17,20 @@ python -m scripts.prune_native_diagnostic_audit --data-root "$NEWSROOM_DATA" --a
 
 Inspection is optional, not a mandatory duplicate full scan before application.
 The command protects retained receipts, foreign keys, business content and the
-latest exact reusable reads. Only superseded successful native retrieval
-read diagnostics and their otherwise-unreferenced security chains are eligible.
+latest exact reusable retrieval reads. Eligible diagnostics are:
+
+- superseded successful native retrieval reads; and
+- successful native `graphiti.corpus-ingest` reads older than seven days that
+  have no retained reference. An unused old admission does not require a
+  permanent read receipt merely because it was read once.
+
+The latter class requires the exact Graphiti hydration policy, native
+`hermes-private-native-v1` authorisation, principal/domain, extraction use and
+disposable-workspace scope. Historical campaign authorisations are excluded.
+The UTC expiry cutoff is recorded in the report. An access ID or canonical
+digest referenced by authority, private receipts or CAS remains protected at
+any age; otherwise-unreferenced security chains are reclaimed with the read.
+No source/admission, command, attempt, provider accounting or ACK is deleted.
 Ordinary `hydrate` still records new deliveries; `rehydrate` authenticates and
 checks current rights and bytes again, but can return its unchanged receipt.
 
