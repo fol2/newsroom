@@ -132,6 +132,15 @@ class NativeSourceDisposition:
     item_holds: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedNativeObservation:
+    url: str
+    digest: str
+    admission_id: ObjectAdmissionId
+    access_decision_id: str
+    raw: bytes
+
+
 class NativeSourceIntake:
     """Poll eligible retained definitions; every portfolio member remains visible."""
 
@@ -726,13 +735,11 @@ def native_evidence_sources(
             if hydrated.data != expected:
                 raise hold("NATIVE_SOURCE_CANONICAL_PAGE_HOLD")
         try:
-            raw_admission_id, raw_access = _require_observation_access(
-                observation=observation, objects=objects, proof=proof,
+            verified = verified_native_observation(
+                unit=unit, observations=observations, objects=objects,
+                proof=proof, expected_url=expected_api_url,
             )
-            raw = objects.rehydrate(HydrationRequest(
-                raw_admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
-                0, raw_access.allowed_bytes,
-            ), proof=proof).data
+            raw = verified.raw
             retrieved = datetime.fromisoformat(unit.observed_at.replace("Z", "+00:00"))
             if weather:
                 from .native_weather_sources import weather_items
@@ -876,7 +883,39 @@ def _require_observation_access(*, observation, objects, proof):
     return admission_id, current
 
 
+def verified_native_observation(
+    *, unit: CorpusIngestUnit,
+    observations: Mapping[str, tuple[str, str, str, str]],
+    objects, proof: AuthenticationProof, expected_url: str,
+) -> VerifiedNativeObservation:
+    """Rehydrate the exact retained raw observation already bound to a unit."""
+
+    validate_sha256_digest(unit.observation_digest)
+    observation = observations[unit.observation_digest]
+    if (
+        type(observation) is not tuple
+        or len(observation) != 4
+        or observation[0] != expected_url
+        or observation[1] != unit.observation_digest
+    ):
+        raise ValueError("raw observation reference differs")
+    admission_id, access = _require_observation_access(
+        observation=observation, objects=objects, proof=proof,
+    )
+    raw = objects.rehydrate(HydrationRequest(
+        admission_id, NATIVE_SOURCE_OBSERVATION_PURPOSE,
+        0, access.allowed_bytes,
+    ), proof=proof).data
+    if digest_bytes(raw) != observation[1]:
+        raise ValueError("raw observation digest differs")
+    return VerifiedNativeObservation(
+        observation[0], observation[1], admission_id,
+        str(access.access_decision_id), raw,
+    )
+
+
 __all__ = [
     "NativeSourceDisposition", "NativeSourceIntake", "SOURCE_IDS",
-    "native_evidence_sources",
+    "VerifiedNativeObservation", "native_evidence_sources",
+    "verified_native_observation",
 ]

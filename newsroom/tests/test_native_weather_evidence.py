@@ -33,6 +33,7 @@ from newsroom.control_plane.native_weather_evidence import (
     HK02_ATTRIBUTION,
     POLICY_DIGEST,
     NativeWeatherEvidenceAcquisition,
+    hko_completed_event_claim,
 )
 from newsroom.increment9.proving import SOURCE_URLS
 from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
@@ -244,7 +245,7 @@ def _portfolio(runtime, monkeypatch):
     return NativePortfolioRights(_licence(), evidence)
 
 
-def _acquisition(runtime, rights, fences):
+def _acquisition(runtime, rights, fences, **retained):
     return NativeWeatherEvidenceAcquisition(
         sources=runtime.authority.sources,
         objects=runtime.authority.objects,
@@ -252,6 +253,7 @@ def _acquisition(runtime, rights, fences):
         rights=rights,
         transport_policy_digest=CONTROLLER_POLICY_DIGEST,
         dispatch_fence=lambda request: nullcontext(fences.append(request)),
+        **retained,
         clock=lambda: NOW,
     )
 
@@ -462,9 +464,287 @@ def test_binding_mismatch_and_empty_inventory_fail_before_evidence_emission(
             )
 
 
+def test_hko_absent_current_item_rehydrates_exact_retained_cancellation(
+    tmp_path, monkeypatch,
+):
+    from newsroom.control_plane.native_source_intake import native_evidence_sources
+    from newsroom.tests.test_native_weather_sources import _poll
+
+    args = _args(tmp_path, monkeypatch)
+    args["principal_id"] = OPERATOR_PRINCIPAL_ID
+    args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
+    warning = {
+        **HKO_WARNING, "name": "火災危險警告", "code": "WFIREY",
+        "type": "黃色", "actionCode": "CANCEL",
+        "issueTime": "2026-09-08T11:00:00+08:00",
+        "updateTime": "2026-09-08T12:00:00+08:00",
+    }
+    raw = canonical_json_bytes({"WFIRE": warning, "WTS": HKO_WARNING})
+    with open_native_runtime(**args) as runtime:
+        rights = _portfolio(runtime, monkeypatch)
+        _intake, disposition = _poll(runtime, "HK-02", raw, rights, [])
+        unit = next(item for item in disposition.units if item.item_key == "WFIRE")
+        observations = {item[1]: item for item in disposition.observations}
+        (source,) = native_evidence_sources(
+            units=(unit,), sources=runtime.authority.sources,
+            objects=runtime.authority.objects, observations=observations,
+            licence=rights, proof=runtime.proof,
+        )
+        request = EvidenceAcquisitionRequest(
+            unit.source_id, unit.authority.definition_id,
+            unit.authority.definition_version_id,
+            source.source_version.canonical_digest,
+            unit.authority.revision_id, unit.canonical_url,
+            CONTROLLER_POLICY_DIGEST,
+        )
+
+        class _Opener:
+            def open(self, http, timeout):
+                return _Response(b"{}", http.full_url, "application/json")
+
+        monkeypatch.setattr("urllib.request.build_opener", lambda *_: _Opener())
+        result = _acquisition(
+            runtime, rights, [], retained_units={unit.revision_id: (unit,)},
+            observations=observations,
+        )(request)
+
+        assert result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+        assert result.source_observed_time == unit.observed_at
+        assert result.retrieval_time == "2026-09-08T15:00:00.000000Z"
+        selected_raw = unit.body.encode("utf-8")
+        assert result.body.startswith(selected_raw + b"\n\n")
+        assert digest_bytes(raw) == unit.observation_digest
+        assert digest_bytes(selected_raw) != unit.observation_digest
+        source_span, rendered_headline, source_date, rendered_date = (
+            hko_completed_event_claim(selected_raw)
+        )
+        sentence = next(
+            line for line in result.body.decode().splitlines()
+            if line.startswith(
+                "Official status changed for completed historical event: "
+            )
+        )
+        assert sentence == source_span
+        assert source_date == "8 September 2026 at 12:00"
+        assert rendered_date == "2026年9月8日12時00分"
+        assert result.body.decode().splitlines()[-1] == (
+            "The timestamp above is the record update time and no exact "
+            "cancellation time is asserted."
+        )
+        assert result.rights_eligibility_digest
+
+        sources = runtime.authority.sources
+        class _RepresentationMismatch:
+            def __getattr__(self, name):
+                return getattr(sources, name)
+
+            def representation(self, *args, **kwargs):
+                retained = sources.representation(*args, **kwargs)
+                return replace(
+                    retained,
+                    request=replace(
+                        retained.request,
+                        permitted_fields_digest=digest_canonical(
+                            {"wrong": "representation fields"}
+                        ),
+                    ),
+                )
+
+        mismatched = _acquisition(
+            runtime, rights, [], retained_units={unit.revision_id: (unit,)},
+            observations=observations,
+        )
+        mismatched._sources = _RepresentationMismatch()
+        with pytest.raises(
+            NativeEvidenceHold, match="WEATHER_RETAINED_COMPLETED_EVENT_HOLD"
+        ):
+            mismatched(request)
+
+        observation = observations[unit.observation_digest]
+        observations[unit.observation_digest] = (
+            observation[0], digest_canonical({"wrong": "observation"}),
+            observation[2], observation[3],
+        )
+        with pytest.raises(
+            NativeEvidenceHold, match="WEATHER_RETAINED_COMPLETED_EVENT_HOLD"
+        ):
+            _acquisition(
+                runtime, rights, [], retained_units={unit.revision_id: (unit,)},
+                observations=observations,
+            )(request)
+
+        from newsroom.control_plane.admission import (
+            _qualification_relation_is_proven,
+        )
+        from newsroom.control_plane.native_assessor import (
+            AutonomousNativeEvidenceAssessor, NativeAssessmentExecution,
+        )
+        from newsroom.control_plane.writer import (
+            WriterCopy, required_surface_copy, validate_writer_copy,
+        )
+        from newsroom.increment10.evidence import _base_package
+        from newsroom.tests.test_increment10_editorial import _ready_package
+        from newsroom.tests.test_increment10_ingress import _candidate
+        from newsroom.tests.test_native_assessor import _model_package_value
+
+        candidate_root = tmp_path / "historical-assessor-candidate"
+        candidate_root.mkdir()
+        candidate_connection, _, candidate = _candidate(candidate_root)
+        try:
+            base = _base_package(_ready_package(candidate)[1])
+            package = _model_package_value(_ready_package(candidate)[1])
+            lines = result.body.decode().splitlines()
+            historical = next(
+                line for line in lines
+                if line.startswith(
+                    "Official status changed for completed historical event: "
+                )
+            )
+            updated = next(line for line in lines if "record was updated" in line)
+            claims = package["governed_claims"]
+            for claim, span, rendering in zip(
+                claims, (historical, updated),
+                (
+                    rendered_headline,
+                    "該紀錄於香港時間2026年9月8日12時00分更新。",
+                ), strict=True,
+            ):
+                claim.update(
+                    claim=span, supporting_excerpt=span, source_ids=["HK-02"],
+                    rendered_assertion_zh_hant_hk=rendering,
+                )
+            for claim in claims:
+                claim["localised_factual_expressions"] = [[
+                    "8 September 2026 at 12:00", "2026年9月8日12時00分",
+                ]]
+            package.update(
+                substantive_new_information=[item["claim"] for item in claims],
+                geography=["Hong Kong"], categories=["Weather and disasters"],
+                qualification_evidence=[{
+                    "test": "LAW_RIGHT_STATUS_POLICY",
+                    "governed_claim_id": claims[0]["claim_id"],
+                    "policy_version": "newsroom.evid-012.v7",
+                    "test_evidence": {
+                        "change_kind": "STATUS", "event_polarity": "AFFIRMED",
+                        "change_relation": "NEW_OR_CHANGED_STATE",
+                        "material_relation_span": historical,
+                        "new_state": "cancelled",
+                    },
+                }],
+            )
+            base = replace(
+                base, source_ids=("HK-02",), passages=(result.body.decode(),),
+                observation_digests=(result.body_digest,),
+            )
+            output = AutonomousNativeEvidenceAssessor._validated_execution(
+                NativeAssessmentExecution(json.dumps({"package": package}), {}),
+                candidate, base, (source,), (result,),
+            )
+            assert _qualification_relation_is_proven(
+                output.qualification_evidence[0], output.governed_claims[0],
+                source_context=result.body.decode(),
+            )
+            from copy import deepcopy
+            for fault in ("undated", "cancellation-time", "present-warning"):
+                altered = deepcopy(package)
+                head = altered["governed_claims"][0]
+                if fault == "undated":
+                    plain = next(line for line in lines if line.startswith("Official status changed:"))
+                    head.update(claim=plain, supporting_excerpt=plain,
+                                rendered_assertion_zh_hant_hk="香港天文台已取消黃色火災危險警告。",
+                                localised_factual_expressions=[])
+                    altered["substantive_new_information"][0] = plain
+                elif fault == "cancellation-time":
+                    head["rendered_assertion_zh_hant_hk"] = (
+                        "香港天文台於香港時間2026年9月8日12時00分取消黃色火災危險警告。"
+                    )
+                else:
+                    head["rendered_assertion_zh_hant_hk"] = rendered_headline + "目前沒有火災危險。"
+                with pytest.raises(NativeEvidenceHold, match="HISTORICAL_TIME_RELATION_HOLD"):
+                    AutonomousNativeEvidenceAssessor._validated_execution(
+                        NativeAssessmentExecution(json.dumps({"package": altered}), {}),
+                        candidate, base, (source,), (result,),
+                    )
+            copy_package = replace(
+                base, governed_claims=output.governed_claims,
+                substantive_new_information=output.substantive_new_information,
+                qualification_evidence=output.qualification_evidence,
+            )
+            from newsroom.control_plane.native_evidence import (
+                NativeEvidenceController,
+            )
+            records = NativeEvidenceController._records(
+                base, copy_package, (source,), (result,), output,
+            )
+            copy_package = replace(
+                copy_package, resolved_evidence_records=tuple(sorted(
+                    (record["record_id"], digest_canonical(record))
+                    for record in records
+                )),
+            )
+            title, body, links = required_surface_copy(
+                copy_package, paragraphs=True
+            )
+            copy = WriterCopy(
+                title, body, "newsroom.offline-exact-copy.v2",
+                copy_package.digest, links,
+            )
+            failed = [
+                item.reason_code for item in validate_writer_copy(
+                    copy, copy_package
+                ) if item.result != "PASS"
+            ]
+            assert failed == []
+        finally:
+            candidate_connection.close()
+
+
+def test_hko_absent_current_item_does_not_relabel_retained_active_warning(
+    tmp_path, monkeypatch,
+):
+    from newsroom.control_plane.native_source_intake import native_evidence_sources
+    from newsroom.tests.test_native_weather_sources import _poll
+
+    args = _args(tmp_path, monkeypatch)
+    args["principal_id"] = OPERATOR_PRINCIPAL_ID
+    args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
+    with open_native_runtime(**args) as runtime:
+        rights = _portfolio(runtime, monkeypatch)
+        _intake, disposition = _poll(runtime, "HK-02", HKO_RAW, rights, [])
+        unit = next(item for item in disposition.units if item.item_key == "WTS")
+        observations = {item[1]: item for item in disposition.observations}
+        (source,) = native_evidence_sources(
+            units=(unit,), sources=runtime.authority.sources,
+            objects=runtime.authority.objects, observations=observations,
+            licence=rights, proof=runtime.proof,
+        )
+        request = EvidenceAcquisitionRequest(
+            unit.source_id, unit.authority.definition_id,
+            unit.authority.definition_version_id,
+            source.source_version.canonical_digest,
+            unit.authority.revision_id, unit.canonical_url,
+            CONTROLLER_POLICY_DIGEST,
+        )
+
+        class _Opener:
+            def open(self, http, timeout):
+                return _Response(b"{}", http.full_url, "application/json")
+
+        monkeypatch.setattr("urllib.request.build_opener", lambda *_: _Opener())
+        with pytest.raises(
+            NativeEvidenceHold, match="WEATHER_RETAINED_COMPLETED_EVENT_HOLD"
+        ):
+            _acquisition(
+                runtime, rights, [], retained_units={unit.revision_id: (unit,)},
+                observations=observations,
+            )(request)
+
+
 @pytest.mark.parametrize(("action", "verb"), (("ISSUE", "issued"), ("REISSUE", "reissued"), ("CANCEL", "cancelled"), ("EXTEND", "extended")))
 def test_hko_structured_fields_have_exact_readable_fact_spans(action, verb):
-    from newsroom.control_plane.native_weather_evidence import hko_evidence_body, legacy_hko_body
+    from newsroom.control_plane.native_weather_evidence import (
+        hko_completed_event_body, hko_evidence_body, legacy_hko_body,
+    )
     warning = {**HKO_WARNING, "name": "火災危險警告", "type": "黃色", "actionCode": action}
     raw = canonical_json_bytes({"WFIRE": warning})
     body = hko_evidence_body(raw)
@@ -472,6 +752,9 @@ def test_hko_structured_fields_have_exact_readable_fact_spans(action, verb):
     assert f"Official status changed: 香港天文台 {verb} the 黃色火災危險警告." in body.decode()
     assert "8 September 2026 at 12:00" in body.decode()
     assert legacy_hko_body(body) == raw
+    if action == "CANCEL":
+        historical = hko_completed_event_body(raw)
+        assert legacy_hko_body(historical) == body
     with pytest.raises(ValueError, match="normalised"):
         legacy_hko_body(raw + b"\n\n" + body.split(b"\n\n", 1)[1].replace(b"12:00", b"13:00"))
 
@@ -485,6 +768,36 @@ def test_hko_update_or_absence_does_not_invent_warning_cancellation():
     for value in ({}, {"WTS": {**HKO_WARNING, "actionCode": "UNKNOWN"}}, {"WTS": {**HKO_WARNING, "type": {}}}):
         with pytest.raises(ValueError):
             hko_evidence_body(json.dumps(value).encode())
+
+
+def test_hko_completed_event_claim_preserves_exact_update_precision():
+    warning = {
+        **HKO_WARNING, "name": "火災危險警告", "type": "黃色",
+        "actionCode": "CANCEL",
+        "updateTime": "2026-09-20T22:20:30.123456+08:00",
+    }
+    raw = canonical_json_bytes({"WFIRE": warning})
+    source, rendered, source_date, rendered_date = hko_completed_event_claim(raw)
+    assert source == (
+        "Official status changed for completed historical event: 香港天文台 "
+        "cancelled the 黃色火災危險警告 (record updated on 20 September 2026 "
+        "at 22:20:30.123456 (香港時間))."
+    )
+    assert rendered == (
+        "香港天文台已取消黃色火災危險警告；官方紀錄於香港時間"
+        "2026年9月20日22時20分30.123456秒更新。"
+    )
+    assert source_date == "20 September 2026 at 22:20:30.123456"
+    assert rendered_date == "2026年9月20日22時20分30.123456秒"
+    for invalid in (
+        canonical_json_bytes({"WFIRE": {**warning, "actionCode": "ISSUE"}}),
+        canonical_json_bytes({"WFIRE": warning, "WTS": HKO_WARNING}),
+        canonical_json_bytes({
+            "WFIRE": {**warning, "updateTime": "2026-09-20T22:20:30"}
+        }),
+    ):
+        with pytest.raises(ValueError):
+            hko_completed_event_claim(invalid)
 
 
 @pytest.mark.parametrize(("text", "invalid"), (("香港天文台", False), ("香港天文台发布消息", True), ("台湾气象台", True)))

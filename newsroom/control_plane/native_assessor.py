@@ -83,7 +83,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v14"
+VERSION = "newsroom.native-evidence-assessor.v15"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -92,6 +92,7 @@ REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_QUALIFICATION_CONTRACT_HOLD",
     "QUALIFICATION_EVIDENCE_NOT_EXACT",
     "SOURCE_AUTHORITY_HOLD",
+    "WEATHER_EVIDENCE_METADATA_HOLD",
 })
 
 
@@ -122,6 +123,16 @@ SYSTEM = (
     "issue time from record update time and never invent a cancellation time. "
     "Write a self-contained headline naming the subject and action, not a "
     "deictic-only reference to these reforms, those measures or that record. "
+    "RETAINED_AUTHORITATIVE_COMPLETED_EVENT identifies an authenticated historical "
+    "official observation, not today's live warning. Preserve its explicit record "
+    "date in the report; present rehydration is not a new publication or event. "
+    "Do not infer present safety, the absence of other warnings or an exact "
+    "cancellation time from that historical record. Apply the same substantive "
+    "news test; old observation alone is not new information. "
+    "If required_historical_headline is supplied and the event qualifies, copy "
+    "its exact claim, rendering and localised date pair for the HEADLINE. This "
+    "fixed field rendering preserves the record-update relationship; it does "
+    "not require selecting an otherwise unqualified event. "
     "The claim "
     "and supporting_excerpt fields must each be copied byte-for-byte as an exact "
     "contiguous source-language span of the same UTF-8 source body. Every "
@@ -815,7 +826,7 @@ class NativeAssessmentUsage:
                 # invocation from the independently derived cycle identity.
                 cycles = sorted({
                     _assessment_cycle_id(version_id, base.digest, contract)
-                    for contract in (VERSION, *(f"newsroom.native-evidence-assessor.v{i}" for i in range(6, 14)))
+                    for contract in (VERSION, *(f"newsroom.native-evidence-assessor.v{i}" for i in range(6, 15)))
                 })
                 cycle_clause = " OR cycle_id IN (" + ",".join("?" for _ in cycles) + ")"
                 parameters.extend(cycles)
@@ -1272,29 +1283,48 @@ class NativeAssessmentUsage:
             connection.close()
 
 
-def _legacy_hko_base_digest(base, sources, acquired) -> str | None:
-    """Recognise only exact raw JSON plus its verified HKO field rendering."""
+def _legacy_hko_base_digests(base, sources, acquired) -> frozenset[str]:
+    """Prove the raw and readable predecessors of the exact HKO representation."""
     from .native_weather_evidence import legacy_hko_body
 
     if not sources or len(sources) != len(acquired) or len(sources) != len(base.passages):
-        return None
+        return frozenset()
     if base.observation_digests != tuple(digest_bytes(item.body) for item in acquired):
-        return None
-    passages, digests = [], []
+        return frozenset()
+    readable, raw_bodies = [], []
     changed = False
     for source, result, passage in zip(sources, acquired, base.passages, strict=True):
         if result.body.decode("utf-8") != passage:
-            return None
-        raw = result.body
+            return frozenset()
+        body = raw = result.body
         if source.unit.source_id == "HK-02":
             try:
-                raw = legacy_hko_body(raw)
+                if result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT":
+                    body = legacy_hko_body(body)
+                raw = legacy_hko_body(body)
             except (KeyError, TypeError, ValueError):
-                return None
+                return frozenset()
             changed = True
-        passages.append(raw.decode("utf-8"))
-        digests.append(digest_bytes(raw))
-    return replace(base, passages=tuple(passages), observation_digests=tuple(digests)).digest if changed else None
+        readable.append(body)
+        raw_bodies.append(raw)
+    return frozenset(
+        replace(base, passages=tuple(body.decode("utf-8") for body in bodies),
+                observation_digests=tuple(digest_bytes(body) for body in bodies)).digest
+        for bodies in (readable, raw_bodies)
+    ) if changed else frozenset()
+
+
+def _required_historical_headline(result) -> dict | None:
+    if result.currentness_basis != "RETAINED_AUTHORITATIVE_COMPLETED_EVENT":
+        return None
+    from .native_weather_evidence import hko_completed_event_body, hko_completed_event_claim
+
+    raw = result.body.partition(b"\n\n")[0]
+    if hko_completed_event_body(raw) != result.body:
+        raise NativeEvidenceHold("HISTORICAL_TIME_RELATION_HOLD", result.canonical_url)
+    claim, rendered, source_date, rendered_date = hko_completed_event_claim(raw)
+    return {"claim": claim, "rendered_assertion_zh_hant_hk": rendered,
+            "localised_factual_expressions": [[source_date, rendered_date]]}
 
 
 class AutonomousNativeEvidenceAssessor:
@@ -1341,8 +1371,15 @@ class AutonomousNativeEvidenceAssessor:
             )
         for source, result in zip(sources, acquired, strict=True):
             if (
-                result.currentness_basis
-                != "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"
+                result.currentness_basis not in {
+                    "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
+                    "RETAINED_AUTHORITATIVE_COMPLETED_EVENT",
+                }
+                or (
+                    result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+                    and (source.unit.source_id != "HK-02"
+                         or not getattr(result, "source_observed_time", ""))
+                )
                 or not result.text_only
                 or result.rights_eligibility_digest
                 != rights_eligibility_digest(
@@ -1364,9 +1401,9 @@ class AutonomousNativeEvidenceAssessor:
                 raise NativeEvidenceHold("ASSESSOR_REVALIDATION_UNRESOLVED_HOLD", source_id)
             mismatched = tuple(item for item in retained if item.base_digest != base.digest)
             if mismatched:
-                legacy = _legacy_hko_base_digest(base, sources, acquired)
-                if cached_only or legacy is None or any(
-                    item.base_digest != legacy or item.contract_version == VERSION
+                legacy = _legacy_hko_base_digests(base, sources, acquired)
+                if cached_only or not legacy or any(
+                    item.base_digest not in legacy or item.contract_version == VERSION
                     for item in mismatched
                 ):
                     raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
@@ -1436,6 +1473,11 @@ class AutonomousNativeEvidenceAssessor:
                         "publication_time": result.publication_time,
                         "source_updated_time": result.source_updated_time,
                         "retrieval_time": result.retrieval_time,
+                        "currentness_basis": result.currentness_basis,
+                        **({"source_observed_time": result.source_observed_time}
+                           if getattr(result, "source_observed_time", "") else {}),
+                        **({"required_historical_headline": required}
+                           if (required := _required_historical_headline(result)) else {}),
                         "body": result.body.decode("utf-8"),
                         "recognised_named_entities": sorted(
                             bounded_named_entities(
@@ -1721,6 +1763,22 @@ class AutonomousNativeEvidenceAssessor:
         package_value["governed_claims"] = governed_claims
         package_value["qualification_evidence"] = qualifications
         package = _package_from_value(package_value)
+        if package.substantive_new_information:
+            for source, result in zip(sources, acquired, strict=True):
+                required = _required_historical_headline(result)
+                if required is None:
+                    continue
+                heads = tuple(claim for claim in package.governed_claims
+                              if claim.claim_role == "HEADLINE")
+                if len(heads) != 1 or (
+                    heads[0].source_ids != (source.unit.source_id,)
+                    or heads[0].claim != required["claim"]
+                    or heads[0].rendered_assertion_zh_hant_hk
+                    != required["rendered_assertion_zh_hant_hk"]
+                    or heads[0].localised_factual_expressions
+                    != tuple(tuple(pair) for pair in required["localised_factual_expressions"])
+                ):
+                    raise NativeEvidenceHold("HISTORICAL_TIME_RELATION_HOLD", source.unit.source_id)
         if _base_package(package) != base:
             raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
         for claim in package.governed_claims:
@@ -1745,15 +1803,20 @@ class AutonomousNativeEvidenceAssessor:
                     source.unit.source_id,
                     source.unit.authority.definition_id,
                     source.source_version.canonical_digest,
-                    "CURRENT_VERSION",
+                    ("COMPLETED_HISTORICAL_EVENT"
+                     if result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+                     else "CURRENT_VERSION"),
                     result.publication_time,
                     result.retrieval_time,
                     None,
                     result.source_updated_time,
-                    result.transport_evidence_digest,
+                    (None if result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+                     else result.transport_evidence_digest),
                     result.transport_evidence_digest,
                     "PASS",
-                    "CURRENT_CONTENT_API_VERSION_CONFIRMED",
+                    ("RETAINED_COMPLETED_EVENT_CONFIRMED"
+                     if result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+                     else "CURRENT_CONTENT_API_VERSION_CONFIRMED"),
                 ),
                 tuple((name, "PASS") for name in INTEGRITY),
             )

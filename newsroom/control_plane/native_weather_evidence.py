@@ -7,7 +7,7 @@ import json
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.increment9.proving import MAX_BODY_BYTES, SOURCE_URLS
 from newsroom.sources import (
+    DiscoveryRepresentationId,
     SourceDefinitionId,
     SourceDefinitionVersionId,
     SourceRevisionId,
@@ -41,6 +42,7 @@ from .native_evidence import (
 )
 from . import native_source_rights
 from .native_source_rights import NativePortfolioRights
+from .native_source_intake import verified_native_observation
 from .native_weather_sources import weather_items
 
 VERSION = "hermes-native-weather-evidence-v2"
@@ -62,6 +64,43 @@ UK10_ATTRIBUTION = (
     "Contains public sector information licensed under the Open Government "
     "Licence v3.0; source: Met Office at the linked warning URL."
 )
+HKO_COMPLETED_EVENT_PREFIX = "Official status changed for completed historical event: "
+
+
+def _hko_time_expressions(value: str) -> tuple[str, str]:
+    instant = datetime.fromisoformat(value)
+    if instant.tzinfo is None:
+        raise ValueError("HKO warning time lacks a zone")
+    local = instant.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    clock = local.strftime("%H:%M:%S" if local.second or local.microsecond else "%H:%M")
+    rendered_clock = local.strftime(
+        "%H時%M分%S秒" if local.second or local.microsecond else "%H時%M分"
+    )
+    if local.microsecond:
+        fraction = f".{local.microsecond:06d}"
+        clock += fraction
+        rendered_clock = rendered_clock.removesuffix("秒") + fraction + "秒"
+    months = (
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    )
+    return (
+        f"{local.day} {months[local.month - 1]} {local.year} at {clock}",
+        f"{local.year}年{local.month}月{local.day}日{rendered_clock}",
+    )
+
+
+def _hko_warning(raw: bytes) -> tuple[dict, str]:
+    value = json.loads(raw, object_pairs_hook=_unique_object)
+    if type(value) is not dict or len(value) != 1:
+        raise ValueError("one exact HKO warning is required")
+    warning = next(iter(value.values()))
+    if type(warning) is not dict:
+        raise ValueError("HKO warning differs")
+    name, kind = warning.get("name"), warning.get("type", "")
+    if type(name) is not str or not name.strip() or type(kind) is not str:
+        raise ValueError("HKO warning name/type differs")
+    return warning, name if not kind or kind in name else kind + name
 
 
 def hko_evidence_body(raw: bytes) -> bytes:
@@ -71,42 +110,64 @@ def hko_evidence_body(raw: bytes) -> bytes:
     or an absent warning is not evidence of cancellation or improved safety.
     https://data.weather.gov.hk/weatherAPI/doc/HKO_Open_Data_API_Documentation.pdf
     """
-    value = json.loads(raw, object_pairs_hook=_unique_object)
-    if type(value) is not dict or len(value) != 1:
-        raise ValueError("one exact HKO warning is required")
-    warning = next(iter(value.values()))
+    warning, label = _hko_warning(raw)
     verbs = {"ISSUE": "issued", "REISSUE": "reissued", "CANCEL": "cancelled", "EXTEND": "extended"}
-    if type(warning) is not dict or warning.get("actionCode") not in {*verbs, "UPDATE"}:
+    if warning.get("actionCode") not in {*verbs, "UPDATE"}:
         raise ValueError("HKO warning action is unsupported")
-    name, kind = warning.get("name"), warning.get("type", "")
-    if type(name) is not str or not name.strip() or type(kind) is not str:
-        raise ValueError("HKO warning name/type differs")
-    label = name if not kind or kind in name else kind + name
     action = warning["actionCode"]
     facts = ([] if action == "UPDATE" else [
         f"Official status changed: 香港天文台 {verbs[action]} the {label}."
     ])
-    months = ("January", "February", "March", "April", "May", "June", "July",
-              "August", "September", "October", "November", "December")
     for field, description in (("issueTime", "issued"), ("updateTime", "updated")):
-        instant = datetime.fromisoformat(warning[field])
-        if instant.tzinfo is None:
-            raise ValueError("HKO warning time lacks a zone")
-        local = instant.astimezone(ZoneInfo("Asia/Hong_Kong"))
-        clock = local.strftime("%H:%M:%S" if local.second or local.microsecond else "%H:%M")
-        if local.microsecond:
-            clock += f".{local.microsecond:06d}"
-        date = f"{local.day} {months[local.month - 1]} {local.year} at {clock}"
+        date, _rendered = _hko_time_expressions(warning[field])
         facts.append(f"The {label} warning record was {description} on {date} (香港時間).")
     return raw + b"\n\n" + "\n".join(facts).encode("utf-8")
 
 
 def legacy_hko_body(body: bytes) -> bytes:
-    """Prove the sole supported old-to-new acquisition representation change."""
+    """Return the immediate predecessor of an exact supported HKO rendering."""
     raw, separator, _facts = body.partition(b"\n\n")
-    if not separator or hko_evidence_body(raw) != body:
+    if not separator:
         raise ValueError("normalised HKO body differs")
-    return raw
+    normalised = hko_evidence_body(raw)
+    if body == normalised:
+        return raw
+    value = json.loads(raw, object_pairs_hook=_unique_object)
+    warning = next(iter(value.values()))
+    if warning.get("actionCode") == "CANCEL" and body == hko_completed_event_body(raw):
+        return normalised
+    raise ValueError("normalised HKO body differs")
+
+
+def hko_completed_event_body(raw: bytes) -> bytes:
+    """Add one dated terminal-event span without inventing a cancellation time."""
+
+    body = hko_evidence_body(raw)
+    sentence, _rendered, _source_date, _rendered_date = (
+        hko_completed_event_claim(raw)
+    )
+    disclaimer = (
+        "The timestamp above is the record update time and no exact "
+        "cancellation time is asserted."
+    )
+    return body + b"\n" + sentence.encode("utf-8") + b"\n" + disclaimer.encode("utf-8")
+
+
+def hko_completed_event_claim(raw: bytes) -> tuple[str, str, str, str]:
+    """Return the sole exact dated source/rendering pair for retained CANCEL."""
+
+    warning, label = _hko_warning(raw)
+    if warning.get("actionCode") != "CANCEL":
+        raise ValueError("completed HKO event is not an explicit cancellation")
+    source_date, rendered_date = _hko_time_expressions(warning["updateTime"])
+    source = (
+        f"{HKO_COMPLETED_EVENT_PREFIX}香港天文台 cancelled the {label} "
+        f"(record updated on {source_date} (香港時間))."
+    )
+    rendered = (
+        f"香港天文台已取消{label}；官方紀錄於香港時間{rendered_date}更新。"
+    )
+    return source, rendered, source_date, rendered_date
 
 
 class NativeWeatherEvidenceAcquisition:
@@ -121,6 +182,8 @@ class NativeWeatherEvidenceAcquisition:
         rights: NativePortfolioRights,
         transport_policy_digest: str,
         dispatch_fence: Callable[[EvidenceAcquisitionRequest], AbstractContextManager[None]],
+        retained_units: Mapping[str, tuple] | None = None,
+        observations: Mapping[str, tuple[str, str, str, str]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         if (
@@ -129,6 +192,8 @@ class NativeWeatherEvidenceAcquisition:
             or type(rights) is not NativePortfolioRights
             or not callable(dispatch_fence)
             or not callable(clock)
+            or (retained_units is not None and not isinstance(retained_units, Mapping))
+            or (observations is not None and not isinstance(observations, Mapping))
         ):
             raise ValueError("native weather acquisition configuration differs")
         try:
@@ -143,6 +208,8 @@ class NativeWeatherEvidenceAcquisition:
         self._rights = rights
         self._transport_policy_digest = transport_policy_digest
         self._fence = dispatch_fence
+        self._retained_units = {} if retained_units is None else retained_units
+        self._observations = {} if observations is None else observations
         self._clock = clock
 
     def __call__(self, request: EvidenceAcquisitionRequest) -> AcquiredEvidence:
@@ -245,6 +312,16 @@ class NativeWeatherEvidenceAcquisition:
                 if candidate.item_key == item_key
                 and candidate.canonical_url == request.canonical_url
             )
+            if (
+                not matches
+                and request.source_id == "HK-02"
+                and request.source_revision_id in self._retained_units
+            ):
+                return self._retained_completed_event(
+                    request=request, rights=rights, version=version,
+                    revision=revision, item=item, current_raw=raw,
+                    rehydrated_at=retrieved,
+                )
             if len(matches) != 1:
                 raise ValueError("exact weather item is absent")
             observed = matches[0]
@@ -266,6 +343,8 @@ class NativeWeatherEvidenceAcquisition:
                 )
             ):
                 raise ValueError("weather revision differs")
+        except NativeEvidenceHold:
+            raise
         except (
             KeyError,
             TypeError,
@@ -326,6 +405,157 @@ class NativeWeatherEvidenceAcquisition:
             licence_attribution=HK02_ATTRIBUTION,
             exclusion_signals=(),
             text_only=True,
+        )
+
+    def _retained_completed_event(
+        self, *, request, rights, version, revision, item,
+        current_raw: bytes, rehydrated_at: datetime,
+    ) -> AcquiredEvidence:
+        """Rehydrate one exact retained HKO cancellation as historical evidence."""
+
+        def hold() -> NativeEvidenceHold:
+            return NativeEvidenceHold(
+                "WEATHER_RETAINED_COMPLETED_EVENT_HOLD", request.source_id
+            )
+
+        retained = self._retained_units.get(request.source_revision_id)
+        item_key = item.request.source_native_id or dict(
+            (component.name, component.value)
+            for component in item.request.identity_components
+        ).get("item_key")
+        if (
+            request.source_id != "HK-02"
+            or type(retained) is not tuple
+            or len(retained) != 1
+        ):
+            raise hold()
+        unit = retained[0]
+        authority = unit.authority
+        try:
+            observed_at = datetime.fromisoformat(
+                unit.observed_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+            representation = self._sources.representation(
+                DiscoveryRepresentationId.parse(authority.representation_id),
+                proof=self._proof,
+            )
+            verified = verified_native_observation(
+                unit=unit, observations=self._observations,
+                objects=self._objects, proof=self._proof,
+                expected_url=SOURCE_URLS["HK-02"],
+            )
+            historical = tuple(
+                candidate for candidate in weather_items(
+                    "HK-02", verified.raw, observed_at=observed_at,
+                )
+                if candidate.item_key == unit.item_key
+                and candidate.canonical_url == unit.canonical_url
+            )
+            raw_value = json.loads(
+                verified.raw, object_pairs_hook=_unique_object
+            )
+            warning = raw_value.get(unit.item_key)
+            from newsroom.graphiti_adapter.identity import content_digest
+
+            if (
+                authority is None
+                or unit.chunk_ordinal != 1
+                or unit.chunk_count != 1
+                or unit.source_id != "HK-02"
+                or unit.item_key != item_key
+                or unit.revision_id != request.source_revision_id
+                or unit.canonical_url != request.canonical_url
+                or unit.source_definition_url != version.request.locator
+                or authority.definition_id != request.source_definition_id
+                or authority.definition_version_id
+                != request.source_definition_version_id
+                or authority.item_id != str(item.request.item_id)
+                or authority.revision_id != str(revision.request.revision_id)
+                or revision.request.definition_version_id != version.version_id
+                or revision.request.item_id != item.request.item_id
+                or representation.request.revision_id
+                != revision.request.revision_id
+                or representation.request.definition_version_id
+                != version.version_id
+                or representation.request.representation_digest
+                != unit.representation_digest
+                or representation.request.permitted_fields_digest
+                != digest_canonical({
+                    "headline": historical[0].headline,
+                    "body": historical[0].retained_corpus_body,
+                    "canonical_url": historical[0].canonical_url,
+                    "published_at": historical[0].published_at,
+                    "updated_at": historical[0].updated_at,
+                })
+                or len(historical) != 1
+                or type(warning) is not dict
+                or warning.get("actionCode") != "CANCEL"
+                or historical[0].headline != unit.headline
+                or historical[0].retained_corpus_body != unit.body
+                or historical[0].published_at != unit.published_at
+                or historical[0].updated_at != unit.updated_at
+                or revision.request.permitted_state_digest
+                != content_digest(
+                    headline=unit.headline, body=unit.body,
+                    canonical_url=unit.canonical_url,
+                )
+                or not self._same_source_time(
+                    revision.request.source_published_time, unit.published_at
+                )
+                or not self._same_source_time(
+                    revision.request.source_updated_time, unit.updated_at
+                )
+                or rehydrated_at < observed_at
+            ):
+                raise ValueError("retained completed event binding differs")
+            body = hko_completed_event_body(
+                historical[0].retained_corpus_body.encode("utf-8")
+            )
+        except (
+            AttributeError, KeyError, LookupError, PermissionError, TypeError,
+            ValueError, UnicodeError, etree.XMLSyntaxError,
+        ):
+            raise hold() from None
+
+        body_digest = digest_bytes(body)
+        rehydrated_text = _utc(rehydrated_at)
+        transport_digest = digest_canonical({
+            "version": VERSION,
+            "mode": "RETAINED_AUTHORITATIVE_COMPLETED_EVENT",
+            "request_digest": request.digest,
+            "endpoint": SOURCE_URLS["HK-02"],
+            "current_response_digest": digest_bytes(current_raw),
+            "current_item_absent": True,
+            "observation_digest": verified.digest,
+            "observation_admission_id": str(verified.admission_id),
+            "observation_access_decision_id": verified.access_decision_id,
+            "source_observed_time": unit.observed_at,
+            "rehydrated_at": rehydrated_text,
+            "item_key": unit.item_key,
+            "body_digest": body_digest,
+            "publication_time": unit.published_at,
+            "source_updated_time": unit.updated_at,
+        })
+        rights_digest = rights_eligibility_digest(
+            rights, body_digest=body_digest, transport_digest=transport_digest,
+            exclusion_signals=(), text_only=True,
+        )
+        return AcquiredEvidence.create(
+            request_digest=request.digest, outcome="COMPLETE",
+            canonical_url=request.canonical_url, body=body,
+            body_digest=body_digest, publisher="Hong Kong Observatory",
+            responsible_body="Hong Kong Observatory",
+            source_type="PRIMARY_OFFICIAL",
+            publication_time=unit.published_at,
+            source_updated_time=unit.updated_at,
+            retrieval_time=rehydrated_text,
+            source_observed_time=unit.observed_at,
+            geography="Hong Kong", language="zh-HK",
+            transport_evidence_digest=transport_digest,
+            currentness_basis="RETAINED_AUTHORITATIVE_COMPLETED_EVENT",
+            rights_eligibility_digest=rights_digest,
+            licence_attribution=HK02_ATTRIBUTION,
+            exclusion_signals=(), text_only=True,
         )
 
     def _require_current_rights(self, source_id: str, endpoint: str):

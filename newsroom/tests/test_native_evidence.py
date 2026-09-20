@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from copy import deepcopy
 from dataclasses import replace
 
@@ -608,3 +610,65 @@ def test_retained_record_replay_binds_exact_revision_bytes(tmp_path, monkeypatch
             _admit_record(system.objects, second, proof())
     finally:
         system.close()
+
+
+def test_historical_observation_receipt_is_explicit_and_legacy_bytes_stay_exact():
+    body = b'official captured source'
+    values = dict(
+        request_digest='sha256:' + '1' * 64, outcome='COMPLETE',
+        canonical_url='https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc',
+        body=body, body_digest=digest_bytes(body), publisher='Hong Kong Observatory',
+        responsible_body='Hong Kong Observatory', source_type='PRIMARY_OFFICIAL',
+        publication_time='2026-09-19T22:00:00.000000Z',
+        source_updated_time='2026-09-20T14:20:00.000000Z',
+        retrieval_time='2026-09-20T17:00:00.000000Z', geography='Hong Kong', language='zh-HK',
+        transport_evidence_digest='sha256:' + '2' * 64,
+        currentness_basis='AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT',
+    )
+    legacy = AcquiredEvidence.create(**values)
+    assert 'source_observed_time' not in json.loads(legacy.receipt_bytes)
+    assert AcquiredEvidence(**{**json.loads(legacy.receipt_bytes), 'exclusion_signals': (),
+                               'body': body, 'receipt_digest': legacy.receipt_digest}) == legacy
+    historical = AcquiredEvidence.create(**{**values,
+        'currentness_basis': 'RETAINED_AUTHORITATIVE_COMPLETED_EVENT',
+        'source_observed_time': '2026-09-20T14:22:35.000000Z',
+    })
+    assert json.loads(historical.receipt_bytes)['source_observed_time'] == '2026-09-20T14:22:35.000000Z'
+    for stamp in ('', '2026-09-20T14:00:00.000000Z', '2026-09-21T14:22:35.000000Z'):
+        with pytest.raises(ValueError):
+            AcquiredEvidence.create(**{**values,
+                'currentness_basis': 'RETAINED_AUTHORITATIVE_COMPLETED_EVENT',
+                'source_observed_time': stamp,
+            })
+
+
+def test_completed_observation_cannot_be_promoted_to_current_warning():
+    from types import SimpleNamespace as NS
+    from newsroom.increment10.editorial import SourceCurrentness
+    from newsroom.control_plane.native_evidence import _INTEGRITY_CHECKS
+
+    digest = 'sha256:' + 'a' * 64
+    source = NS(unit=NS(source_id='HK-02', authority=NS(definition_id='definition-hko')),
+                source_version=NS(canonical_digest=digest))
+    acquired = NS(currentness_basis='RETAINED_AUTHORITATIVE_COMPLETED_EVENT',
+                  publication_time='2026-09-19T22:00:00.000000Z',
+                  source_updated_time='2026-09-20T14:20:00.000000Z',
+                  retrieval_time='2026-09-20T17:00:00.000000Z', transport_evidence_digest=digest)
+    currentness = SourceCurrentness(
+        'HK-02', 'definition-hko', digest, 'COMPLETED_HISTORICAL_EVENT',
+        acquired.publication_time, acquired.retrieval_time, None,
+        acquired.source_updated_time, None, digest, 'PASS', 'RETAINED_COMPLETED_EVENT_CONFIRMED',
+    )
+    assessment = AcquiredSourceAssessment('HK-02', currentness,
+                                         tuple((name, 'PASS') for name in _INTEGRITY_CHECKS))
+    assert NativeEvidenceController._validated_source_assessments(
+        (source,), (acquired,), (assessment,),
+    ) == (assessment,)
+    for changed in (
+        replace(currentness, currency_family='CURRENT_VERSION', supersession_evidence_digest=digest),
+        replace(currentness, version_reference='different source update'),
+    ):
+        with pytest.raises(NativeEvidenceHold, match='SOURCE_ASSESSMENT_HOLD'):
+            NativeEvidenceController._validated_source_assessments(
+                (source,), (acquired,), (replace(assessment, currentness=changed),),
+            )

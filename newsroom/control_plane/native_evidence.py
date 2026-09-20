@@ -96,16 +96,28 @@ class AcquiredEvidence:
     licence_attribution: str = ""
     exclusion_signals: tuple[str, ...] = ()
     text_only: bool = False
+    source_observed_time: str = ""
 
     def __post_init__(self) -> None:
         if (
             type(self.text_only) is not bool
-            or self.currentness_basis not in {"", "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"}
+            or self.currentness_basis not in {
+                "", "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
+                "RETAINED_AUTHORITATIVE_COMPLETED_EVENT",
+            }
+            or type(self.source_observed_time) is not str
             or type(self.exclusion_signals) is not tuple
             or any(type(item) is not str or not item for item in self.exclusion_signals)
             or tuple(sorted(set(self.exclusion_signals))) != self.exclusion_signals
         ):
             raise NativeEvidenceError("acquired source policy facts differ")
+        if self.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT":
+            if not self.source_observed_time or not (
+                UtcTimestamp.parse(self.source_updated_time).value
+                <= UtcTimestamp.parse(self.source_observed_time).value
+                <= UtcTimestamp.parse(self.retrieval_time).value
+            ):
+                raise NativeEvidenceError("retained source observation time differs")
         if self.rights_eligibility_digest:
             validate_sha256_digest(self.rights_eligibility_digest)
         if type(self.body) is not bytes or self.body_digest != digest_bytes(self.body):
@@ -120,6 +132,7 @@ class AcquiredEvidence:
                 name: getattr(self, name)
                 for name in self.__dataclass_fields__
                 if name not in {"body", "receipt_digest"}
+                and not (name == "source_observed_time" and not self.source_observed_time)
             }
         )
 
@@ -130,7 +143,8 @@ class AcquiredEvidence:
             "licence_attribution": "", "exclusion_signals": (), "text_only": False,
             **values,
         }
-        value = {name: item for name, item in values.items() if name != "body"}
+        value = {name: item for name, item in values.items() if name != "body"
+                 and not (name == "source_observed_time" and not item)}
         return cls(
             **values,
             receipt_digest=digest_bytes(canonical_json_bytes(value)),
@@ -666,6 +680,16 @@ class NativeEvidenceController:
                         currentness.currency_family != "CURRENT_VERSION"
                         or currentness.version_reference != result.source_updated_time
                         or currentness.supersession_evidence_digest != result.transport_evidence_digest
+                    )
+                )
+                or (
+                    result.currentness_basis == "RETAINED_AUTHORITATIVE_COMPLETED_EVENT"
+                    and (
+                        source.unit.source_id != "HK-02"
+                        or currentness.currency_family != "COMPLETED_HISTORICAL_EVENT"
+                        or currentness.version_reference != result.source_updated_time
+                        or currentness.supersession_evidence_digest is not None
+                        or currentness.currency_window_seconds is not None
                     )
                 )
                 or currentness.result != "PASS"
