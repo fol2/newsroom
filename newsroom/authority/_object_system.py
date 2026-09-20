@@ -80,6 +80,7 @@ class GovernedObjects:
 
     __slots__ = (
         "__admit",
+        "__committed_admission",
         "__hydrate",
         "__rehydrate",
         "__access_decision",
@@ -97,6 +98,10 @@ class GovernedObjects:
         self,
         *,
         admit: Callable[[ObjectAdmissionRequest, _Source, AuthenticationProof], ObjectAdmissionResult],
+        committed_admission: Callable[
+            [ObjectAdmissionRequest, AuthenticationProof],
+            ObjectAdmissionResult | None,
+        ],
         hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
         rehydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
         access_decision: Callable[
@@ -116,6 +121,7 @@ class GovernedObjects:
         collect_orphans: Callable[[AuthenticationProof], tuple[BlobIdentity, ...]],
     ) -> None:
         self.__admit = admit
+        self.__committed_admission = committed_admission
         self.__hydrate = hydrate
         self.__rehydrate = rehydrate
         self.__access_decision = access_decision
@@ -136,6 +142,16 @@ class GovernedObjects:
         proof: AuthenticationProof,
     ) -> ObjectAdmissionResult:
         return self.__admit(request, source, proof)
+
+    def committed_admission(
+        self,
+        request: ObjectAdmissionRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> ObjectAdmissionResult | None:
+        """Return only an exact committed replay; never stage or admit bytes."""
+
+        return self.__committed_admission(request, proof)
 
     def hydrate(
         self, request: HydrationRequest, *, proof: AuthenticationProof
@@ -448,12 +464,11 @@ class _ObjectBoundary:
             proof=proof,
         )
 
-    def admit(
+    def _admission_preflight(
         self,
         request: ObjectAdmissionRequest,
-        source: _Source,
         proof: AuthenticationProof,
-    ) -> ObjectAdmissionResult:
+    ) -> tuple[_AdmissionPreflightGrant, bool]:
         if not isinstance(request, ObjectAdmissionRequest):
             raise TypeError("request must be ObjectAdmissionRequest")
         authentication, checked_at = self._authenticate(proof)
@@ -542,13 +557,39 @@ class _ObjectBoundary:
                 + timedelta(seconds=rights_policy.preflight_ttl_seconds)
             ),
         )
+        return preflight, replay_contract is not None
+
+    def committed_admission(
+        self,
+        request: ObjectAdmissionRequest,
+        proof: AuthenticationProof,
+    ) -> ObjectAdmissionResult | None:
+        preflight, has_replay_contract = self._admission_preflight(request, proof)
         existing = self._store.find_admission_replay(preflight)
         if existing is not None:
             return ObjectAdmissionResult(existing, replayed=True)
-        if replay_contract is not None:
+        if has_replay_contract:
             raise IdempotencyConflict(
                 "committed admission replay contract has no exact result"
             )
+        return None
+
+    def admit(
+        self,
+        request: ObjectAdmissionRequest,
+        source: _Source,
+        proof: AuthenticationProof,
+    ) -> ObjectAdmissionResult:
+        preflight, has_replay_contract = self._admission_preflight(request, proof)
+        existing = self._store.find_admission_replay(preflight)
+        if existing is not None:
+            return ObjectAdmissionResult(existing, replayed=True)
+        if has_replay_contract:
+            raise IdempotencyConflict(
+                "committed admission replay contract has no exact result"
+            )
+        definition = preflight.definition
+        rights_policy = preflight.rights_policy
 
         staged = self._cas.stage(
             source, object_class=definition.object_class
@@ -1165,6 +1206,7 @@ def open_governed_object_authority_system(
             ),
             objects=GovernedObjects(
                 admit=boundary.admit,
+                committed_admission=boundary.committed_admission,
                 hydrate=boundary.hydrate,
                 rehydrate=boundary.rehydrate,
                 access_decision=boundary.access_decision,

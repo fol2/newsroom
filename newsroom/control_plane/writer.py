@@ -22,7 +22,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.editorial import StoryCandidateRecord
-from newsroom.control_plane.evidence import EvidencePackage
+from newsroom.control_plane.evidence import EvidencePackage, GovernedClaimEvidence
 from newsroom.control_plane.governed_context import GovernedContextStatus
 from newsroom.control_plane.zh_hant import (
     contains_discourse_filler,
@@ -390,9 +390,48 @@ class WriterEvidenceLink:
     rendered_assertion: str
 
 
+def _source_ordered_story_claims(
+    package: EvidencePackage,
+) -> tuple[GovernedClaimEvidence, ...]:
+    ordered: list[tuple[int, int, GovernedClaimEvidence]] = []
+    for claim in package.governed_claims:
+        if claim.claim_role not in {"HEADLINE", "SUBSTANTIVE"}:
+            continue
+        if claim.passage_index >= len(package.passages):
+            raise ValueError("governed claim source span order is unavailable")
+        passage = package.passages[claim.passage_index]
+        starts: list[int] = []
+        offset = 0
+        while True:
+            start = passage.find(claim.supporting_excerpt, offset)
+            if start < 0:
+                break
+            starts.append(start)
+            offset = start + 1
+        claim_offset = claim.supporting_excerpt.find(claim.claim)
+        if (
+            len(starts) != 1
+            or claim_offset < 0
+            or claim.supporting_excerpt.find(claim.claim, claim_offset + 1) >= 0
+        ):
+            raise ValueError("governed claim source span order is ambiguous")
+        ordered.append(
+            (claim.passage_index, starts[0] + claim_offset, claim)
+        )
+    if len({(passage, start) for passage, start, _claim in ordered}) != len(ordered):
+        raise ValueError("governed claim source span order is ambiguous")
+    return tuple(
+        claim
+        for _passage, _start, claim in sorted(
+            ordered, key=lambda item: (item[0], item[1])
+        )
+    )
+
+
 def required_surface_copy(
     package: EvidencePackage,
     *, paragraphs: bool = False,
+    context_preserving: bool = False,
 ) -> tuple[str, str, tuple[WriterEvidenceLink, ...]]:
     required = _required_title_and_body(package)
     if required is None:
@@ -406,7 +445,15 @@ def required_surface_copy(
         for claim in package.governed_claims
         if claim.claim_role == "SUBSTANTIVE"
     )
-    if paragraphs:
+    linked_claims = (headline, *body_claims)
+    if context_preserving:
+        if not paragraphs:
+            raise ValueError("context-preserving copy requires paragraph rendering")
+        linked_claims = _source_ordered_story_claims(package)
+        body = "\n\n".join(
+            claim.rendered_assertion_zh_hant_hk for claim in linked_claims
+        )
+    elif paragraphs:
         body = "\n\n".join(claim.rendered_assertion_zh_hant_hk for claim in body_claims)
     return (
         title,
@@ -416,7 +463,7 @@ def required_surface_copy(
                 governed_claim_id=claim.claim_id,
                 rendered_assertion=claim.rendered_assertion_zh_hant_hk,
             )
-            for claim in (headline, *body_claims)
+            for claim in linked_claims
         ),
     )
 
@@ -1086,12 +1133,21 @@ def validate_writer_copy(
     rendered_assertions = tuple(
         claim.rendered_assertion_zh_hant_hk for claim in package.governed_claims
     )
+    context_preserving_claims = (
+        _source_ordered_story_claims(package)
+        if copy.writer_id == "newsroom.offline-exact-copy.v3"
+        else ()
+    )
     exact_role_structure = (
         len(rendered_assertions) == len(set(rendered_assertions))
         and len(headline_claims) == 1
         and copy.title
         == f"【未出版】{headline_claims[0].rendered_assertion_zh_hant_hk}"
         and (
+            copy.body == "\n\n".join(
+                claim.rendered_assertion_zh_hant_hk
+                for claim in context_preserving_claims
+            ) if copy.writer_id == "newsroom.offline-exact-copy.v3" else
             copy.body == "\n\n".join(
                 claim.rendered_assertion_zh_hant_hk for claim in package.governed_claims
                 if claim.claim_role == "SUBSTANTIVE"
@@ -1101,7 +1157,8 @@ def validate_writer_copy(
         )
         and all(
             copy.title.count(claim.rendered_assertion_zh_hant_hk) == 1
-            and copy.body.count(claim.rendered_assertion_zh_hant_hk) == 0
+            and copy.body.count(claim.rendered_assertion_zh_hant_hk)
+            == (1 if copy.writer_id == "newsroom.offline-exact-copy.v3" else 0)
             if claim.claim_role == "HEADLINE"
             else copy.title.count(claim.rendered_assertion_zh_hant_hk) == 0
             and copy.body.count(claim.rendered_assertion_zh_hant_hk) == 1

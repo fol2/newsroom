@@ -417,6 +417,18 @@ def test_committed_admission_replay_survives_policy_rollout_without_source_read(
         policy_registries=(rights, hydration, admissions),
     )
     try:
+        assert reopened.objects.committed_admission(
+            ObjectAdmissionRequest("source.capture", "missing"),
+            proof=proof(),
+        ) is None
+        retained = reopened.objects.committed_admission(
+            ObjectAdmissionRequest("source.capture", "rollout"),
+            proof=proof(),
+        )
+        assert retained is not None
+        assert retained.replayed is True
+        assert retained.admission.admission_id == first.admission.admission_id
+        assert retained.admission.definition_version == "admission-v1"
         replay = reopened.objects.admit(
             ObjectAdmissionRequest("source.capture", "rollout"),
             source,
@@ -448,6 +460,11 @@ def test_committed_admission_replay_still_requires_current_authorization(
     source = ExplodingSource()
     denied = open_object_system(database, scopes=frozenset())
     try:
+        with pytest.raises(Exception):
+            denied.objects.committed_admission(
+                ObjectAdmissionRequest("source.capture", "current-denial"),
+                proof=proof(),
+            )
         with pytest.raises(Exception):
             denied.objects.admit(
                 ObjectAdmissionRequest("source.capture", "current-denial"),

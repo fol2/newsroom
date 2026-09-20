@@ -528,6 +528,7 @@ def _open_with_adapter(
             ),
             objects=GovernedObjects(
                 admit=object_boundary.admit,
+                committed_admission=object_boundary.committed_admission,
                 hydrate=object_boundary.hydrate,
                 rehydrate=object_boundary.rehydrate,
                 access_decision=object_boundary.access_decision,

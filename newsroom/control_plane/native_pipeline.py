@@ -115,7 +115,7 @@ class NativePipeline:
         # Interrupted/unknown effects settle before starting ordinary work. Each
         # turn has the existing quantum; an atomic revision may overrun it.
         ordinary.sort(key=lambda item: self._journal.progress.get(item[0], {}).get("stage")
-                      not in {"ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED"})
+                      not in {"ASSESSMENT_INTERRUPTED", "ASSESSMENT_STARTED", "PUBLICATION_STARTED", "COPY_CORRECTION_PREPARED"})
         self._advance_revisions(
             tuple(ordinary),
             work_deadline=self._monotonic_clock() + self._reassessment_quantum,
@@ -222,7 +222,7 @@ class NativePipeline:
             previous = self._journal.progress.get(revision_id, {})
             if self._monotonic_clock() >= work_deadline:
                 continue
-            if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
+            if previous.get("stage") in {"ASSESSMENT_INTERRUPTED", "COPY_CORRECTION_PREPARED"}:
                 candidate_version_id = previous.get("facts", {}).get(
                     "candidate_version_id"
                 )
@@ -232,10 +232,13 @@ class NativePipeline:
                         candidate_version_id=candidate_version_id,
                     )
                 continue
-            if previous.get("stage") in {
-                "ACKNOWLEDGED",
-                "SAME_STATE_ASSOCIATED",
-            }:
+            if previous.get("stage") == "ACKNOWLEDGED":
+                due = getattr(self._publish, "copy_correction_due", None)
+                facts = previous.get("facts", {})
+                if callable(due) and due(facts):
+                    self._publish.advance(revision_id=revision_id, candidate_version_id=facts["candidate_version_id"])
+                continue
+            if previous.get("stage") == "SAME_STATE_ASSOCIATED":
                 continue
             if (
                 previous.get("stage") == "EVIDENCE_HOLD"

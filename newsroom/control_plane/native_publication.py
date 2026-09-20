@@ -14,6 +14,7 @@ from newsroom.authority import (
     AuthorityCommands,
     AuthorityEvents,
     GovernedObjects,
+    HydrationRequest,
     ObjectAdmissionId,
     ObjectAdmissionPayload,
     ObjectAdmissionRequest,
@@ -37,7 +38,7 @@ from newsroom.control_plane.native_assessor import (
     RetainedAssessorPreDispatchFailure,
 )
 from newsroom.control_plane.native_progress import NativeRevisionJournal
-from newsroom.control_plane.veto import VetoError
+from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 from newsroom.increment6.candidates import StoryCandidateReadPort
 from newsroom.increment10.editorial import (
     DECISION_ADMISSION_TYPE,
@@ -51,13 +52,19 @@ from newsroom.increment10.editorial import (
     NativeEditorial,
     STORY_COMMAND,
     STORY_EVENT,
+    STORY_PURPOSE,
+    STORY_CLASS,
+    STORY_USE,
     StoryVersionReceipt,
+    StoryVersion,
     StoryVersionRequest,
 )
 from newsroom.increment10.evidence import GovernedEvidencePackages
 from newsroom.increment10.private_serving import (
     ATTEMPT_COMMAND,
     ATTEMPT_EVENT,
+    ATTEMPT_PURPOSE,
+    EVIDENCE_PURPOSE,
     AttemptReceipt,
     EvidenceReceipt,
     PrivateServingDelivery,
@@ -70,6 +77,7 @@ from newsroom.increment10.publication import (
     OfflinePublication,
     PublicationReceipt,
     PublicationRequest,
+    TRANSACTION_PURPOSE,
 )
 from newsroom.increment10.ingress import NON_PUBLIC_EVIDENCE_INTAKE_BOUNDARY
 
@@ -166,6 +174,7 @@ class NativePublicationResult:
     attempt_receipt: AttemptReceipt
     evidence_receipt: EvidenceReceipt
     read_proof: PrivateServingReadProof
+    writer_id: str = ""
 
 
 class NativePublicationController:
@@ -196,6 +205,7 @@ class NativePublicationController:
                 "exact native publication authorities required"
             )
         self._objects = objects
+        self._events = events
         self._commands = commands
         self._candidate_port = candidate_port
         self._evidence = evidence_packages
@@ -300,10 +310,12 @@ class NativePublicationController:
         applied_at: str,
         observed_at: str,
         proof: AuthenticationProof,
+        correction_of: NativePublicationResult | None = None,
     ) -> NativePublicationResult:
         if (
             type(package_admission_id) is not ObjectAdmissionId
             or type(editorial_decision) is not EditorialPolicyDecision
+            or (correction_of is not None and type(correction_of) is not NativePublicationResult)
             or any(
                 type(value) is not int or value < 0
                 for value in (
@@ -319,6 +331,24 @@ class NativePublicationController:
             candidate_port=self._candidate_port,
             proof=proof,
         )
+        if correction_of is not None:
+            old, old_story = self.read_acknowledged({
+                "story_event_id": correction_of.story_receipt.event_id,
+                "publication_event_id": correction_of.publication_receipt.event_id,
+                "delivery_attempt_event_id": correction_of.attempt_receipt.event_id,
+                "delivery_evidence_event_id": correction_of.evidence_receipt.event_id,
+            }, proof=proof)
+            if (
+                old != correction_of
+                or old_story.copy.writer_id != "newsroom.offline-exact-copy.v2"
+                or old_story.package_admission_id != package_admission_id
+                or old_story.policy_decision_id != editorial_decision.decision_id
+                or old_story.candidate_version_id != retained.candidate_version_id
+                or old.story_receipt.aggregate_version != expected_story_version
+                or old.attempt_receipt.aggregate_version != expected_publication_version
+                or expected_delivery_evidence_version != 0
+            ):
+                raise NativePublicationError("copy correction predecessor binding differs")
         identity = retained.package.candidate_id
         story_id = _aggregate("story", identity)
         publication_id = _aggregate("publication", identity)
@@ -334,13 +364,16 @@ class NativePublicationController:
             candidate_port=self._candidate_port,
             proof=proof,
         )
+        if correction_of is not None and _story.copy.writer_id != "newsroom.offline-exact-copy.v3":
+            raise NativePublicationError("copy correction writer differs")
         publication_receipt, _transaction = self._publication.decide(
             PublicationRequest(
                 publication_id,
                 expected_publication_version,
                 f"native-publication:{identity}:{expected_publication_version + 1}",
                 "AUTO_PUBLISH",
-                ("NATIVE_STORY_WRITE_READY",),
+                (("NATIVE_COPY_CORRECTION", "NATIVE_STORY_WRITE_READY")
+                 if correction_of is not None else ("NATIVE_STORY_WRITE_READY",)),
                 editorial_decision.evaluated_at,
             ),
             story_receipt=story_receipt,
@@ -391,7 +424,99 @@ class NativePublicationController:
             attempt_receipt,
             evidence_receipt,
             read_proof,
+            _story.copy.writer_id,
         )
+
+    def read_acknowledged(
+        self, facts: dict, *, proof: AuthenticationProof,
+    ) -> tuple[NativePublicationResult, StoryVersion]:
+        """Reconstruct receipts, then delegate all bindings to existing readers."""
+        def event_for(key):
+            return self._events.provenance(facts[key], proof=proof).event
+
+        def metadata(key, purpose):
+            event = event_for(key)
+            material = self._objects.hydrate(
+                HydrationRequest(ObjectAdmissionId.parse(event.object_admission_id), purpose),
+                proof=proof,
+            )
+            if digest_bytes(material.data) != event.payload_digest:
+                raise NativePublicationError("acknowledged object digest differs")
+            return event, json.loads(material.data)
+
+        try:
+            event = event_for("story_event_id")
+            story_receipt = StoryVersionReceipt(
+                event.command_id, event.event_id, AggregateId.parse(event.aggregate_id),
+                event.aggregate_version, ObjectAdmissionId.parse(event.object_admission_id),
+                event.payload_digest,
+            )
+            story = self._editorial.read_story_version(
+                story_receipt, candidate_port=self._candidate_port, proof=proof,
+            )
+            event, value = metadata("publication_event_id", TRANSACTION_PURPOSE)
+            publication = PublicationReceipt(
+                event.command_id, event.event_id, AggregateId.parse(event.aggregate_id),
+                event.aggregate_version, ObjectAdmissionId.parse(event.object_admission_id),
+                event.payload_digest, value["transaction_id"], value["decision"]["decision_id"],
+                value["bundle"]["bundle_id"], tuple(item["operation_id"] for item in value["operations"]),
+            )
+            event, value = metadata("delivery_attempt_event_id", ATTEMPT_PURPOSE)
+            attempt = AttemptReceipt(
+                event.command_id, event.event_id, AggregateId.parse(event.aggregate_id),
+                event.aggregate_version, ObjectAdmissionId.parse(event.object_admission_id),
+                value["batch_id"], event.payload_digest,
+            )
+            event, value = metadata("delivery_evidence_event_id", EVIDENCE_PURPOSE)
+            evidence = EvidenceReceipt(
+                event.command_id, event.event_id, AggregateId.parse(event.aggregate_id),
+                event.aggregate_version, ObjectAdmissionId.parse(event.object_admission_id),
+                value["evidence_id"], event.payload_digest,
+            )
+            read_proof = self._delivery.acknowledged_read_proof(
+                evidence, attempt, publication_receipt=publication,
+                story_receipt=story_receipt, candidate_port=self._candidate_port, proof=proof,
+            )
+            if read_proof is None:
+                raise NativePublicationError("copy correction lacks an acknowledged predecessor")
+            reader = open_private_serving_read_port(
+                self._bindings.target_path, target_id=self._bindings.target_id,
+                target_context_digest=self._bindings.target_context_digest, proof=read_proof,
+            )
+            try:
+                if reader.acknowledged_rows() is None:
+                    raise NativePublicationError("copy correction predecessor readback differs")
+            finally:
+                reader.close()
+            return NativePublicationResult(
+                story_receipt, publication, attempt, evidence, read_proof, story.copy.writer_id,
+            ), story
+        except (OperatorDrainRequested, VetoError):
+            raise
+        except Exception as exc:
+            raise NativePublicationError("copy correction predecessor validation failed") from exc
+
+    def retained_writer_id(self, event_id: str, *, proof: AuthenticationProof) -> str:
+        """Classify a retained copy without re-admitting its old evidence policy."""
+        event = self._events.provenance(event_id, proof=proof).event
+        receipt = StoryVersionReceipt(
+            event.command_id, event.event_id, AggregateId.parse(event.aggregate_id),
+            event.aggregate_version, ObjectAdmissionId.parse(event.object_admission_id), event.payload_digest,
+        )
+        self._editorial._verify_story_event(receipt, proof=proof)
+        material = self._objects.hydrate(
+            HydrationRequest(receipt.admission_id, STORY_PURPOSE), proof=proof,
+        )
+        self._editorial._verify_access(
+            material.decision, policy=self._bindings.editorial_story_hydration_policy_digest,
+            object_class=STORY_CLASS, allowed_use=STORY_USE,
+        )
+        story = StoryVersion.from_bytes(material.data)
+        if (story.digest, story.story_id, story.aggregate_version) != (
+            receipt.story_version_digest, receipt.story_id, receipt.aggregate_version,
+        ):
+            raise NativePublicationError("retained copy identity differs")
+        return story.copy.writer_id
 
     def _record_decision(
         self,
@@ -484,6 +609,13 @@ class NativePublicationContinuation:
         self._assessment_contract_version = assessment_contract_version
         self._clock = clock
 
+    @staticmethod
+    def copy_correction_due(facts: dict) -> bool:
+        return (
+            facts.get("writer_id") != "newsroom.offline-exact-copy.v3"
+            and facts.get("copy_correction_checked_version") != "newsroom.offline-exact-copy.v3"
+        )
+
     def advance(
         self, *, revision_id: str, candidate_version_id: str
     ) -> NativePublicationContinuationResult:
@@ -491,7 +623,7 @@ class NativePublicationContinuation:
             raise NativePublicationError("native continuation revision differs")
         progress = self._journal.progress.get(revision_id, {})
         if (
-            progress.get("stage") != "ASSESSMENT_INTERRUPTED"
+            progress.get("stage") not in {"ASSESSMENT_INTERRUPTED", "ACKNOWLEDGED", "COPY_CORRECTION_PREPARED"}
             and revision_id not in self._sources
         ):
             raise NativePublicationError("native continuation revision differs")
@@ -506,6 +638,12 @@ class NativePublicationContinuation:
         if facts.get("candidate_id") not in (None, candidate_id):
             raise NativePublicationError("native continuation stable Candidate differs")
         facts["candidate_id"] = candidate_id
+
+        if progress.get("stage") == "COPY_CORRECTION_PREPARED" or (
+            progress.get("stage") == "ACKNOWLEDGED"
+            and (self.copy_correction_due(facts) or facts.get("copy_correction_of"))
+        ):
+            return self._advance_copy_correction(revision_id, candidate_version_id, facts, progress)
 
         if (
             progress.get("stage") == "EVIDENCE_HOLD"
@@ -896,6 +1034,79 @@ class NativePublicationContinuation:
             publication_event_id=published.publication_receipt.event_id,
             delivery_attempt_event_id=published.attempt_receipt.event_id,
             delivery_evidence_event_id=published.evidence_receipt.event_id,
+        )
+        if getattr(published, "writer_id", None):
+            facts["writer_id"] = published.writer_id
+        self._journal.advance(revision_id, stage="ACKNOWLEDGED", facts=facts)
+        return NativePublicationContinuationResult("ACKNOWLEDGED", None, published)
+
+    def _advance_copy_correction(self, revision_id, candidate_version_id, facts, progress):
+        """Append one authenticated v2-to-v3 correction; never replace an ACK."""
+        predecessor = facts.get("copy_correction_of")
+        prepared = (progress.get("stage") == "COPY_CORRECTION_PREPARED"
+                    or facts.get("copy_correction_result") == "CORRECTED")
+        try:
+            if predecessor is None:
+                writer_id = self._runtime.publication.retained_writer_id(
+                    facts["story_event_id"], proof=self._runtime.proof,
+                )
+                if writer_id in {"newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v3"}:
+                    facts.update(writer_id=writer_id, copy_correction_checked_version="newsroom.offline-exact-copy.v3")
+                    self._journal.advance(revision_id, stage="ACKNOWLEDGED", facts=facts)
+                    return NativePublicationContinuationResult("ACKNOWLEDGED", None, None)
+                if writer_id != "newsroom.offline-exact-copy.v2":
+                    raise NativePublicationError("copy correction predecessor writer differs")
+                predecessor = {key: facts[key] for key in (
+                    "story_event_id", "publication_event_id", "delivery_attempt_event_id", "delivery_evidence_event_id",
+                )}
+                predecessor["progress_ordinal"] = progress["ordinal"]
+            if revision_id not in self._sources:
+                raise NativePublicationError("copy correction current source is unavailable")
+            prior, story = self._runtime.publication.read_acknowledged(predecessor, proof=self._runtime.proof)
+            package_id = ObjectAdmissionId.parse(facts["package_admission_id"])
+            decision = EditorialPolicyDecision.from_bytes(canonical_json_bytes(facts["editorial_decision"]))
+            if (story.candidate_version_id != candidate_version_id
+                or story.package_admission_id != package_id
+                or story.policy_decision_id != decision.decision_id):
+                raise NativePublicationError("copy correction immutable evidence differs")
+            expected = (prior.story_receipt.aggregate_version, prior.attempt_receipt.aggregate_version, 0)
+            if not prepared:
+                facts.update(
+                    copy_correction_of=predecessor,
+                    expected_story_version=expected[0], expected_publication_version=expected[1],
+                    expected_delivery_evidence_version=0,
+                    publication_applied_at=self._clock().to_text(),
+                    publication_observed_at=self._clock().to_text(),
+                )
+                self._journal.advance(revision_id, stage="COPY_CORRECTION_PREPARED", facts=facts)
+                prepared = True
+            elif tuple(facts[key] for key in (
+                "expected_story_version", "expected_publication_version", "expected_delivery_evidence_version",
+            )) != expected:
+                raise NativePublicationError("copy correction expected versions differ")
+            published = self._runtime.publication.advance(
+                package_id, decision, expected_story_version=expected[0],
+                expected_publication_version=expected[1], expected_delivery_evidence_version=0,
+                applied_at=facts["publication_applied_at"], observed_at=facts["publication_observed_at"],
+                proof=self._runtime.proof, correction_of=prior,
+            )
+        except (OperatorDrainRequested, VetoError):
+            raise
+        except Exception as exc:
+            facts["copy_correction_hold_reason"] = f"COPY_CORRECTION_HOLD:{type(exc).__name__}"
+            facts["copy_correction_failure_detail"] = str(exc)[:240]
+            stage = "COPY_CORRECTION_PREPARED" if prepared else "ACKNOWLEDGED"
+            self._journal.advance(revision_id, stage=stage, facts=facts)
+            return NativePublicationContinuationResult(stage, facts["copy_correction_hold_reason"], None)
+        facts.pop("copy_correction_hold_reason", None)
+        facts.pop("copy_correction_failure_detail", None)
+        facts.update(
+            story_event_id=published.story_receipt.event_id,
+            publication_event_id=published.publication_receipt.event_id,
+            delivery_attempt_event_id=published.attempt_receipt.event_id,
+            delivery_evidence_event_id=published.evidence_receipt.event_id,
+            writer_id=published.writer_id, copy_correction_result="CORRECTED",
+            copy_correction_checked_version="newsroom.offline-exact-copy.v3",
         )
         self._journal.advance(revision_id, stage="ACKNOWLEDGED", facts=facts)
         return NativePublicationContinuationResult("ACKNOWLEDGED", None, published)
