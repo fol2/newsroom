@@ -1,4 +1,4 @@
-"""Offline reclamation of superseded native retrieval-read diagnostics.
+"""Offline reclamation of obsolete native read diagnostics.
 
 This is not retention of commands, admissions, accounting or source history.
 The existing writer lock is held throughout, ordinary append-only triggers are
@@ -7,6 +7,7 @@ restored transactionally, and no authority database copy is made.
 from __future__ import annotations
 
 from contextlib import ExitStack
+from datetime import timedelta
 import fcntl
 import hashlib
 import logging
@@ -27,6 +28,7 @@ from .migrations import (
 )
 from .object_policy import HydrationPolicyContract
 from .persistence import AuthorityWriterBusy
+from .types import UtcTimestamp
 
 _AUDIT_KEYS = {
     "object_access_decisions": "access_decision_id",
@@ -47,6 +49,7 @@ _PURPOSES = {
 _VERSION = "hermes-private-native-v1"
 _PRINCIPAL = "newsroom.control-plane"
 _DOMAIN = "newsroom.evaluation"
+_GRAPHITI_READ_RETENTION_DAYS = 7
 _EXTERNAL_DATABASES = (
     "unpublished_store.sqlite3", "native/retrieval.sqlite3",
     "native/evidence-intake.sqlite3", "native/private-serving.sqlite3",
@@ -207,6 +210,18 @@ def _policies(conn: sqlite3.Connection) -> None:
             raise AuditRetentionError(f"exact native policy is missing or differs: {policy.policy_id}")
         conn.execute("INSERT INTO _audit_policies VALUES (?,?,?)", (purpose, object_class, policy.contract_digest))
 
+    from newsroom.graphiti_adapter.evaluation_attempt import GRAPHITI_EVALUATION_HYDRATION_POLICY
+
+    policy = GRAPHITI_EVALUATION_HYDRATION_POLICY
+    row = conn.execute(
+        "SELECT canonical_bytes FROM hydration_policy_contracts WHERE contract_digest=?",
+        (policy.contract_digest,),
+    ).fetchone()
+    if row is None or bytes(row[0]) != canonical_json_bytes(policy.canonical_value()):
+        raise AuditRetentionError("exact native Graphiti read policy is missing or differs")
+    conn.execute("INSERT INTO _audit_policies VALUES (?,?,?)",
+                 (policy.purpose, "source.expression", policy.contract_digest))
+
 
 def _children(conn: sqlite3.Connection, parent: str) -> list[tuple[str, str]]:
     key = _AUDIT_KEYS[parent]
@@ -249,7 +264,7 @@ def _unreferenced(parent: str, children: list[tuple[str, str]]) -> str:
     return " AND ".join(tests)
 
 
-def _candidates(conn: sqlite3.Connection) -> dict[str, int]:
+def _candidates(conn: sqlite3.Connection, *, graphiti_cutoff: str) -> dict[str, int]:
     conn.execute("""CREATE TEMP TABLE _audit_candidates AS
         SELECT a.rowid AS access_rowid,a.access_decision_id,a.canonical_digest,
                a.authentication_context_id,a.authorization_request_digest,
@@ -283,14 +298,44 @@ def _candidates(conn: sqlite3.Connection) -> dict[str, int]:
     """, (_PRINCIPAL, _DOMAIN, _VERSION))
     eligible, newest = conn.execute("SELECT count(*),coalesce(sum(reuse_rank=1),0) FROM _audit_candidates").fetchone()
     conn.execute("DELETE FROM _audit_candidates WHERE reuse_rank=1")
+    # A successful read is not source or provider authority. Once its short
+    # diagnostic horizon expires, an unreferenced receipt need not survive just
+    # because it was the only read of that admission. Actual consumers below
+    # still retain every exact access ID/digest through FK and token closure.
+    conn.execute("""INSERT INTO _audit_candidates
+        SELECT a.rowid,a.access_decision_id,a.canonical_digest,
+               a.authentication_context_id,a.authorization_request_digest,
+               a.authorization_decision_id,2
+        FROM object_access_decisions a
+        JOIN _audit_policies p ON p.purpose=a.purpose AND p.class=a.object_class
+            AND p.digest=a.hydration_policy_contract_digest
+        JOIN authorization_requests r ON r.request_digest=a.authorization_request_digest
+            AND r.authentication_context_id=a.authentication_context_id
+        JOIN authorization_decisions d ON d.authorization_decision_id=a.authorization_decision_id
+            AND d.authorization_request_digest=a.authorization_request_digest
+            AND d.authentication_context_id=a.authentication_context_id
+        JOIN authentication_contexts h ON h.authentication_context_id=a.authentication_context_id
+        WHERE a.purpose='graphiti.corpus-ingest' AND a.allowed_use='proposal.extraction'
+          AND a.security_scope='evaluation' AND a.retention_scope='disposable-workspace'
+          AND a.principal_id=? AND a.authority_domain=? AND a.decided_at<?
+          AND r.principal_id=a.principal_id AND r.authority_domain=a.authority_domain
+          AND r.operation_type='object:hydrate:graphiti.corpus-ingest'
+          AND r.required_scope='authority.objects.read'
+          AND h.principal_id=a.principal_id AND h.authority_domain=a.authority_domain
+          AND d.allowed=1 AND d.reason_code='AUTHZ_ALLOWED'
+          AND d.authorization_policy_version=?
+    """, (_PRINCIPAL, _DOMAIN, graphiti_cutoff, _VERSION))
+    expired = conn.execute("SELECT changes()").fetchone()[0]
+    eligible += expired
     # Direct FKs are additionally checked at delete time. Token roots include
     # their actual TEXT columns as well as nested canonical representations.
     conn.execute("DELETE FROM _audit_candidates WHERE access_decision_id IN (SELECT id FROM _audit_tokens) "
                  "OR canonical_digest IN (SELECT id FROM _audit_tokens)")
     candidates = conn.execute("SELECT count(*) FROM _audit_candidates").fetchone()[0]
     return {"eligible_access": eligible, "newest_access_retained": newest,
+            "expired_graphiti_access": expired,
             "externally_referenced_superseded": eligible - newest - candidates,
-            "superseded_access_candidates": candidates}
+            "prunable_access_candidates": candidates}
 
 
 def _delete_candidates(conn: sqlite3.Connection) -> dict[str, int]:
@@ -333,7 +378,9 @@ def _delete_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     return deleted
 
 
-def prune_native_diagnostic_audit(data_root: Path, *, apply: bool = False) -> dict[str, object]:
+def prune_native_diagnostic_audit(
+    data_root: Path, *, apply: bool = False, clock=UtcTimestamp.now,
+) -> dict[str, object]:
     """Dry-run by default; apply atomically prunes, then compacts in place.
 
     Required external roots are deliberately not optional CLI flags. The
@@ -341,6 +388,9 @@ def prune_native_diagnostic_audit(data_root: Path, *, apply: bool = False) -> di
     No provider, CAS mutation, command/history deletion or backup is performed.
     """
     started = time.monotonic_ns()
+    graphiti_cutoff = UtcTimestamp(
+        clock().value - timedelta(days=_GRAPHITI_READ_RETENTION_DAYS)
+    ).to_text()
     data_root = _exact_path(Path(data_root), directory=True)
     authority = _exact_path(data_root / "increment4/authority.sqlite3")
     cas = _exact_path(data_root / "increment4/object_cas", directory=True)
@@ -401,7 +451,7 @@ def prune_native_diagnostic_audit(data_root: Path, *, apply: bool = False) -> di
             scan_ms = (time.monotonic_ns() - scan_started) // 1_000_000
             _LOG.info("AUDIT_RETENTION_STAGE classify_superseded_reads")
             candidates_started = time.monotonic_ns()
-            counts = _candidates(conn)
+            counts = _candidates(conn, graphiti_cutoff=graphiti_cutoff)
             report: dict[str, object] = {
                 "mode": "apply" if apply else "dry-run", "authority": str(authority),
                 "reference_scan_ms": scan_ms,
@@ -409,6 +459,7 @@ def prune_native_diagnostic_audit(data_root: Path, *, apply: bool = False) -> di
                 "schema_sha256": schema, "business": business,
                 "external_roots": external_reports, "cas": cas_report,
                 "counts": counts, "database_bytes_before": before.st_size,
+                "graphiti_read_expiry_before": graphiti_cutoff,
                 "protected_tokens": conn.execute("SELECT count(*) FROM _audit_tokens").fetchone()[0],
                 "committed": False, "compacted": False,
                 "wal_bytes_before": wal_before,
