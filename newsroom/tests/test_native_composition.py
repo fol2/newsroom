@@ -506,6 +506,8 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
     }
     for expected_bootstraps in (1, 2):
         with native_composition.open_native_pipeline(**arguments) as pipeline:
+            assert pipeline._publish.copy_correction_due({})
+            assert not pipeline._publish.copy_correction_due({"writer_id": "newsroom.offline-exact-copy.v3"})
             assert type(pipeline) is NativePipeline
             assert type(pipeline._runtime.authority.commands) is AuthorityCommands
             assert type(pipeline._runtime.authority.events) is AuthorityEvents
@@ -574,6 +576,23 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
                     revision_id: pipeline._journal.progress[revision_id]["ordinal"]
                     for revision_id in retained_ordinals
                 } == retained_ordinals
+                acknowledged = _native("copy-ack")
+                pipeline._journal.land((acknowledged,))
+                facts = {"candidate_version_id": "candidate:copy-ack", "graphiti_receipts": [{}]}
+                pipeline._journal.advance(acknowledged.revision_id, stage="ACKNOWLEDGED", facts=facts)
+
+                def unavailable_source(**_):
+                    raise native_composition.NativeEvidenceHold("SOURCE_TEST_HOLD", acknowledged.source_id)
+
+                monkeypatch.setattr(native_composition, "native_evidence_sources", unavailable_source)
+                selected = ((acknowledged.revision_id, (acknowledged,)),)
+                pipeline._advance_revisions(selected, work_deadline=float("inf"))
+                assert recovery_sources == [{}, {}, {}]
+                pipeline._journal.advance(acknowledged.revision_id, stage="ACKNOWLEDGED", facts={
+                    **facts, "writer_id": "newsroom.offline-exact-copy.v3",
+                })
+                pipeline._advance_revisions(selected, work_deadline=float("inf"))
+                assert recovery_sources == [{}, {}, {}]
 
     with pytest.raises(NativeRetrievalHold, match="NATIVE_EMBEDDING_POLICY_HOLD"):
         with native_composition.open_native_pipeline(
@@ -586,7 +605,7 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
         ):
             raise AssertionError("unqualified composition entered")
     assert _RetrievalProjection.bootstraps == 2
-    assert stops == ["checked"] * 3
+    assert stops == ["checked"] * 5  # Three opens and two bounded ACK turns.
     assert fences == ["entered"] * 8
 
 
