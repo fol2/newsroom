@@ -1721,6 +1721,8 @@ class AutonomousNativeEvidenceAssessor:
             for source, result in zip(sources, acquired, strict=True)
         )
         claims_by_id = {claim.claim_id: claim for claim in package.governed_claims}
+        verified_qualifications = []
+        unsupported_auxiliary = False
         for item in package.qualification_evidence:
             claim = claims_by_id.get(item.governed_claim_id)
             if claim is None:
@@ -1743,7 +1745,22 @@ class AutonomousNativeEvidenceAssessor:
                     )
                 )
             ):
+                if claim.claim_role == "HEADLINE":
+                    raise EvidencePackageError("assessment qualification evidence is not exact")
+                unsupported_auxiliary = True
+                continue
+            verified_qualifications.append(item)
+        if unsupported_auxiliary:
+            if not any(
+                claims_by_id[item.governed_claim_id].claim_role == "HEADLINE"
+                for item in verified_qualifications
+            ):
                 raise EvidencePackageError("assessment qualification evidence is not exact")
+            # Classification suggestions are not source facts. Keep every fully
+            # validated claim and the original accounted raw output, but issue
+            # qualification records only for locally proved suggestions. The
+            # headline must independently qualify; admission checks are unchanged.
+            package = replace(package, qualification_evidence=tuple(verified_qualifications))
         assessment_records = [
             {
                 "record_id": claim.semantic_relation_evidence_id,

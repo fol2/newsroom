@@ -2072,3 +2072,66 @@ def test_named_entity_record_identity_binds_immutable_policy(monkeypatch):
     new = module._named_entity_record_id(*values)
     assert new != old
     assert module._named_entity_record_id(*values) == new
+
+
+@pytest.mark.parametrize("fault", (None, "old-state", "no-headline-proof", "source-drift"))
+def test_source_bound_replacement_preserves_claims_but_only_proves_supported_qualifications(
+    retained_22589_assessment, fault,
+):
+    # Actual retained result 29221: valid headline replacement; an additional
+    # STATUS classifier is not evidence for the separate responsibility claim.
+    candidate, base, source, acquired, raw = _qualification_assessor_inputs(
+        retained_22589_assessment, kind="policy",
+    )
+    headline = "The reforms replaced end-point assessment with a new assessment model, now called apprenticeship assessment."
+    background = "Responsibility for the overall apprenticeship programme now sits with the Department of Work and Pensions (DWP)."
+    claim = raw["package"]["governed_claims"][0]
+    claim.update(claim=headline, supporting_excerpt=headline,
+                 rendered_assertion_zh_hant_hk="改革以新評核模式取代終期評核，現稱為學徒評核。")
+    auxiliary = {**claim, "claim_id": "responsibility", "claim_role": "SUBSTANTIVE",
+                 "claim": background, "supporting_excerpt": background,
+                 "rendered_assertion_zh_hant_hk": "整體學徒計劃的責任現時由 Department of Work and Pensions（DWP）承擔。"}
+    qualification = raw["package"]["qualification_evidence"][0]
+    qualification["test_evidence"].update(
+        material_relation_span=headline,
+        new_state="end-point assessment" if fault == "old-state" else "a new assessment model, now called apprenticeship assessment",
+    )
+    unsupported = {**qualification, "governed_claim_id": "responsibility",
+                   "test_evidence": {**qualification["test_evidence"], "change_kind": "STATUS",
+                                     "material_relation_span": background,
+                                     "new_state": "now sits with the Department of Work and Pensions (DWP)"}}
+    raw["package"].update(governed_claims=[claim, auxiliary],
+                          substantive_new_information=[headline, background],
+                          qualification_evidence=[qualification, unsupported])
+    if fault == "no-headline-proof":
+        raw["package"]["qualification_evidence"] = [unsupported]
+    body = (headline + "\n" + background).encode()
+    if fault == "source-drift":
+        body = headline.encode()
+    acquired = SimpleNamespace(**{**vars(acquired), "body": body, "body_digest": digest_bytes(body)})
+    execution = NativeAssessmentExecution(canonical_json_bytes(raw).decode(), {})
+    if fault == "source-drift":
+        with pytest.raises(NativeEvidenceHold, match="ASSESSOR_CLAIM_BINDING_HOLD"):
+            AutonomousNativeEvidenceAssessor._validated_execution(execution, candidate, base, (source,), (acquired,))
+    elif fault is not None:
+        with pytest.raises(EvidencePackageError, match="qualification evidence is not exact"):
+            AutonomousNativeEvidenceAssessor._validated_execution(execution, candidate, base, (source,), (acquired,))
+    else:
+        result = AutonomousNativeEvidenceAssessor._validated_execution(execution, candidate, base, (source,), (acquired,))
+        assert len(result.governed_claims) == 2
+        assert [item.governed_claim_id for item in result.qualification_evidence] == [claim["claim_id"]]
+        assert [item["governed_claim_id"] for item in result.assessment_records
+                if item["record_type"] == "QUALIFICATION_EVIDENCE"] == [claim["claim_id"]]
+
+
+@pytest.mark.parametrize("prefix", ("", "It is false that ", "If approved; ", "Officials denied that\n"))
+@pytest.mark.parametrize("object_state", (True, False))
+def test_complete_replacement_object_does_not_lose_source_context(prefix, object_state):
+    from newsroom.control_plane.admission import _operational_replacement_is_proven
+
+    span = "These changes replace end-point assessment (EPA) with a new approach, called apprenticeship assessment, which allows assessment to take place throughout the apprenticeship rather than only at the end."
+    state = span[span.index("a new approach"):].rstrip(".") if object_state else "end-point assessment (EPA)"
+    assert _operational_replacement_is_proven(
+        span, SimpleNamespace(claim=span, supporting_excerpt=span),
+        source_context=prefix + span, new_state=state,
+    ) is (not prefix and object_state)

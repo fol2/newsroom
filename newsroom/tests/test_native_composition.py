@@ -38,7 +38,7 @@ def test_assessment_consumer_contract_binds_producer_and_rendering_policies():
     assert native_composition.ASSESSMENT_CONTRACT_VERSION == (
         "newsroom.native-evidence-assessor.v13+newsroom.named-entity.v14+"
         "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1+"
-        "newsroom.qualification-relation.v1"
+        "newsroom.qualification-relation.v2"
     )
 
 
@@ -68,7 +68,8 @@ def test_native_cursor_credential_loads_only_provisioned_key_and_restores_enviro
 
 @pytest.mark.parametrize(
     "missing_workload",
-    (WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING, WorkloadClass.NATIVE_EVIDENCE_ASSESSOR),
+    (WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING, WorkloadClass.NATIVE_EVIDENCE_ASSESSOR,
+     "stale-assessor-contract"),
 )
 def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
     tmp_path, monkeypatch, missing_workload,
@@ -102,6 +103,9 @@ def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
     def qualified_policy(**request):
         if request["workload_class"] is missing_workload:
             raise ValueError("qualification is absent")
+        if (missing_workload == "stale-assessor-contract"
+                and request["workload_class"] is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR):
+            return SimpleNamespace(prompt_contract_version="stale-contract")
         return policies[request["workload_class"]]
 
     monkeypatch.setattr(native_composition, "ModelUsageService", lambda _: SimpleNamespace(
@@ -118,7 +122,9 @@ def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
         ledger=str(paths.CANONICAL_UNPUBLISHED_STORE), lock=str(root / "hermes.lock"),
         once=False, interval=300, failure_backoff=60,
     ))
-    with pytest.raises(ValueError, match="qualification is absent"):
+    expected = ("prompt contract differs before authority OPEN"
+                if missing_workload == "stale-assessor-contract" else "qualification is absent")
+    with pytest.raises(ValueError, match=expected):
         service.run()
 
 
