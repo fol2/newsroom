@@ -94,11 +94,12 @@ _PRIOR_V9_WRITE_ADMISSION_POLICY_VERSIONS = frozenset(
     "newsroom.write-admission.v9+newsroom.evid-012.v7+"
     "newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+"
     "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
-    "newsroom.named-entity.v13+newsroom.cont-originality.v3+"
+    f"newsroom.named-entity.v{version}+newsroom.cont-originality.v3+"
     "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1+"
     "newsroom.qualification-relation.v1"
+    for version in (13, 14)
 }
-QUALIFICATION_RELATION_POLICY_VERSION = "newsroom.qualification-relation.v1"
+QUALIFICATION_RELATION_POLICY_VERSION = "newsroom.qualification-relation.v2"
 WRITE_ADMISSION_POLICY_VERSION = (
     "newsroom.write-admission.v9+"
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
@@ -306,13 +307,13 @@ def _operational_replacement_is_proven(
     ):
         return False
     match = re.fullmatch(
-        r"(?:These changes replace|This (?:change|policy|reform) replaces|"
-        r"The (?:policy|reform) replaces) "
+        r"(?:These changes|This (?:change|policy|reform)|The (?:policy|reforms?)) "
+        r"replace(?:s|d)? "
         r"(?P<old>[^,.;!?\n]{1,120}) with "
         r"(?P<new>a new [^,.;!?\n]{1,120})"
-        r"(?:, called (?P<name>[^,.;!?\n]{1,120}))?, which allows "
+        r"(?:, (?:now )?called (?P<name>[^,.;!?\n]{1,120}))?(?:, which allows "
         r"(?P<operation>[a-z]+) to take place throughout "
-        r"(?P<scope>the [a-z]+(?: [a-z]+){0,5}) rather than only at the end\.?",
+        r"(?P<scope>the [a-z]+(?: [a-z]+){0,5}) rather than only at the end)?\.?",
         span, flags=re.IGNORECASE,
     )
     if match is None or re.search(
@@ -320,9 +321,13 @@ def _operational_replacement_is_proven(
         flags=re.IGNORECASE,
     ):
         return False
-    if new_state not in (span, match["new"], match["name"]):
+    if new_state not in (
+        span, match["new"], match["name"], span[match.start("new"):].rstrip("."),
+    ):
         return False
-    operation = match["operation"]
+    # The retained past-tense form names the same assessment operation in both
+    # object slots without repeating the optional operational-effect clause.
+    operation = match["operation"] or "assessment"
     operation_pattern = rf"\b{re.escape(operation)}\b"
     if not all(re.search(operation_pattern, label, flags=re.IGNORECASE) for label in (
         match["old"], match["name"] or match["new"],

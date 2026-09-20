@@ -236,6 +236,8 @@ def deployed_native_service(args):
             config_identity=native_assessor.CONFIG_IDENTITY,
             output_schema_digest=native_assessor.SCHEMA_DIGEST,
         )
+        if assessment.prompt_contract_version != native_assessor.VERSION:
+            raise ValueError("native assessor prompt contract differs before authority OPEN")
         tree = subprocess.check_output(
             ("/usr/bin/git", "rev-parse", f"{revision}^{{tree}}"),
             cwd=Path(__file__).resolve().parents[2], text=True, timeout=10,
