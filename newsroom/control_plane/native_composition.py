@@ -637,25 +637,29 @@ def open_native_pipeline(
         )
 
         class Publication:
+            copy_correction_due = staticmethod(NativePublicationContinuation.copy_correction_due)
+
             def advance(self, *, revision_id, candidate_version_id):
                 progress = journal.progress.get(revision_id, {})
                 sources = ()
                 if progress.get("stage") != "ASSESSMENT_INTERRUPTED":
-                    sources = native_evidence_sources(
-                        units=journal.units[revision_id],
-                        sources=runtime.authority.sources,
-                        objects=runtime.authority.objects,
-                        licence=licence,
-                        proof=proof,
-                        observations=journal.observations,
-                    )
+                    try:
+                        sources = native_evidence_sources(
+                            units=journal.units[revision_id],
+                            sources=runtime.authority.sources,
+                            objects=runtime.authority.objects,
+                            licence=licence,
+                            proof=proof,
+                            observations=journal.observations,
+                        )
+                    except NativeEvidenceHold:
+                        if progress.get("stage") not in {"ACKNOWLEDGED", "COPY_CORRECTION_PREPARED"}:
+                            raise
+                        # The correction continuation retains the old ACK and
+                        # records a current-source HOLD, without blocking peers.
                 return NativePublicationContinuation(
                     journal=journal, runtime=runtime, evidence_controller=evidence,
-                    sources=(
-                        {}
-                        if progress.get("stage") == "ASSESSMENT_INTERRUPTED"
-                        else {revision_id: sources}
-                    ),
+                    sources={revision_id: sources} if sources else {},
                     assessment_contract_failure=(
                         assessment_usage.retained_output_contract_failure
                     ),
