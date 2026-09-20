@@ -191,10 +191,11 @@ def test_native_open_shares_only_one_stable_validation_transaction(
         if stage == failure:
             raise injected
 
-    def relationships(store):
+    def relationships(store, **kwargs):
         nonlocal shared_inputs
         checkpoint(store, "relationship")
-        shared_inputs = original_relationship(store)
+        assert isinstance(kwargs["verified_versions"], dict)
+        shared_inputs = original_relationship(store, **kwargs)
         return shared_inputs
 
     def lineage(store, **kwargs):
