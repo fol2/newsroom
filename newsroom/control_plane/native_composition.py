@@ -555,7 +555,18 @@ def open_native_pipeline(
             rights = rights_for_unit(unit)
             if rights is None:
                 raise NativeRetrievalHold("NATIVE_CURRENT_SOURCE_RIGHTS_HOLD")
-            return rights["packet_digest"]
+            # Current permission is checked above on every call. Its policy
+            # binds reviewed substantive terms and permitted use; raw page or
+            # observation identities are provenance, not retrieval inputs.
+            # Acquisition/publication retain their exact evidence bindings.
+            return digest_canonical({
+                "source_id": unit.source_id,
+                "source_url": unit.source_definition_url,
+                "definition_version_id": unit.authority.definition_version_id,
+                "decision": "PERMITTED",
+                "policy_digest": rights["policy_digest"],
+                "scope": rights["scope"],
+            })
 
         @contextmanager
         def source_fence(source_id, url):

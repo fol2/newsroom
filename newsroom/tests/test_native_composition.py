@@ -656,8 +656,40 @@ def test_rights_refresh_registers_and_binds_a_newly_permitted_source(
         ready = pipeline._intake._poll_one("HK-02")
         assert ready.status == "READY"
         assert ready.units
+        retrieval = pipeline._retrieval_for(ready.units)
+        unit = ready.units[0]
+        initial_key = retrieval._rights(unit)
+        initial_assessment = portfolio.for_source(
+            source_id=unit.source_id, definition_url=unit.source_definition_url,
+        )
+        # Fresh retained raw bytes/admission IDs may change outside the already
+        # reviewed substantive terms. Permission/policy/scope are unchanged.
+        permitted["HK-02"] = replace(
+            permitted["HK-02"],
+            observed_at="2026-09-08T15:05:00+00:00",
+            observations=((hk02_terms_url, "sha256:" + "4" * 64,
+                           "00000000-0000-4000-8000-000000000902", "access-hk02-new"),),
+        )
         pipeline._refresh_rights()
+        assert portfolio.for_source(
+            source_id=unit.source_id, definition_url=unit.source_definition_url,
+        ).record_id != initial_assessment.record_id
+        assert retrieval._rights(unit) == initial_key
+        stale = replace(unit, authority=replace(
+            unit.authority,
+            definition_version_id="00000000-0000-4000-8000-000000000999",
+        ))
+        with pytest.raises(NativeRetrievalHold, match="NATIVE_CURRENT_SOURCE_RIGHTS_HOLD"):
+            retrieval._rights(stale)
         assert registered == [("HK-02",)]
+        # A genuinely changed reviewed policy invalidates reuse.
+        monkeypatch.setattr(native_source_rights, "POLICY_DIGEST", "sha256:" + "5" * 64)
+        assert retrieval._rights(unit) != initial_key
+        # Missing/changed terms still exclude the subject on this very tick.
+        permitted["HK-02"] = replace(permitted["HK-02"], reason="SOURCE_TERMS_CHANGED")
+        pipeline._refresh_rights()
+        with pytest.raises(NativeRetrievalHold, match="NATIVE_CURRENT_SOURCE_RIGHTS_HOLD"):
+            retrieval._rights(unit)
         with pytest.raises(ValueError, match="binding differs"):
             pipeline._intake.bind_definitions({"HK-02": SourceDefinitionId.new()})
 
