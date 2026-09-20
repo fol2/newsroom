@@ -125,6 +125,7 @@ class _Publication:
             attempt_receipt=receipt("attempt-event"),
             evidence_receipt=receipt("evidence-event"),
             read_proof=object(),
+            writer_id="newsroom.offline-exact-copy.v3",
         )
 
 

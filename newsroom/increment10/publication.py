@@ -107,7 +107,7 @@ class SurfacePayload:
     # Claim ID, field, exact assertion, materiality.
     claim_links: tuple[tuple[str, str, str, str], ...]
     newsroom_identity: str
-    correction_status: Literal["ORIGINAL"]
+    correction_status: Literal["ORIGINAL", "CORRECTED"]
     withdrawal_status: Literal["ACTIVE"]
     content_language: str
     renderer_version: str
@@ -134,7 +134,8 @@ class SurfacePayload:
             or not self.source_references
             or not self.claim_links
             or self.newsroom_identity != AUTOMATED_NEWSROOM_IDENTITY
-            or self.correction_status != "ORIGINAL"
+            or self.correction_status not in {"ORIGINAL", "CORRECTED"}
+            or (self.correction_status == "CORRECTED" and self.story_aggregate_version < 2)
             or self.withdrawal_status != "ACTIVE"
             or self.content_language != CONTENT_LANGUAGE
         ):
@@ -506,10 +507,13 @@ class OfflinePublication:
         if type(request) is not PublicationRequest:
             raise PublicationError("exact PublicationRequest is required")
         story, sources = self._context(story_receipt, candidate_port, proof)
+        correction = "NATIVE_COPY_CORRECTION" in request.reason_codes
+        if correction and (request.expected_aggregate_version < 1 or story.aggregate_version < 2):
+            raise PublicationError("copy correction requires a prior Story and publication")
         surfaces: tuple[SurfacePayload, ...] = ()
         admissions: tuple[ObjectAdmissionId, ...] = ()
         if request.outcome == "AUTO_PUBLISH":
-            surfaces = _render(story, sources, self._source_licence_policy)
+            surfaces = _render(story, sources, self._source_licence_policy, correction=correction)
             admissions = tuple(
                 self._admit_surface(surface, proof=proof) for surface in surfaces
             )
@@ -602,7 +606,10 @@ class OfflinePublication:
         surfaces: tuple[SurfacePayload, ...] = ()
         admissions: tuple[ObjectAdmissionId, ...] = ()
         if transaction.bundle is not None:
-            surfaces = _render(story, sources, self._source_licence_policy)
+            surfaces = _render(
+                story, sources, self._source_licence_policy,
+                correction="NATIVE_COPY_CORRECTION" in transaction.decision.reason_codes,
+            )
             admissions = tuple(item[1] for item in transaction.bundle.surface_payloads)
             for surface, admission_id in zip(surfaces, admissions, strict=True):
                 material = self._objects.hydrate(
@@ -792,6 +799,7 @@ class OfflinePublication:
 def _render(
     story: StoryVersion, sources: tuple[tuple[str, str], ...],
     source_licence_policy: tuple[tuple[str, str, str], ...] = (),
+    *, correction: bool = False,
 ) -> tuple[SurfacePayload, SurfacePayload]:
     prefix = "【未出版】"
     if not story.copy.title.startswith(prefix) or story.copy.title.count(prefix) != 1:
@@ -806,7 +814,7 @@ def _render(
         "categories": story.write_admission.categories,
         "source_references": sources,
         "newsroom_identity": AUTOMATED_NEWSROOM_IDENTITY,
-        "correction_status": "ORIGINAL",
+        "correction_status": "CORRECTED" if correction else "ORIGINAL",
         "withdrawal_status": "ACTIVE",
         "content_language": CONTENT_LANGUAGE,
         "renderer_version": "newsroom.public-surface.v1",
@@ -831,6 +839,14 @@ def _render(
         )
         for item in story.copy.evidence_links
     )
+    if story.copy.writer_id == "newsroom.offline-exact-copy.v3":
+        # v3 deliberately retains the headline's source context in the body.
+        article_links += tuple(
+            (claim_id, "BODY", assertion, materiality)
+            for claim_id, field, assertion, materiality in article_links
+            if field == "HEADLINE"
+        )
+        common["renderer_version"] = "newsroom.context-preserving-surface.v1"
     feed_links = tuple(item for item in article_links if item[1] == "HEADLINE")
     return (
         SurfacePayload.create(

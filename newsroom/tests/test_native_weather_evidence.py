@@ -700,12 +700,19 @@ def test_hko_absent_current_item_rehydrates_exact_retained_cancellation(
                 )),
             )
             title, body, links = required_surface_copy(
-                copy_package, paragraphs=True
+                copy_package,
+                paragraphs=True,
+                context_preserving=True,
             )
             copy = WriterCopy(
-                title, body, "newsroom.offline-exact-copy.v2",
+                title, body, "newsroom.offline-exact-copy.v3",
                 copy_package.digest, links,
             )
+            assert body == "\n\n".join((
+                "該紀錄於香港時間2026年9月8日12時00分更新。",
+                rendered_headline,
+            ))
+            assert body.count(rendered_headline) == 1
             failed = [
                 item.reason_code for item in validate_writer_copy(
                     copy, copy_package

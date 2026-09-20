@@ -623,12 +623,20 @@ class NativeEditorial:
             # Object admission can predate the writer upgrade or a crash before
             # its Story event. Accept only the exact old bytes reconstructed
             # from these same immutable package/decision/request identities.
-            legacy = self._build_story(
-                request, retained, decision, decision_reference,
-                writer_id="newsroom.offline-exact-copy.v1",
-            )
-            if legacy.digest == admitted.blob.blob_digest:
-                story = legacy
+            for legacy_writer_id in (
+                "newsroom.offline-exact-copy.v2",
+                "newsroom.offline-exact-copy.v1",
+            ):
+                legacy = self._build_story(
+                    request,
+                    retained,
+                    decision,
+                    decision_reference,
+                    writer_id=legacy_writer_id,
+                )
+                if legacy.digest == admitted.blob.blob_digest:
+                    story = legacy
+                    break
         if (
             admitted.definition_digest != self._story_admission_definition
             or admitted.object_class != STORY_CLASS
@@ -712,7 +720,7 @@ class NativeEditorial:
         retained: GovernedEvidencePackage,
         policy: EditorialPolicyDecision,
         reference: DecisionReference,
-        *, writer_id: str = "newsroom.offline-exact-copy.v2",
+        *, writer_id: str = "newsroom.offline-exact-copy.v3",
     ) -> StoryVersion:
         package = retained.package
         if str(request.story_id) == package.candidate_id:
@@ -754,10 +762,16 @@ class NativeEditorial:
         )
         if decision.decision != "WRITE_READY":
             raise EditorialHold(decision)
-        if writer_id not in {"newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v2"}:
+        if writer_id not in {
+            "newsroom.offline-exact-copy.v1",
+            "newsroom.offline-exact-copy.v2",
+            "newsroom.offline-exact-copy.v3",
+        }:
             raise EditorialError("native Story Version writer differs")
         title, body, links = required_surface_copy(
-            evaluated, paragraphs=writer_id == "newsroom.offline-exact-copy.v2",
+            evaluated,
+            paragraphs=writer_id != "newsroom.offline-exact-copy.v1",
+            context_preserving=writer_id == "newsroom.offline-exact-copy.v3",
         )
         copy = WriterCopy(
             title,

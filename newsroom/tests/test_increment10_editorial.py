@@ -37,6 +37,11 @@ from newsroom.control_plane.evidence import (
     GovernedClaimEvidence,
     QualificationEvidence,
 )
+from newsroom.control_plane.writer import (
+    WriterCopy,
+    required_surface_copy,
+    validate_writer_copy,
+)
 from newsroom.increment10.editorial import (
     DECISION_ADMISSION_TYPE,
     DECISION_CLASS,
@@ -561,7 +566,14 @@ def test_observed_state_currentness_enforces_window_boundary_and_missing_rule() 
     assert currentness(None, "HOLD").result == "HOLD"
 
 
-@pytest.mark.parametrize("writer_id", ("newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v2"))
+@pytest.mark.parametrize(
+    "writer_id",
+    (
+        "newsroom.offline-exact-copy.v1",
+        "newsroom.offline-exact-copy.v2",
+        "newsroom.offline-exact-copy.v3",
+    ),
+)
 def test_authenticated_policy_admits_and_reopens_native_story_version(
     tmp_path: Path, monkeypatch, writer_id,
 ) -> None:
@@ -649,7 +661,11 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
             proof=proof(),
         )
         assert story.copy.writer_id == writer_id
-        if writer_id.endswith(".v2"):
+        if writer_id.endswith(".v3"):
+            assert story.copy.body == (
+                "官方確認限期已經更改。\n\n官方限期安排已經更新。"
+            )
+        elif writer_id.endswith(".v2"):
             assert story.copy.body == "官方限期安排已經更新。"
         else:
             assert story.copy.body.startswith("本報根據已核實證據報道：")
@@ -713,7 +729,7 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
     )
     candidate_connection.execute("BEGIN IMMEDIATE")
     try:
-        # A v2 default must also replay the original v1 admission request,
+        # A v3 default must also replay the original v1/v2 admission request,
         # including a restart after object retention but before acknowledgement.
         replayed_receipt, replayed_story = reopened.admit_story_version(
             request, package_admission_id=retained.package_admission_id,
@@ -729,6 +745,169 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
     reopened_system.close()
     reopened_ingress.close()
     candidate_connection.close()
+
+
+def test_exact_copy_v3_orders_headline_and_substantive_claims_by_source_span(
+    tmp_path: Path,
+) -> None:
+    connection, _candidate_port, version = _candidate(tmp_path)
+    try:
+        _passage, package, _records = _ready_package(version)
+        headline, substantive = package.governed_claims
+        package = replace(
+            package,
+            governed_claims=(substantive, headline),
+        )
+
+        title, body, links = required_surface_copy(
+            package,
+            paragraphs=True,
+            context_preserving=True,
+        )
+        copy = WriterCopy(
+            title,
+            body,
+            "newsroom.offline-exact-copy.v3",
+            package.digest,
+            links,
+        )
+
+        assert title == "【未出版】官方確認限期已經更改。"
+        assert body == "官方確認限期已經更改。\n\n官方限期安排已經更新。"
+        assert tuple(link.governed_claim_id for link in links) == (
+            headline.claim_id,
+            substantive.claim_id,
+        )
+        structural = {
+            item.validator: item.result
+            for item in validate_writer_copy(copy, package)
+            if item.validator in {
+                "CLAIM_EVIDENCE_LINKS",
+                "ROLE_SPECIFIC_EXACT_ONCE_STRUCTURE",
+                "REQUIRED_GOVERNED_CLAIM_COVERAGE",
+                "GOVERNED_CLAIM_ENTAILMENT_BOUNDARY",
+            }
+        }
+        assert structural == {
+            "CLAIM_EVIDENCE_LINKS": "PASS",
+            "ROLE_SPECIFIC_EXACT_ONCE_STRUCTURE": "PASS",
+            "REQUIRED_GOVERNED_CLAIM_COVERAGE": "PASS",
+            "GOVERNED_CLAIM_ENTAILMENT_BOUNDARY": "PASS",
+        }
+    finally:
+        connection.close()
+
+
+def test_exact_copy_v3_holds_when_selected_source_span_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    connection, _candidate_port, version = _candidate(tmp_path)
+    try:
+        _passage, package, _records = _ready_package(version)
+        headline, substantive = package.governed_claims
+        package = replace(
+            package,
+            passages=(
+                "The deadline changed. The deadline changed. "
+                "The official deadline changed.",
+            ),
+            governed_claims=(headline, substantive),
+        )
+
+        with pytest.raises(ValueError, match="source span order"):
+            required_surface_copy(
+                package,
+                paragraphs=True,
+                context_preserving=True,
+            )
+    finally:
+        connection.close()
+
+
+def test_exact_copy_v3_preserves_weather_issue_update_and_qualifier_context(
+    tmp_path: Path,
+) -> None:
+    connection, _candidate_port, version = _candidate(tmp_path)
+    try:
+        _passage, package, _records = _ready_package(version)
+        old_headline, old_substantive = package.governed_claims
+        issue_span = (
+            "The Hong Kong Observatory issued the Yellow Fire Danger Warning "
+            "at 06:00 on 20 September 2026."
+        )
+        update_span = (
+            "The Hong Kong Observatory cancelled the Yellow Fire Danger Warning; "
+            "the official record was updated at 22:20 on 20 September 2026."
+        )
+        qualifier_span = (
+            "The time above is the record update time, not the exact cancellation time."
+        )
+        def selected(old, claim_id, source, rendered):
+            return replace(
+                old,
+                claim_id=claim_id,
+                claim=source,
+                supporting_excerpt=source,
+                rendered_assertion_zh_hant_hk=rendered,
+                semantic_relation_evidence_id=f"semantic-{claim_id}",
+                localised_factual_expressions=(),
+                named_entity_evidence=(),
+                named_entities=(),
+                rendered_named_entities=(),
+            )
+
+        issue = selected(
+            old_substantive,
+            "weather-issue",
+            issue_span,
+            "香港天文台於香港時間2026年9月20日06時00分發出黃色火災危險警告。",
+        )
+        headline = selected(
+            old_headline,
+            "weather-update",
+            update_span,
+            "香港天文台已取消黃色火災危險警告；"
+            "官方紀錄於香港時間2026年9月20日22時20分更新。",
+        )
+        qualifier = selected(
+            old_substantive,
+            "weather-qualifier",
+            qualifier_span,
+            "上述時間為紀錄更新時間，並非取消警告的確切時間。",
+        )
+        package = replace(
+            package,
+            passages=("\n".join((issue_span, update_span, qualifier_span)),),
+            governed_claims=(headline, issue, qualifier),
+            substantive_new_information=(
+                headline.claim,
+                issue.claim,
+                qualifier.claim,
+            ),
+        )
+
+        _old_title, old_body, _old_links = required_surface_copy(
+            package, paragraphs=True
+        )
+        title, body, links = required_surface_copy(
+            package,
+            paragraphs=True,
+            context_preserving=True,
+        )
+
+        assert headline.rendered_assertion_zh_hant_hk not in old_body
+        assert title == "【未出版】" + headline.rendered_assertion_zh_hant_hk
+        assert body == "\n\n".join(
+            claim.rendered_assertion_zh_hant_hk
+            for claim in (issue, headline, qualifier)
+        )
+        assert tuple(link.governed_claim_id for link in links) == (
+            issue.claim_id,
+            headline.claim_id,
+            qualifier.claim_id,
+        )
+    finally:
+        connection.close()
 
 
 def test_non_pass_controller_decision_holds_without_story_event(tmp_path: Path) -> None:
