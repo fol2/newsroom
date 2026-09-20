@@ -1474,11 +1474,12 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
         f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
-        f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}"
+        f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}+{FACTUAL_LOCALISATION_POLICY_VERSION}+"
+        "newsroom.qualification-relation.v1"
     )
 
 
-@pytest.mark.parametrize("entity_version", (11, 12))
+@pytest.mark.parametrize("entity_version", (11, 12, 13))
 def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version, tmp_path):
     candidate, package = _candidate_package()
     current = DeterministicWriteAdmission().decide(
@@ -1493,7 +1494,7 @@ def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version,
         "newsroom.governed-claim.v7+newsroom.governed-input.v10+"
         f"newsroom.named-entity.v{entity_version}+newsroom.cont-originality.v3+"
         "newsroom.zh-hant-hk-shape.v14"
-    )
+    ) + ("+newsroom.factual-localisation.v1" if entity_version == 13 else "")
     old = WriteAdmissionDecision(
         decision_id=_decision_id(**values), decided_at=decided_at, **values,
     )

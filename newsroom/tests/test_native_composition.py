@@ -37,7 +37,8 @@ def test_assessment_consumer_contract_binds_producer_and_rendering_policies():
     assert native_assessor.VERSION == "newsroom.native-evidence-assessor.v12"
     assert native_composition.ASSESSMENT_CONTRACT_VERSION == (
         "newsroom.native-evidence-assessor.v12+newsroom.named-entity.v13+"
-        "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1"
+        "newsroom.zh-hant-hk-shape.v14+newsroom.factual-localisation.v1+"
+        "newsroom.qualification-relation.v1"
     )
 
 

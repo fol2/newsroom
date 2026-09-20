@@ -89,6 +89,7 @@ REASSESSABLE_HOLDS = frozenset({
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
     "ASSESSOR_OUTPUT_CONTRACT_HOLD", "ASSESSOR_RENDERING_CONTRACT_HOLD",
     "ASSESSOR_LOCALISATION_CONTRACT_HOLD",
+    "ASSESSOR_QUALIFICATION_CONTRACT_HOLD",
     "QUALIFICATION_EVIDENCE_NOT_EXACT",
     "SOURCE_AUTHORITY_HOLD",
 })
@@ -1683,7 +1684,10 @@ class AutonomousNativeEvidenceAssessor:
             if claim is None:
                 raise EvidencePackageError("assessment qualification claim differs")
             if (
-                not _qualification_relation_is_proven(item, claim)
+                not _qualification_relation_is_proven(
+                    item, claim,
+                    source_context=acquired[claim.passage_index].body.decode("utf-8"),
+                )
                 or any(
                     field not in _QUALIFICATION_CLASSIFIER_FIELDS
                     and value not in claim.claim
