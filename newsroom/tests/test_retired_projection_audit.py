@@ -1,10 +1,14 @@
 """Retired ignored detail is dispensable only with exact retained authority."""
 import sqlite3
 import json
+from datetime import timedelta
 
 import pytest
 
-from newsroom.authority import AuthorityPersistenceError
+from newsroom.authority import (
+    AggregateId, AuthorityPersistenceError, InlinePayload, SemanticCommand, UtcTimestamp,
+)
+from .authority_helpers import FIXED_NOW
 from newsroom.authority import audit_retention as retention
 from newsroom.projection import (
     ProjectionDeliveryOutcome, ProjectionDeliveryRequest,
@@ -16,23 +20,40 @@ from .test_projection_b3_authority import (
 )
 
 
-def _seed(path, *, retire=True):
+def _seed(path, *, retire=True, activate=True, kind="ignored"):
     with open_projection_system(path) as system:
         _register(system)
+        source_seq = 1
+        if kind != "ignored":
+            source_seq = system.commands.execute(SemanticCommand(
+                command_type="candidate.fixture.write", aggregate_id=AggregateId.new(),
+                expected_aggregate_version=0, payload=InlinePayload({"headline": "optional", "count": 1}),
+                idempotency_key="optional-source",
+            ), proof=proof()).ledger_seq
+        outcomes = {
+            "ignored": (ProjectionDeliveryOutcome.IGNORED_OPTIONAL,),
+            "applied": (ProjectionDeliveryOutcome.APPLIED,),
+            "failure": (ProjectionDeliveryOutcome.RETRYABLE_FAILURE,),
+            "multiple": (ProjectionDeliveryOutcome.RETRYABLE_FAILURE, ProjectionDeliveryOutcome.IGNORED_OPTIONAL),
+        }[kind]
         prior = None
         first_request = first_result = None
         for index in range(2 if retire else 1):
             generation = _create(system, f"retention-generation-{index}")
-            request = ProjectionDeliveryRequest(
-                generation.generation_id, generation.authority_aggregate_version,
-                1, ProjectionDeliveryOutcome.IGNORED_OPTIONAL, f"ignored-{index}",
-            )
-            result = system.projections.record_delivery(request, proof=proof())
-            if first_request is None:
-                first_request, first_result = request, result
             def current():
                 return next(g for g in system.projections.generations(FAMILY_ID, proof=proof())
                             if g.generation_id == generation.generation_id)
+            for number, outcome in enumerate(outcomes):
+                request = ProjectionDeliveryRequest(
+                    generation.generation_id, current().authority_aggregate_version,
+                    source_seq, outcome, f"delivery-{index}-{number}",
+                    error_code="TRANSIENT" if outcome is ProjectionDeliveryOutcome.RETRYABLE_FAILURE else None,
+                )
+                result = system.projections.record_delivery(request, proof=proof())
+                if first_request is None:
+                    first_request, first_result = request, result
+            if not activate:
+                continue
             with sqlite3.connect(path) as conn:
                 checkpoint = conn.execute(
                     "SELECT contiguous_ledger_seq FROM projection_checkpoint_versions "
@@ -124,3 +145,18 @@ def test_projection_detail_maintenance_preserves_summary_and_reference_closure(t
     assert report["projection_details_deleted"] == (0 if referenced else 1)
     with open_projection_system(path) as system:
         assert system.projections.record_delivery(request, proof=proof()) == result
+
+
+@pytest.mark.parametrize("case,age_days,expected", [
+    ("ignored", 6, 0), ("ignored", 7, 0), ("ignored", 8, 1),
+    ("active", 8, 0), ("building", 8, 0),
+    ("applied", 8, 0), ("failure", 8, 0), ("multiple", 8, 0),
+])
+def test_maintenance_selector_preserves_age_and_history_boundaries(tmp_path, case, age_days, expected):
+    path = tmp_path / "authority.sqlite3"
+    _seed(path, retire=case not in {"active", "building"},
+          activate=case != "building", kind="ignored" if case in {"active", "building"} else case)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TEMP TABLE _audit_tokens(id TEXT PRIMARY KEY) WITHOUT ROWID")
+        cutoff = UtcTimestamp(FIXED_NOW.value + timedelta(days=age_days - 7)).to_text()
+        assert retention._projection_candidates(conn, cutoff=cutoff) == expected
