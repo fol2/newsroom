@@ -188,6 +188,12 @@ class NativePipeline:
         self._drain_between_work()
         # Changed-contract reassessment has its own quantum after fresh work;
         # stale model requests cannot delay a newly landed revision's first turn.
+        # This finite old-contract cohort drains once: repair recent evidence
+        # before older failures, without reordering fresh work or unknown effects.
+        reassessments.sort(
+            key=lambda item: max(UtcTimestamp.parse(unit.observed_at).value for unit in item[1]),
+            reverse=True,
+        )
         self._advance_revisions(
             tuple(reassessments),
             work_deadline=self._monotonic_clock() + self._reassessment_quantum,
