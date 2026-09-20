@@ -84,6 +84,7 @@ from .cycle import _complete_writer_usage
 from .store import append_ledger
 
 VERSION = "newsroom.native-evidence-assessor.v15"
+RETAINED_ASSESSMENT_POLICY_VERSION = "newsroom.retained-assessment.v1"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -94,6 +95,7 @@ REASSESSABLE_HOLDS = frozenset({
     "SOURCE_AUTHORITY_HOLD",
     "WEATHER_EVIDENCE_METADATA_HOLD",
     "EVIDENCE_VALIDATION_HOLD",
+    "ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD",
 })
 
 
@@ -104,6 +106,13 @@ def assessment_revalidation_due(facts: dict, contract_version: str | None) -> bo
         and any(reason in REASSESSABLE_HOLDS for reason in (
             facts.get("reason"), *facts.get("editorial_hold_reason_codes", ()),
         ))
+    )
+
+
+def same_assessment_producer(previous: str | None, current: str | None) -> bool:
+    return (
+        type(previous) is str and type(current) is str
+        and previous.split("+", 1)[0] == current.split("+", 1)[0]
     )
 
 
@@ -1403,15 +1412,16 @@ class AutonomousNativeEvidenceAssessor:
             mismatched = tuple(item for item in retained if item.base_digest != base.digest)
             if mismatched:
                 legacy = _legacy_hko_base_digests(base, sources, acquired)
-                if cached_only or not legacy or any(
+                matching = tuple(item for item in retained if item.base_digest == base.digest)
+                if (cached_only and not matching) or not legacy or any(
                     item.base_digest not in legacy or item.contract_version == VERSION
                     for item in mismatched
                 ):
                     raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
-                # Only this proved representation upgrade may start the new
-                # contract envelope. Prior settled accounting remains untouched;
-                # unresolved attempts were rejected before reaching this branch.
-                retained = tuple(item for item in retained if item.base_digest == base.digest)
+                # Proven predecessors do not invalidate an exact retained result
+                # from the accepted upgrade. Cached mode still cannot perform
+                # the upgrade itself or start a new provider envelope.
+                retained = matching
             if retained:
                 if cached_only:
                     # Revalidate exact retained bytes under today's consumer

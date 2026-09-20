@@ -12,7 +12,7 @@ from typing import ContextManager
 from newsroom.authority import UtcTimestamp
 
 from .native_cycle import advance_native_cycle
-from .native_assessor import assessment_revalidation_due
+from .native_assessor import assessment_revalidation_due, same_assessment_producer
 from .native_progress import NativeRevisionJournal
 from .veto import OperatorDrainRequested, VetoError
 
@@ -104,7 +104,11 @@ class NativePipeline:
             elif previous.get("stage") == "EVIDENCE_HOLD" and assessment_revalidation_due(
                 facts, self._assessment_contract_version,
             ):
-                cohort = reassessments
+                # Exact cached consumer repairs need no model turn and should
+                # not wait behind fresh extraction/provider backlog.
+                cohort = ordinary if same_assessment_producer(
+                    facts.get("assessment_contract_version"), self._assessment_contract_version,
+                ) else reassessments
             else:
                 cohort = ordinary
             cohort.append((revision_id, units))
