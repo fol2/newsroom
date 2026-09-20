@@ -310,8 +310,11 @@ def _open_editorial_system(path: Path):
     return system, registries
 
 
-def _ready_package(version):
-    passage = "The deadline changed.\nThe official deadline changed."
+def _ready_package(
+    version,
+    *,
+    passage="The deadline changed.\nThe official deadline changed.",
+):
     package, records = _package_and_records(version, passage)
     headline = package.governed_claims[0]
     substantive = replace(
@@ -822,6 +825,125 @@ def test_exact_copy_v3_holds_when_selected_source_span_is_ambiguous(
             )
     finally:
         connection.close()
+
+
+def test_v3_restart_recovers_exact_v2_admission_before_ambiguous_span_build(
+    tmp_path: Path,
+) -> None:
+    candidate_connection, candidate_port, version = _candidate(tmp_path)
+    ingress_path = tmp_path / "intake.sqlite3"
+    ingress = open_evidence_intake_ingress(ingress_path)
+    acknowledgement = _receive(
+        ingress, candidate_connection, candidate_port, version, request_id="request-1"
+    )
+    object_path = tmp_path / "objects.sqlite3"
+    system, registries = _open_editorial_system(object_path)
+    evidence = _evidence_facade(system, ingress, registries)
+    passage, package, records = _ready_package(
+        version,
+        passage=(
+            "The deadline changed.\nThe deadline changed.\n"
+            "The official deadline changed."
+        ),
+    )
+    source = system.objects.admit(
+        ObjectAdmissionRequest("evidence.source", "source-1"),
+        passage.encode(),
+        proof=proof(),
+    ).admission
+    record_ids = tuple(
+        system.objects.admit(
+            ObjectAdmissionRequest("evidence.record", f"record-{index}"),
+            canonical_json_bytes(record),
+            proof=proof(),
+        ).admission.admission_id
+        for index, record in enumerate(records)
+    )
+    candidate_connection.execute("BEGIN IMMEDIATE")
+    try:
+        retained = evidence.retain(
+            package,
+            receipt_id=acknowledgement.receipt_id,
+            candidate_port=candidate_port,
+            source_admission_ids=(source.admission_id,),
+            record_admission_ids=record_ids,
+            proof=proof(),
+        )
+        decision_reference = _record_decision(
+            system, _decision(retained, source.admission_id)
+        )
+        native = _native(system, evidence, registries)
+        request = StoryVersionRequest(AggregateId.new(), 0, "story-1")
+        story_admission_request = ObjectAdmissionRequest(
+            STORY_ADMISSION_TYPE,
+            f"story-version:{request.story_id}:1",
+        )
+        with pytest.raises(
+            EditorialHold, match="STORY_SOURCE_CONTEXT_ORDER_HOLD"
+        ):
+            native.admit_story_version(
+                request,
+                package_admission_id=retained.package_admission_id,
+                decision_reference=decision_reference,
+                candidate_port=candidate_port,
+                proof=proof(),
+            )
+        assert system.objects.committed_admission(
+            story_admission_request, proof=proof()
+        ) is None
+        assert not tuple(
+            event
+            for event in system.events.after(0, limit=1000, proof=proof())
+            if event.event_type == STORY_EVENT
+        )
+        legacy = native._build_story(
+            request,
+            retained,
+            native._read_policy_decision(
+                decision_reference, retained=retained, proof=proof()
+            ),
+            decision_reference,
+            writer_id="newsroom.offline-exact-copy.v2",
+        )
+        admitted = system.objects.admit(
+            story_admission_request,
+            legacy.canonical_bytes(),
+            proof=proof(),
+        )
+        assert admitted.replayed is False
+        assert not tuple(
+            event
+            for event in system.events.after(0, limit=1000, proof=proof())
+            if event.event_type == STORY_EVENT
+        )
+        system.close()
+        ingress.close()
+
+        reopened_system, reopened_registries = _open_editorial_system(object_path)
+        reopened_ingress = open_evidence_intake_ingress(ingress_path)
+        reopened = _native(
+            reopened_system,
+            _evidence_facade(
+                reopened_system, reopened_ingress, reopened_registries
+            ),
+            reopened_registries,
+        )
+        receipt, story = reopened.admit_story_version(
+            request,
+            package_admission_id=retained.package_admission_id,
+            decision_reference=decision_reference,
+            candidate_port=candidate_port,
+            proof=proof(),
+        )
+        assert story == legacy
+        assert story.copy.writer_id == "newsroom.offline-exact-copy.v2"
+        assert receipt.story_version_digest == legacy.digest
+        reopened_system.close()
+        reopened_ingress.close()
+    finally:
+        if candidate_connection.in_transaction:
+            candidate_connection.rollback()
+        candidate_connection.close()
 
 
 def test_exact_copy_v3_preserves_weather_issue_update_and_qualifier_context(

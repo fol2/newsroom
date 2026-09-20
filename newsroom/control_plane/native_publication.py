@@ -1094,10 +1094,12 @@ class NativePublicationContinuation:
             raise
         except Exception as exc:
             facts["copy_correction_hold_reason"] = f"COPY_CORRECTION_HOLD:{type(exc).__name__}"
+            facts["copy_correction_failure_detail"] = str(exc)[:240]
             stage = "COPY_CORRECTION_PREPARED" if prepared else "ACKNOWLEDGED"
             self._journal.advance(revision_id, stage=stage, facts=facts)
             return NativePublicationContinuationResult(stage, facts["copy_correction_hold_reason"], None)
         facts.pop("copy_correction_hold_reason", None)
+        facts.pop("copy_correction_failure_detail", None)
         facts.update(
             story_event_id=published.story_receipt.event_id,
             publication_event_id=published.publication_receipt.event_id,

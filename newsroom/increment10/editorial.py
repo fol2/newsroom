@@ -608,21 +608,12 @@ class NativeEditorial:
             )
         except KeyError:
             raise EditorialHold(reason="EDITORIAL_POLICY_DECISION_MISSING") from None
-        story = self._build_story(request, retained, decision, decision_reference)
-        raw = story.canonical_bytes()
-        admission = self._objects.admit(
-            ObjectAdmissionRequest(
-                STORY_ADMISSION_TYPE,
-                f"story-version:{request.story_id}:{story.aggregate_version}",
-            ),
-            raw,
-            proof=proof,
+        admission_request = ObjectAdmissionRequest(
+            STORY_ADMISSION_TYPE,
+            f"story-version:{request.story_id}:{request.expected_aggregate_version + 1}",
         )
-        admitted = admission.admission
-        if admission.replayed and admitted.blob.blob_digest != story.digest:
-            # Object admission can predate the writer upgrade or a crash before
-            # its Story event. Accept only the exact old bytes reconstructed
-            # from these same immutable package/decision/request identities.
+
+        def legacy_story(blob_digest: str) -> StoryVersion | None:
             for legacy_writer_id in (
                 "newsroom.offline-exact-copy.v2",
                 "newsroom.offline-exact-copy.v1",
@@ -634,9 +625,38 @@ class NativeEditorial:
                     decision_reference,
                     writer_id=legacy_writer_id,
                 )
-                if legacy.digest == admitted.blob.blob_digest:
-                    story = legacy
-                    break
+                if legacy.digest == blob_digest:
+                    return legacy
+            return None
+
+        committed_admission = self._objects.committed_admission(
+            admission_request,
+            proof=proof,
+        )
+        if committed_admission is not None:
+            admitted = committed_admission.admission
+            story = legacy_story(admitted.blob.blob_digest)
+            if story is None:
+                story = self._build_story(
+                    request, retained, decision, decision_reference
+                )
+        else:
+            story = self._build_story(
+                request, retained, decision, decision_reference
+            )
+            admission = self._objects.admit(
+                admission_request,
+                story.canonical_bytes(),
+                proof=proof,
+            )
+            admitted = admission.admission
+        if admitted.blob.blob_digest != story.digest:
+            # Object admission can predate the writer upgrade or a crash before
+            # its Story event. Accept only the exact old bytes reconstructed
+            # from these same immutable package/decision/request identities.
+            legacy = legacy_story(admitted.blob.blob_digest)
+            if legacy is not None:
+                story = legacy
         if (
             admitted.definition_digest != self._story_admission_definition
             or admitted.object_class != STORY_CLASS
@@ -768,11 +788,21 @@ class NativeEditorial:
             "newsroom.offline-exact-copy.v3",
         }:
             raise EditorialError("native Story Version writer differs")
-        title, body, links = required_surface_copy(
-            evaluated,
-            paragraphs=writer_id != "newsroom.offline-exact-copy.v1",
-            context_preserving=writer_id == "newsroom.offline-exact-copy.v3",
-        )
+        try:
+            title, body, links = required_surface_copy(
+                evaluated,
+                paragraphs=writer_id != "newsroom.offline-exact-copy.v1",
+                context_preserving=writer_id == "newsroom.offline-exact-copy.v3",
+            )
+        except ValueError as exc:
+            if (
+                writer_id == "newsroom.offline-exact-copy.v3"
+                and str(exc).startswith("governed claim source span order")
+            ):
+                raise EditorialHold(
+                    reason="STORY_SOURCE_CONTEXT_ORDER_HOLD"
+                ) from None
+            raise
         copy = WriterCopy(
             title,
             body,

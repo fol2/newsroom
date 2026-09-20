@@ -142,6 +142,7 @@ def test_native_publication_replays_to_exact_ack_only_rows(tmp_path: Path, monke
 
     decision = _decision(retained, source.admission_id)
     first = controller.advance(retained.package_admission_id, decision, **request)
+    assert controller.retained_writer_id(first.story_receipt.event_id, proof=proof()) == first.writer_id
     replay = controller.advance(retained.package_admission_id, decision, **request)
     assert replay == first
 
