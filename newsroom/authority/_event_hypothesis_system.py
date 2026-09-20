@@ -7,7 +7,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from threading import Lock, get_ident
 from typing import Self
@@ -184,6 +184,8 @@ class _HypothesisStore:
         current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
         *,
         dispositions: ProposalDispositionStore | None = None,
+        verified_dispositions: Mapping[str, ProposalDisposition] | None = None,
+        _open_verification: list[dict[str, EventHypothesisVersion]] | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -201,6 +203,22 @@ class _HypothesisStore:
                     is not current_candidate_citations
                 )
             )
+            or (
+                verified_dispositions is not None
+                and (
+                    dispositions is None
+                    or type(verified_dispositions) is not dict
+                    or any(
+                        type(value) is not ProposalDisposition
+                        or key != value.disposition_id
+                        for key, value in verified_dispositions.items()
+                    )
+                )
+            )
+            or (
+                _open_verification is not None
+                and (type(_open_verification) is not list or _open_verification)
+            )
         ):
             raise HypothesisContractError("Hypothesis authority collaborators differ")
         self._connection = connection
@@ -217,8 +235,12 @@ class _HypothesisStore:
                 current_candidate_citations,
             )
             self._begin()
-            self._verify()
+            verified = self._verify(
+                verified_dispositions=verified_dispositions
+            )
             self._commit()
+            if _open_verification is not None:
+                _open_verification.append(verified)
         except BaseException as exc:
             self._rollback()
             if not isinstance(exc, Exception):
@@ -1045,8 +1067,16 @@ class _HypothesisStore:
         finally:
             self._lock.release()
 
-    def _verify(self) -> dict[str, EventHypothesisVersion]:
-        dispositions_by_id = _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
+    def _verify(
+        self,
+        *,
+        verified_dispositions: Mapping[str, ProposalDisposition] | None = None,
+    ) -> dict[str, EventHypothesisVersion]:
+        dispositions_by_id = (
+            _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
+            if verified_dispositions is None
+            else dict(verified_dispositions)
+        )
         tables = {
             str(row[0])
             for row in self._connection.execute(

@@ -25,7 +25,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v14"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v15"
 FACTUAL_LOCALISATION_POLICY_VERSION = "newsroom.factual-localisation.v1"
 
 _SOURCE_RECORD_FIELDS = frozenset(
@@ -303,6 +303,39 @@ _ENGLISH_OFFICIAL_REFERENCE = re.compile(
     r"\b[A-Z]{1,4}\([A-Z]{2,4}\)\d+(?:\.\d+)+\b)"
 )
 _BOUNDED_OFFICIAL_ABBREVIATIONS = frozenset({"DWP", "ECAA", "EPA", "ETA"})
+_DECLARED_ACRONYM = re.compile(
+    r"\b([A-Za-z]+(?:[ \t-]+[A-Za-z]+){1,9})[ \t]+"
+    r"\(([A-Z][A-Za-z]{1,9})\)"
+)
+
+
+def _source_declared_acronyms(source_context: str) -> frozenset[str]:
+    """Recognise literal declarations, not arbitrary capitalised prose."""
+    declared = set()
+    for match in _DECLARED_ACRONYM.finditer(source_context):
+        long_form, acronym = match.groups()
+        if sum(letter.isupper() for letter in acronym) < 2:
+            continue
+        words = re.findall(r"[A-Za-z]+", long_form)
+        # The source may place ordinary prose before the declared long form.
+        for start in range(len(words) - 1):
+            expansion = words[start:]
+            if len(" ".join(expansion)) > 80:
+                continue
+            initials = {
+                "".join(word[0] for word in expansion).upper(),
+                "".join(word[0] for word in expansion
+                        if word.lower() not in {"and", "of", "the", "for"}).upper(),
+            }
+            if acronym.upper() in initials or (
+                acronym.endswith("s") and expansion[-1].endswith("s")
+                and acronym[:-1].upper() in initials
+            ):
+                declared.add(acronym)
+                break
+    return frozenset(declared)
+
+
 _SOURCE_BOUND_ROUTE_TERM = re.compile(
     r"\b([A-Z]{2,5}(?:\s+[A-Z][A-Za-z-]+){1,5})(?=\s+route\b)"
 )
@@ -365,6 +398,12 @@ def _source_bound_official_terms(
     source_context: str,
 ) -> tuple[tuple[int, int, str], ...]:
     matches = []
+    for acronym in _source_declared_acronyms(source_context):
+        for occurrence in re.finditer(
+            rf"(?<![A-Za-z0-9_./-]){re.escape(acronym)}"
+            r"(?![A-Za-z0-9_]|[./-][A-Za-z0-9_])", text,
+        ):
+            matches.append((occurrence.start(), occurrence.end(), acronym))
     if _SOURCE_BOUND_IMMIGRATION_RULES_DOCUMENT.search(source_context):
         source_inline_terms = {
             match.group(1)
@@ -459,6 +498,10 @@ def _has_bounded_named_entity_shape(
                 or _SOURCE_BOUND_IMMIGRATION_RULE_CITATION.fullmatch(text)
                 or _SOURCE_BOUND_IMMIGRATION_PART_REFERENCE.fullmatch(text)
                 or text in _BOUNDED_OFFICIAL_ABBREVIATIONS
+                # Shape only: admission independently requires an exact
+                # declaration in the retained source, claim and excerpt binding.
+                or (re.fullmatch(r"[A-Z][A-Za-z]{1,9}", text)
+                    and sum(letter.isupper() for letter in text) >= 2)
                 or any(
                     candidate == text
                     for _start, _end, candidate in _contextual_official_term_shapes(

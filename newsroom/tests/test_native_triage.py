@@ -515,9 +515,9 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
     original_hypothesis_verify = _HypothesisStore._verify
     original_disposition_verify = ProposalDispositionStore._verify_integrity
 
-    def counted_hypothesis_verify(store):
+    def counted_hypothesis_verify(store, **kwargs):
         verification_calls["hypothesis"] += 1
-        return original_hypothesis_verify(store)
+        return original_hypothesis_verify(store, **kwargs)
 
     def counted_disposition_verify(store):
         verification_calls["disposition"] += 1
@@ -536,7 +536,7 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
     ) as restarted:
         # Constructor validation remains complete; the final native transaction
         # verifies relationship/lineage/Candidate upstream history only once.
-        assert verification_calls == {"hypothesis": 2, "disposition": 3}
+        assert verification_calls == {"hypothesis": 1, "disposition": 1}
         restarted_admission = advance_native_triage(
             restarted,
             work=work,
@@ -606,6 +606,27 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
         assert corrected.candidates.load_version(admitted.candidate.version_id) == (
             admitted.candidate
         )
+
+    from newsroom.authority import _hermes_native_system
+    original_snapshot = _hermes_native_system._semantic_snapshot
+    snapshot_reads = 0
+
+    def changed_snapshot(connection):
+        nonlocal snapshot_reads
+        snapshot_reads += 1
+        value = original_snapshot(connection)
+        return value if snapshot_reads == 1 else (value[0] + 1, *value[1:])
+
+    with monkeypatch.context() as local_patch:
+        local_patch.setattr(
+            _hermes_native_system, "_semantic_snapshot", changed_snapshot
+        )
+        with pytest.raises(
+            RuntimeError, match="native semantic verification snapshot changed"
+        ):
+            _shared_system(
+                tmp_path, local_patch, retrieval_authority, collision=enforcer
+            )
 
     # The retained authority event and Candidate still refer to the now missing
     # relationship. Reuse must not convert that missing upstream into success.

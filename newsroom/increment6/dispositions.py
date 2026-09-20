@@ -1427,6 +1427,7 @@ class ProposalDispositionStore:
         current_candidate_citations: "CurrentCandidateCitationReadPort | None" = None,
         *,
         work_items: TriageWorkItemStore | None = None,
+        _open_verification: list[dict[str, ProposalDisposition]] | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -1446,6 +1447,10 @@ class ProposalDispositionStore:
                     or work_items._retrieval_authority is not retrieval_authority
                 )
             )
+            or (
+                _open_verification is not None
+                and (type(_open_verification) is not list or _open_verification)
+            )
         ):
             raise DispositionContractError(
                 "disposition store requires exact trusted collaborators"
@@ -1463,8 +1468,10 @@ class ProposalDispositionStore:
                 connection, retrieval_authority
             )
             self._begin()
-            self._verify_integrity()
+            verified = self._verify_integrity()
             connection.execute("COMMIT")
+            if _open_verification is not None:
+                _open_verification.append(verified)
         except BaseException as exc:
             self._rollback()
             if not isinstance(exc, Exception):
