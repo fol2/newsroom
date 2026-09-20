@@ -1479,8 +1479,10 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
     )
 
 
-@pytest.mark.parametrize("entity_version", (11, 12, 13))
-def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version, tmp_path):
+@pytest.mark.parametrize("entity_version, qualification", (
+    (11, False), (12, False), (13, False), (13, True),
+))
+def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version, qualification, tmp_path):
     candidate, package = _candidate_package()
     current = DeterministicWriteAdmission().decide(
         candidate, package, decided_at="2026-09-19T12:00:00Z",
@@ -1495,6 +1497,8 @@ def test_prior_v9_subpolicy_decisions_replay_but_are_not_current(entity_version,
         f"newsroom.named-entity.v{entity_version}+newsroom.cont-originality.v3+"
         "newsroom.zh-hant-hk-shape.v14"
     ) + ("+newsroom.factual-localisation.v1" if entity_version == 13 else "")
+    if qualification:
+        values["policy_version"] += "+newsroom.qualification-relation.v1"
     old = WriteAdmissionDecision(
         decision_id=_decision_id(**values), decided_at=decided_at, **values,
     )
