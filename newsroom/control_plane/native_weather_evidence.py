@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ssl
+import json
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
 from collections.abc import Callable
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from lxml import etree
 
@@ -30,7 +32,7 @@ from newsroom.sources import (
 )
 from newsroom.sources.types import TimePrecision
 
-from .govuk_evidence import _NoRedirect, _utc
+from .govuk_evidence import _NoRedirect, _utc, _unique_object
 from .native_evidence import (
     AcquiredEvidence,
     EvidenceAcquisitionRequest,
@@ -41,7 +43,7 @@ from . import native_source_rights
 from .native_source_rights import NativePortfolioRights
 from .native_weather_sources import weather_items
 
-VERSION = "hermes-native-weather-evidence-v1"
+VERSION = "hermes-native-weather-evidence-v2"
 TIMEOUT_SECONDS = 20
 SUPPORTED_SOURCE_IDS = ("HK-02", "UK-10")
 POLICY_DIGEST = digest_canonical(
@@ -60,6 +62,51 @@ UK10_ATTRIBUTION = (
     "Contains public sector information licensed under the Open Government "
     "Licence v3.0; source: Met Office at the linked warning URL."
 )
+
+
+def hko_evidence_body(raw: bytes) -> bytes:
+    """Expose documented structured facts without losing the exact source JSON.
+
+    HKO warnsum defines actionCode separately from issue/update time. An update
+    or an absent warning is not evidence of cancellation or improved safety.
+    https://data.weather.gov.hk/weatherAPI/doc/HKO_Open_Data_API_Documentation.pdf
+    """
+    value = json.loads(raw, object_pairs_hook=_unique_object)
+    if type(value) is not dict or len(value) != 1:
+        raise ValueError("one exact HKO warning is required")
+    warning = next(iter(value.values()))
+    verbs = {"ISSUE": "issued", "REISSUE": "reissued", "CANCEL": "cancelled", "EXTEND": "extended"}
+    if type(warning) is not dict or warning.get("actionCode") not in {*verbs, "UPDATE"}:
+        raise ValueError("HKO warning action is unsupported")
+    name, kind = warning.get("name"), warning.get("type", "")
+    if type(name) is not str or not name.strip() or type(kind) is not str:
+        raise ValueError("HKO warning name/type differs")
+    label = name if not kind or kind in name else kind + name
+    action = warning["actionCode"]
+    facts = ([] if action == "UPDATE" else [
+        f"Official status changed: 香港天文台 {verbs[action]} the {label}."
+    ])
+    months = ("January", "February", "March", "April", "May", "June", "July",
+              "August", "September", "October", "November", "December")
+    for field, description in (("issueTime", "issued"), ("updateTime", "updated")):
+        instant = datetime.fromisoformat(warning[field])
+        if instant.tzinfo is None:
+            raise ValueError("HKO warning time lacks a zone")
+        local = instant.astimezone(ZoneInfo("Asia/Hong_Kong"))
+        clock = local.strftime("%H:%M:%S" if local.second or local.microsecond else "%H:%M")
+        if local.microsecond:
+            clock += f".{local.microsecond:06d}"
+        date = f"{local.day} {months[local.month - 1]} {local.year} at {clock}"
+        facts.append(f"The {label} warning record was {description} on {date} (香港時間).")
+    return raw + b"\n\n" + "\n".join(facts).encode("utf-8")
+
+
+def legacy_hko_body(body: bytes) -> bytes:
+    """Prove the sole supported old-to-new acquisition representation change."""
+    raw, separator, _facts = body.partition(b"\n\n")
+    if not separator or hko_evidence_body(raw) != body:
+        raise ValueError("normalised HKO body differs")
+    return raw
 
 
 class NativeWeatherEvidenceAcquisition:
@@ -232,6 +279,11 @@ class NativeWeatherEvidenceAcquisition:
         # time must never be silently promoted to that stronger currentness fact.
         if request.source_id == "UK-10" or observed.updated_at is None:
             raise hold("SOURCE_VERSION_TIME_NOT_ASSERTED")
+
+        try:
+            expected_body = hko_evidence_body(expected_body)
+        except (KeyError, TypeError, ValueError):
+            raise hold("WEATHER_STRUCTURED_FACTS_HOLD") from None
 
         body_digest = digest_bytes(expected_body)
         transport_digest = digest_canonical(

@@ -610,14 +610,25 @@ class NativeEditorial:
             raise EditorialHold(reason="EDITORIAL_POLICY_DECISION_MISSING") from None
         story = self._build_story(request, retained, decision, decision_reference)
         raw = story.canonical_bytes()
-        admitted = self._objects.admit(
+        admission = self._objects.admit(
             ObjectAdmissionRequest(
                 STORY_ADMISSION_TYPE,
                 f"story-version:{request.story_id}:{story.aggregate_version}",
             ),
             raw,
             proof=proof,
-        ).admission
+        )
+        admitted = admission.admission
+        if admission.replayed and admitted.blob.blob_digest != story.digest:
+            # Object admission can predate the writer upgrade or a crash before
+            # its Story event. Accept only the exact old bytes reconstructed
+            # from these same immutable package/decision/request identities.
+            legacy = self._build_story(
+                request, retained, decision, decision_reference,
+                writer_id="newsroom.offline-exact-copy.v1",
+            )
+            if legacy.digest == admitted.blob.blob_digest:
+                story = legacy
         if (
             admitted.definition_digest != self._story_admission_definition
             or admitted.object_class != STORY_CLASS
@@ -689,6 +700,7 @@ class NativeEditorial:
             retained,
             decision,
             reference,
+            writer_id=story.copy.writer_id,
         )
         if rebuilt.canonical_bytes() != hydrated.data:
             raise EditorialError("Story Version replay differs")
@@ -700,6 +712,7 @@ class NativeEditorial:
         retained: GovernedEvidencePackage,
         policy: EditorialPolicyDecision,
         reference: DecisionReference,
+        *, writer_id: str = "newsroom.offline-exact-copy.v2",
     ) -> StoryVersion:
         package = retained.package
         if str(request.story_id) == package.candidate_id:
@@ -741,11 +754,15 @@ class NativeEditorial:
         )
         if decision.decision != "WRITE_READY":
             raise EditorialHold(decision)
-        title, body, links = required_surface_copy(evaluated)
+        if writer_id not in {"newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v2"}:
+            raise EditorialError("native Story Version writer differs")
+        title, body, links = required_surface_copy(
+            evaluated, paragraphs=writer_id == "newsroom.offline-exact-copy.v2",
+        )
         copy = WriterCopy(
             title,
             body,
-            "newsroom.offline-exact-copy.v1",
+            writer_id,
             evaluated.digest,
             links,
         )

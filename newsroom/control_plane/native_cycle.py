@@ -123,12 +123,32 @@ def _revision_successor(
         or str(lead.request.item_id) != citation.source_item_id
         or prior_lead.request.definition_id != lead.request.definition_id
         or prior_lead.request.item_id != lead.request.item_id
-        or proposed.prior_revision_id != previous.revision_id
+        or proposed.item_id != previous.item_id
+        or proposed.definition_version_id != previous.definition_version_id
     ):
+        raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
+    cursor = proposed
+    seen = set()
+    same_state = True
+    while cursor.revision_id != previous.revision_id:
+        if (
+            cursor.revision_id in seen
+            or cursor.item_id != previous.item_id
+            or cursor.definition_version_id != previous.definition_version_id
+            or cursor.prior_revision_id is None
+        ):
+            raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
+        same_state = (
+            same_state
+            and cursor.permitted_state_digest == previous.permitted_state_digest
+        )
+        seen.add(cursor.revision_id)
+        cursor = system.sources.revision(cursor.prior_revision_id, proof=proof).request
+    if cursor != previous:
         raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
     relationship = (
         HypothesisRelationship.SAME_STATE
-        if proposed.permitted_state_digest == previous.permitted_state_digest
+        if same_state
         else HypothesisRelationship.DEVELOPMENT_OF
     )
     return current, target, relationship

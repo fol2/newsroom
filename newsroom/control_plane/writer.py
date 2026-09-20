@@ -392,6 +392,7 @@ class WriterEvidenceLink:
 
 def required_surface_copy(
     package: EvidencePackage,
+    *, paragraphs: bool = False,
 ) -> tuple[str, str, tuple[WriterEvidenceLink, ...]]:
     required = _required_title_and_body(package)
     if required is None:
@@ -405,6 +406,8 @@ def required_surface_copy(
         for claim in package.governed_claims
         if claim.claim_role == "SUBSTANTIVE"
     )
+    if paragraphs:
+        body = "\n\n".join(claim.rendered_assertion_zh_hant_hk for claim in body_claims)
     return (
         title,
         body,
@@ -1088,8 +1091,14 @@ def validate_writer_copy(
         and len(headline_claims) == 1
         and copy.title
         == f"【未出版】{headline_claims[0].rendered_assertion_zh_hant_hk}"
-        and copy.body.startswith("本報根據已核實證據報道：")
-        and copy.body.count("本報根據已核實證據報道：") == 1
+        and (
+            copy.body == "\n\n".join(
+                claim.rendered_assertion_zh_hant_hk for claim in package.governed_claims
+                if claim.claim_role == "SUBSTANTIVE"
+            ) if copy.writer_id == "newsroom.offline-exact-copy.v2" else
+            copy.body.startswith("本報根據已核實證據報道：")
+            and copy.body.count("本報根據已核實證據報道：") == 1
+        )
         and all(
             copy.title.count(claim.rendered_assertion_zh_hant_hk) == 1
             and copy.body.count(claim.rendered_assertion_zh_hant_hk) == 0

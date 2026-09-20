@@ -561,8 +561,9 @@ def test_observed_state_currentness_enforces_window_boundary_and_missing_rule() 
     assert currentness(None, "HOLD").result == "HOLD"
 
 
+@pytest.mark.parametrize("writer_id", ("newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v2"))
 def test_authenticated_policy_admits_and_reopens_native_story_version(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, writer_id,
 ) -> None:
     candidate_connection, candidate_port, version = _candidate(tmp_path)
     ingress_path = tmp_path / "intake.sqlite3"
@@ -601,6 +602,11 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
             system, _decision(retained, source.admission_id)
         )
         native = _native(system, evidence, registries)
+        original_build = native._build_story
+        def selected_build(*args, **kwargs):
+            kwargs.setdefault("writer_id", writer_id)
+            return original_build(*args, **kwargs)
+        monkeypatch.setattr(native, "_build_story", selected_build)
         request = StoryVersionRequest(AggregateId.new(), 0, "story-1")
 
         class ChangingRequest:
@@ -642,6 +648,11 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
             candidate_port=candidate_port,
             proof=proof(),
         )
+        assert story.copy.writer_id == writer_id
+        if writer_id.endswith(".v2"):
+            assert story.copy.body == "官方限期安排已經更新。"
+        else:
+            assert story.copy.body.startswith("本報根據已核實證據報道：")
         replay_receipt, replay_story = native.admit_story_version(
             request,
             package_admission_id=retained.package_admission_id,
@@ -702,6 +713,14 @@ def test_authenticated_policy_admits_and_reopens_native_story_version(
     )
     candidate_connection.execute("BEGIN IMMEDIATE")
     try:
+        # A v2 default must also replay the original v1 admission request,
+        # including a restart after object retention but before acknowledgement.
+        replayed_receipt, replayed_story = reopened.admit_story_version(
+            request, package_admission_id=retained.package_admission_id,
+            decision_reference=decision_reference, candidate_port=candidate_port,
+            proof=proof(),
+        )
+        assert (replayed_receipt, replayed_story) == (receipt, story)
         assert reopened.read_story_version(
             receipt, candidate_port=candidate_port, proof=proof()
         ) == story

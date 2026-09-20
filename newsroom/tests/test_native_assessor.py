@@ -141,7 +141,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v13"
+    assert VERSION == "newsroom.native-evidence-assessor.v14"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
@@ -2135,3 +2135,71 @@ def test_complete_replacement_object_does_not_lose_source_context(prefix, object
         span, SimpleNamespace(claim=span, supporting_excerpt=span),
         source_context=prefix + span, new_state=state,
     ) is (not prefix and object_state)
+
+
+def test_hko_base_upgrade_proves_original_bytes_and_rejects_other_changes(tmp_path):
+    from newsroom.control_plane.native_assessor import _legacy_hko_base_digest
+    from newsroom.control_plane.native_weather_evidence import hko_evidence_body
+    from newsroom.tests.test_native_weather_evidence import HKO_WARNING
+
+    connection, _port, candidate = _candidate(tmp_path)
+    try:
+        raw = canonical_json_bytes({"WTS": HKO_WARNING})
+        old = replace(_base_package(_ready_package(candidate)[1]), source_ids=("HK-02",),
+                      passages=(raw.decode(),), observation_digests=(digest_bytes(raw),))
+        body = hko_evidence_body(raw)
+        current = replace(old, passages=(body.decode(),), observation_digests=(digest_bytes(body),))
+        sources = (SimpleNamespace(unit=SimpleNamespace(source_id="HK-02")),)
+        acquired = (SimpleNamespace(body=body),)
+        assert _legacy_hko_base_digest(current, sources, acquired) == old.digest
+        assert _legacy_hko_base_digest(current, (), ()) is None
+        assert _legacy_hko_base_digest(current, (SimpleNamespace(unit=SimpleNamespace(source_id="UK-01")),), acquired) is None
+        changed = body + b" Invented information."
+        assert _legacy_hko_base_digest(replace(current, passages=(changed.decode(),)), sources, (SimpleNamespace(body=changed),)) is None
+        changed_raw = canonical_json_bytes({"WTS": {**HKO_WARNING, "actionCode": "CANCEL"}})
+        changed_body = hko_evidence_body(changed_raw)
+        assert _legacy_hko_base_digest(
+            replace(current, passages=(changed_body.decode(),)), sources,
+            (SimpleNamespace(body=changed_body),),
+        ) != old.digest
+    finally:
+        connection.close()
+
+
+def test_proved_hko_representation_upgrade_has_one_new_accounted_contract_attempt(tmp_path, monkeypatch):
+    import newsroom.control_plane.native_assessor as module
+
+    connection, _port, candidate = _candidate(tmp_path)
+    try:
+        base = _base_package(_ready_package(candidate)[1])
+        calls = []
+        def dispatch(_prompt):
+            calls.append("provider")
+            return NativeAssessmentExecution(
+                canonical_json_bytes({"package": _model_package_value(base)}).decode(),
+                {"usage_basis": "PROVIDER_REPORTED", "input_tokens": 1, "output_tokens": 1,
+                 "cached_read_tokens": 0, "cached_write_tokens": 0, "reasoning_tokens": 0,
+                 "context_tokens": 1, "total_tokens": 2},
+            )
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v13")
+        monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+        service, old_usage = _usage(tmp_path, monkeypatch)
+        AutonomousNativeEvidenceAssessor(dispatch, usage=old_usage, dispatch_fence=nullcontext)(candidate, base, (), ())
+        monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v14")
+        monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+        _, usage = _usage(tmp_path, monkeypatch)
+        current = replace(base, passages=(base.passages[0] + " Canonical field projection.",))
+        # The exact byte-proof helper has its own positive/tamper test above;
+        # isolate settlement/accounting behaviour here, not source acquisition.
+        monkeypatch.setattr(module, "_legacy_hko_base_digest", lambda *_: base.digest)
+        assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
+        with pytest.raises(NativeEvidenceHold, match="INPUT_CHANGED"):
+            assessor.assess_with_boundary(candidate, current, (), (), before_dispatch=None, cached_only=True)
+        result = assessor(candidate, current, (), ())
+        assert assessor(candidate, current, (), ()) == result
+        assert calls == ["provider", "provider"]
+        with sqlite3.connect(service.path) as retained:
+            assert retained.execute("SELECT count(*) FROM model_invocation_allocations").fetchone() == (2,)
+            assert retained.execute("SELECT count(*) FROM model_invocation_terminals").fetchone() == (2,)
+    finally:
+        connection.close()
