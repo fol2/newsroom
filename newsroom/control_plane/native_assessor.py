@@ -83,7 +83,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v13"
+VERSION = "newsroom.native-evidence-assessor.v14"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -113,7 +113,16 @@ CONTEXT_MANIFEST_SCHEMA_VERSION = (
 )
 SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
-    "candidate and exact source bytes. Return JSON matching the schema. The claim "
+    "candidate and exact source bytes. Return JSON matching the schema. "
+    "When a source contains raw HKO JSON followed by canonical structured-fact "
+    "sentences, select the readable sentences rather than JSON field names. "
+    "These sentences are mechanically bound to documented warning fields, not "
+    "extra model assertions. A record update alone does not prove a changed warning; "
+    "a cancellation does not prove that all danger has ended. Distinguish original "
+    "issue time from record update time and never invent a cancellation time. "
+    "Write a self-contained headline naming the subject and action, not a "
+    "deictic-only reference to these reforms, those measures or that record. "
+    "The claim "
     "and supporting_excerpt fields must each be copied byte-for-byte as an exact "
     "contiguous source-language span of the same UTF-8 source body. Every "
     "substantive_new_information item must exactly equal one of those source-language "
@@ -804,17 +813,12 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?,?,?)"
-                parameters.extend((
-                    _assessment_cycle_id(version_id, base.digest, VERSION),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v7"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v8"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v9"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v10"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v11"),
-                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v12"),
-                ))
+                cycles = sorted({
+                    _assessment_cycle_id(version_id, base.digest, contract)
+                    for contract in (VERSION, *(f"newsroom.native-evidence-assessor.v{i}" for i in range(6, 14)))
+                })
+                cycle_clause = " OR cycle_id IN (" + ",".join("?" for _ in cycles) + ")"
+                parameters.extend(cycles)
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
@@ -1268,6 +1272,31 @@ class NativeAssessmentUsage:
             connection.close()
 
 
+def _legacy_hko_base_digest(base, sources, acquired) -> str | None:
+    """Recognise only exact raw JSON plus its verified HKO field rendering."""
+    from .native_weather_evidence import legacy_hko_body
+
+    if not sources or len(sources) != len(acquired) or len(sources) != len(base.passages):
+        return None
+    if base.observation_digests != tuple(digest_bytes(item.body) for item in acquired):
+        return None
+    passages, digests = [], []
+    changed = False
+    for source, result, passage in zip(sources, acquired, base.passages, strict=True):
+        if result.body.decode("utf-8") != passage:
+            return None
+        raw = result.body
+        if source.unit.source_id == "HK-02":
+            try:
+                raw = legacy_hko_body(raw)
+            except (KeyError, TypeError, ValueError):
+                return None
+            changed = True
+        passages.append(raw.decode("utf-8"))
+        digests.append(digest_bytes(raw))
+    return replace(base, passages=tuple(passages), observation_digests=tuple(digests)).digest if changed else None
+
+
 class AutonomousNativeEvidenceAssessor:
     """Dispatch one fixed-schema transform, then prove its output locally."""
 
@@ -1333,9 +1362,19 @@ class AutonomousNativeEvidenceAssessor:
             retained = self._usage.retained_assessments(candidate, base)
             if retained is None:
                 raise NativeEvidenceHold("ASSESSOR_REVALIDATION_UNRESOLVED_HOLD", source_id)
-            if retained:
-                if any(item.base_digest != base.digest for item in retained):
+            mismatched = tuple(item for item in retained if item.base_digest != base.digest)
+            if mismatched:
+                legacy = _legacy_hko_base_digest(base, sources, acquired)
+                if cached_only or legacy is None or any(
+                    item.base_digest != legacy or item.contract_version == VERSION
+                    for item in mismatched
+                ):
                     raise NativeEvidenceHold("ASSESSOR_REVALIDATION_INPUT_CHANGED_HOLD", source_id)
+                # Only this proved representation upgrade may start the new
+                # contract envelope. Prior settled accounting remains untouched;
+                # unresolved attempts were rejected before reaching this branch.
+                retained = tuple(item for item in retained if item.base_digest == base.digest)
+            if retained:
                 if cached_only:
                     # Revalidate exact retained bytes under today's consumer
                     # rules without rewriting their producer identity or spending.

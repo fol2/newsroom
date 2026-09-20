@@ -689,6 +689,7 @@ class NativeEditorial:
             retained,
             decision,
             reference,
+            writer_id=story.copy.writer_id,
         )
         if rebuilt.canonical_bytes() != hydrated.data:
             raise EditorialError("Story Version replay differs")
@@ -700,6 +701,7 @@ class NativeEditorial:
         retained: GovernedEvidencePackage,
         policy: EditorialPolicyDecision,
         reference: DecisionReference,
+        *, writer_id: str = "newsroom.offline-exact-copy.v2",
     ) -> StoryVersion:
         package = retained.package
         if str(request.story_id) == package.candidate_id:
@@ -741,11 +743,15 @@ class NativeEditorial:
         )
         if decision.decision != "WRITE_READY":
             raise EditorialHold(decision)
-        title, body, links = required_surface_copy(evaluated)
+        if writer_id not in {"newsroom.offline-exact-copy.v1", "newsroom.offline-exact-copy.v2"}:
+            raise EditorialError("native Story Version writer differs")
+        title, body, links = required_surface_copy(
+            evaluated, paragraphs=writer_id == "newsroom.offline-exact-copy.v2",
+        )
         copy = WriterCopy(
             title,
             body,
-            "newsroom.offline-exact-copy.v1",
+            writer_id,
             evaluated.digest,
             links,
         )

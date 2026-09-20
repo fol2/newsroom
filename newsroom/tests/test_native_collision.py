@@ -780,11 +780,35 @@ def test_same_state_association_replays_then_allows_development(
                     )
                     connection.execute(trigger)
 
-            changed_unit = _next_revision(second_same_unit)
+            # Live HK-02 can retain several source revisions while its current
+            # Candidate remains on the last editorially processed revision.
+            skipped = second_same_unit
+            for observed_at, updated_at in (
+                ("2026-09-02T12:21:00.000000Z", "2026-09-02T12:16:00.000000Z"),
+                ("2026-09-02T12:22:00.000000Z", "2026-09-02T12:17:00.000000Z"),
+            ):
+                retained = _same_state_revision(
+                    skipped, observed_at=observed_at, updated_at=updated_at
+                )
+                _retain_source_revision(
+                    system,
+                    retained,
+                    prior_revision_id=skipped.authority.revision_id,
+                )
+                delivery = controller.deliver(
+                    retained,
+                    now=UtcTimestamp.parse(observed_at),
+                    proof=proof(),
+                )
+                controller.admit_lead(
+                    delivery, now=UtcTimestamp.parse(observed_at), proof=proof()
+                )
+                skipped = retained
+            changed_unit = _next_revision(skipped)
             _retain_source_revision(
                 system,
                 changed_unit,
-                prior_revision_id=second_same_unit.authority.revision_id,
+                prior_revision_id=skipped.authority.revision_id,
             )
             changed_delivery = controller.deliver(
                 changed_unit,
