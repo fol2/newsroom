@@ -21,6 +21,7 @@ from newsroom.control_plane.native_evidence import (
     EvidenceAcquisitionRequest,
     NativeEvidenceHold,
 )
+from newsroom.control_plane.evidence import validate_governed_evidence_records
 from newsroom.control_plane.native_runtime import open_native_runtime
 from newsroom.control_plane.native_source_rights import (
     NativePortfolioRights,
@@ -54,6 +55,20 @@ NOW = datetime(2026, 9, 8, 15, tzinfo=UTC)
 CONTROLLER_POLICY_DIGEST = digest_canonical(
     {"govuk": "component-policy", "weather": POLICY_DIGEST}
 )
+
+
+def _assert_governed_records(base, package, source, acquired, records):
+    retained = tuple(
+        (record["record_id"], record["record_type"],
+         canonical_json_bytes(record).decode(), digest_canonical(record))
+        for record in records
+    )
+    assert validate_governed_evidence_records(
+        candidate_id=base.candidate_id,
+        source_inventory=((source.unit.source_id, acquired.canonical_url),),
+        base_package_digest=base.digest, package=package, retained_records=retained,
+    ) is not None
+    assert acquired.language == "zh-Hant-HK"
 HKO_WARNING = {
     "name": "雷暴警告",
     "code": "WTS",
@@ -382,6 +397,7 @@ def test_hko_acquires_exact_retained_warning_with_current_rights(
                                    qualification_evidence=output.qualification_evidence)
             from newsroom.control_plane.native_evidence import NativeEvidenceController
             records = NativeEvidenceController._records(base, copy_package, (source,), (result,), output)
+            _assert_governed_records(base, copy_package, source, result, records)
             copy_package = replace(copy_package, resolved_evidence_records=tuple(
                 sorted((record["record_id"], digest_canonical(record)) for record in records)
             ))
@@ -676,6 +692,7 @@ def test_hko_absent_current_item_rehydrates_exact_retained_cancellation(
             records = NativeEvidenceController._records(
                 base, copy_package, (source,), (result,), output,
             )
+            _assert_governed_records(base, copy_package, source, result, records)
             copy_package = replace(
                 copy_package, resolved_evidence_records=tuple(sorted(
                     (record["record_id"], digest_canonical(record))

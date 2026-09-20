@@ -22,6 +22,7 @@ from newsroom.increment6.collision import CurrentCollisionEffectEnforcer
 from newsroom.increment6.dispositions import (
     CurrentCandidateCitationReadPort,
     ProposalDispositionStore,
+    _require_verification_snapshot,
 )
 from newsroom.increment6.hypotheses import _compose_event_hypothesis_authority
 from newsroom.increment6.lineage import (
@@ -93,23 +94,6 @@ class _SharedAuthority:
 
     def close(self) -> None:
         return None
-
-
-def _semantic_snapshot(connection: sqlite3.Connection) -> tuple[int, int, int]:
-    """Identity of the sole writer state backing one OPEN verification pass."""
-
-    return (
-        connection.total_changes,
-        int(connection.execute("PRAGMA data_version").fetchone()[0]),
-        int(connection.execute("PRAGMA schema_version").fetchone()[0]),
-    )
-
-
-def _require_semantic_snapshot(
-    connection: sqlite3.Connection, expected: tuple[int, int, int]
-) -> None:
-    if connection.in_transaction or _semantic_snapshot(connection) != expected:
-        raise RuntimeError("native semantic verification snapshot changed")
 
 
 class _SharedRelationshipStore(_RelationshipEventStore):
@@ -431,20 +415,20 @@ def open_hermes_native_authority_system(
                 _open_verification=verified_dispositions,
             )
             # The root Event store holds the lifetime POSIX writer lock, so no
-            # compliant writer can commit between this read-only verification
-            # and the stamp. The stamp rejects any later local/external change.
-            semantic_snapshot = _semantic_snapshot(connection)
-            _require_semantic_snapshot(connection, semantic_snapshot)
+            # compliant writer can commit after this verified snapshot. The
+            # in-transaction checks below also reject noncompliant changes.
+            disposition_values, disposition_snapshot = verified_dispositions[0]
             verified_hypotheses = []
             hypothesis_store = _HypothesisStore(
                 connection, retrieval_authority, authenticator, clock,
                 current_candidate_citations,
                 dispositions=dispositions,
-                verified_dispositions=verified_dispositions[0],
+                verified_dispositions=disposition_values,
+                verified_disposition_snapshot=disposition_snapshot,
                 _open_verification=verified_hypotheses,
             )
             hypothesis_store._lock = operation_lock
-            _require_semantic_snapshot(connection, semantic_snapshot)
+            hypothesis_values, hypothesis_snapshot = verified_hypotheses[0]
 
         relationship_store = _share_store(_SharedRelationshipStore, root)
         with relationship_store._hypothesis_rows():
@@ -476,14 +460,14 @@ def open_hermes_native_authority_system(
         candidate_store._service = service
         # These facades share one writer and one stable validation transaction.
         # Pass its verified upstream values directly; retain nothing across calls.
-        _require_semantic_snapshot(connection, semantic_snapshot)
         with operation_lock, relationship_store._transaction():
+            _require_verification_snapshot(connection, hypothesis_snapshot)
             relationship_store._adopt()
             try:
                 with _validation_stage("native_relationships"):
                     _verify_relationship_event_coverage(connection)
                     relationship_inputs = relationship_store._verify_relationships(
-                        verified_versions=verified_hypotheses[0]
+                        verified_versions=hypothesis_values
                     )
                 with _validation_stage("native_lineage"):
                     lineage_store._verify_global_event_coverage()

@@ -2293,3 +2293,18 @@ def test_source_declared_acronym_revalidates_retained_output_without_dispatch(
                 candidate, base, (source,), (acquired,), before_dispatch=None, cached_only=True,
             )
     assert retained_rows() == before
+
+
+def test_weather_record_metadata_failure_revalidates_once_per_consumer_contract():
+    from newsroom.control_plane.native_assessor import assessment_revalidation_due
+    from newsroom.control_plane.native_composition import ASSESSMENT_CONTRACT_VERSION
+
+    facts = {
+        "reason": "EVIDENCE_VALIDATION_HOLD",
+        "assessment_contract_version": ASSESSMENT_CONTRACT_VERSION.replace(
+            "newsroom.named-entity.v15", "newsroom.named-entity.v14",
+        ),
+    }
+    assert assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)
+    facts["assessment_contract_version"] = ASSESSMENT_CONTRACT_VERSION
+    assert not assessment_revalidation_due(facts, ASSESSMENT_CONTRACT_VERSION)

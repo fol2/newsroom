@@ -28,6 +28,8 @@ from newsroom.increment6.dispositions import (
     DispositionJudgement,
     ProposalDisposition,
     ProposalDispositionStore,
+    _require_verification_snapshot,
+    _verification_snapshot,
 )
 from newsroom.increment6.hypotheses import (
     EventHypothesis,
@@ -185,7 +187,10 @@ class _HypothesisStore:
         *,
         dispositions: ProposalDispositionStore | None = None,
         verified_dispositions: Mapping[str, ProposalDisposition] | None = None,
-        _open_verification: list[dict[str, EventHypothesisVersion]] | None = None,
+        verified_disposition_snapshot: tuple[int, int, int] | None = None,
+        _open_verification: list[
+            tuple[dict[str, EventHypothesisVersion], tuple[int, int, int]]
+        ] | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -216,6 +221,10 @@ class _HypothesisStore:
                 )
             )
             or (
+                (verified_dispositions is None)
+                != (verified_disposition_snapshot is None)
+            )
+            or (
                 _open_verification is not None
                 and (type(_open_verification) is not list or _open_verification)
             )
@@ -235,12 +244,17 @@ class _HypothesisStore:
                 current_candidate_citations,
             )
             self._begin()
+            if verified_disposition_snapshot is not None:
+                _require_verification_snapshot(
+                    connection, verified_disposition_snapshot
+                )
             verified = self._verify(
                 verified_dispositions=verified_dispositions
             )
+            snapshot = _verification_snapshot(connection)
             self._commit()
             if _open_verification is not None:
-                _open_verification.append(verified)
+                _open_verification.append((verified, snapshot))
         except BaseException as exc:
             self._rollback()
             if not isinstance(exc, Exception):

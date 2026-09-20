@@ -607,26 +607,23 @@ def test_shared_writer_advances_no_match_through_hypothesis_relationship(
             admitted.candidate
         )
 
-    from newsroom.authority import _hermes_native_system
-    original_snapshot = _hermes_native_system._semantic_snapshot
-    snapshot_reads = 0
-
-    def changed_snapshot(connection):
-        nonlocal snapshot_reads
-        snapshot_reads += 1
-        value = original_snapshot(connection)
-        return value if snapshot_reads == 1 else (value[0] + 1, *value[1:])
-
-    with monkeypatch.context() as local_patch:
-        local_patch.setattr(
-            _hermes_native_system, "_semantic_snapshot", changed_snapshot
-        )
+    from newsroom.increment6.dispositions import (
+        _require_verification_snapshot, _verification_snapshot,
+    )
+    snapshot_path = tmp_path / "semantic-snapshot.sqlite3"
+    with closing(sqlite3.connect(snapshot_path, isolation_level=None)) as reader, closing(
+        sqlite3.connect(snapshot_path, isolation_level=None)
+    ) as external_writer:
+        reader.execute("PRAGMA journal_mode=WAL")
+        external_writer.execute("PRAGMA journal_mode=WAL")
+        expected_snapshot = _verification_snapshot(reader)
+        reader.execute("BEGIN")
+        external_writer.execute("CREATE TABLE external_change(value INTEGER)")
         with pytest.raises(
             RuntimeError, match="native semantic verification snapshot changed"
         ):
-            _shared_system(
-                tmp_path, local_patch, retrieval_authority, collision=enforcer
-            )
+            _require_verification_snapshot(reader, expected_snapshot)
+        reader.execute("ROLLBACK")
 
     # The retained authority event and Candidate still refer to the now missing
     # relationship. Reuse must not convert that missing upstream into success.
