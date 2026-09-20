@@ -42,6 +42,32 @@ def _state_digest(stage: str, facts: dict, pair_digest: str | None) -> str:
     ))
 
 
+def _share_progress_strings(progress: dict) -> None:
+    """Share equal immutable text after replay, never lists/dicts or a persistent cache."""
+    strings: dict[str, str] = {}
+
+    def visit(value):
+        if type(value) is str:
+            return strings.setdefault(value, value)
+        if type(value) is dict:
+            # Preserve insertion order as well as values: iteration can order
+            # continuation work. Each original mutable container keeps its identity.
+            replacement = {strings.setdefault(key, key): visit(item)
+                           for key, item in value.items()}
+            value.clear()
+            value.update(replacement)
+        elif type(value) is list:
+            for index, item in enumerate(value):
+                value[index] = visit(item)
+        return value
+
+    try:
+        visit(progress)
+    finally:
+        # The recursive closure may await cyclic GC; do not leave its pool alive.
+        strings.clear()
+
+
 @dataclass(frozen=True, slots=True)
 class _ProgressRecord:
     seq: int
@@ -86,6 +112,7 @@ class NativeRevisionJournal:
             if canonical_json_bytes(value).decode() != raw:
                 raise ValueError("native progress ledger is not canonical")
             self._apply(kind, value, seq=seq, payload_digest=payload_digest)
+        _share_progress_strings(self.progress)
 
     def _apply(self, kind: str, value: dict, *, seq: int, payload_digest: str) -> None:
         if kind == LAND:

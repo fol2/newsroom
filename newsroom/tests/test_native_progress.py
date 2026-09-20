@@ -482,3 +482,35 @@ def test_portfolio_reference_reopens_and_changes_only_with_committed_inventory(t
             journal.portfolio_reference(journal.portfolio)
     finally:
         connection.close()
+
+
+def test_reopen_shares_equal_text_without_aliasing_mutable_facts_or_reordering(tmp_path):
+    from newsroom.authority.canonical import canonical_json_bytes
+
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    units = tuple(_native(name) for name in ("one", "two", "three"))
+    text = "sha256:" + "d" * 64
+    for unit in units:
+        journal.land((unit,))
+        journal.advance(unit.revision_id, stage="EVIDENCE_HOLD", facts={
+            "later_revision": units[-1].revision_id,
+            "items": [{"digest": text, "label": "同一份香港證據🙂"}],
+        })
+    expected_order = tuple(journal.progress)
+    expected = canonical_json_bytes(journal.progress)
+    rows = connection.execute("SELECT * FROM ledger ORDER BY seq").fetchall()
+    changes = connection.total_changes
+    reopened = NativeRevisionJournal(connection)
+    facts = [reopened.progress[unit.revision_id]["facts"] for unit in units]
+    assert canonical_json_bytes(reopened.progress) == expected
+    assert tuple(reopened.progress) == expected_order
+    assert facts[0]["items"][0]["digest"] is facts[1]["items"][0]["digest"]
+    assert facts[0]["items"][0]["label"] is facts[1]["items"][0]["label"]
+    assert facts[0]["items"] is not facts[1]["items"]
+    assert facts[0]["items"][0] is not facts[1]["items"][0]
+    facts[0]["items"][0]["label"] = "changed locally"
+    assert facts[1]["items"][0]["label"] == "同一份香港證據🙂"
+    assert connection.total_changes == changes
+    assert connection.execute("SELECT * FROM ledger ORDER BY seq").fetchall() == rows
+    connection.close()
