@@ -1,4 +1,4 @@
-"""Reclaim superseded retrieval reads and unreferenced Graphiti reads older than seven days."""
+"""Reclaim obsolete native reads and retired no-op projection detail offline."""
 from __future__ import annotations
 
 import argparse

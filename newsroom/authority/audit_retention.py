@@ -28,6 +28,7 @@ from .migrations import (
 )
 from .object_policy import HydrationPolicyContract
 from .persistence import AuthorityWriterBusy
+from ._projection_retention import retired_ignored_attempt
 from .types import UtcTimestamp
 
 _AUDIT_KEYS = {
@@ -132,6 +133,7 @@ def _encoded(value: object) -> bytes:
 def _scan_business(
     source: sqlite3.Connection, *, tokens: sqlite3.Connection | None = None,
     exclude_audit: bool = False,
+    exclude_projection_details: bool = False,
 ) -> dict[str, object]:
     """Hash actual rows and collect references together, bounded by one row."""
     digest = hashlib.sha256()
@@ -139,6 +141,8 @@ def _scan_business(
     pending: list[tuple[str]] = []
     for table in _tables(source):
         if exclude_audit and table in _AUDIT_KEYS:
+            continue
+        if exclude_projection_details and table == "projection_delivery_attempts":
             continue
         digest.update(table.encode() + b"\0")
         columns = source.execute(f"PRAGMA main.table_info({_q(table)})").fetchall()
@@ -223,8 +227,10 @@ def _policies(conn: sqlite3.Connection) -> None:
                  (policy.purpose, "source.expression", policy.contract_digest))
 
 
-def _children(conn: sqlite3.Connection, parent: str) -> list[tuple[str, str]]:
-    key = _AUDIT_KEYS[parent]
+def _children(
+    conn: sqlite3.Connection, parent: str, *, key: str | None = None,
+) -> list[tuple[str, str]]:
+    key = key or _AUDIT_KEYS[parent]
     return sorted({
         (table, fk[3])
         for table in _tables(conn)
@@ -378,6 +384,81 @@ def _delete_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     return deleted
 
 
+def _projection_references(conn: sqlite3.Connection) -> None:
+    # Ignore only each detail row's own identity. Other fields, including error
+    # text in retained failures, may reference a read receipt or another detail.
+    cursor = conn.execute("SELECT * FROM projection_delivery_attempts")
+    names = tuple(column[0] for column in cursor.description)
+    pending = []
+    for row in cursor:
+        for name, value in zip(names, row, strict=True):
+            if name != "delivery_attempt_id" and isinstance(value, (str, bytes)):
+                pending.extend(_reference_tokens(value.encode() if isinstance(value, str) else value))
+        if len(pending) >= 4096:
+            conn.executemany("INSERT OR IGNORE INTO _audit_tokens VALUES (?)", pending)
+            pending.clear()
+    conn.executemany("INSERT OR IGNORE INTO _audit_tokens VALUES (?)", pending)
+
+
+def _projection_candidates(conn: sqlite3.Connection, *, cutoff: str) -> int:
+    if _children(conn, "projection_delivery_attempts", key="delivery_attempt_id"):
+        raise AuditRetentionError("projection detail has additional foreign-key consumers")
+    conn.execute("CREATE TEMP TABLE _audit_projection_candidates(id TEXT PRIMARY KEY) WITHOUT ROWID")
+    cursor = conn.execute("""SELECT a.* FROM projection_delivery_attempts a
+        JOIN projection_generations g ON g.generation_id=a.generation_id
+        JOIN projection_delivery_states s ON s.generation_id=a.generation_id AND s.ledger_seq=a.ledger_seq
+        WHERE g.state='RETIRED' AND g.updated_at<?
+          AND a.outcome='IGNORED_OPTIONAL' AND a.required=0 AND a.attempt_number=1 AND a.error_code IS NULL
+          AND s.current_outcome='IGNORED_OPTIONAL' AND s.required=0 AND s.attempt_count=1
+          AND s.finalized=1 AND s.last_error_code IS NULL
+          AND NOT EXISTS(SELECT 1 FROM projection_delivery_attempts other
+              WHERE other.generation_id=a.generation_id AND other.ledger_seq=a.ledger_seq
+                AND other.attempt_number<>1)
+          AND NOT EXISTS(SELECT 1 FROM _audit_tokens t WHERE t.id=a.delivery_attempt_id)
+    """, (cutoff,))
+    names = tuple(column[0] for column in cursor.description)
+    count = 0
+    for row in cursor:
+        attempt = dict(zip(names, row, strict=True))
+        retained = retired_ignored_attempt(conn, str(attempt["authority_event_id"]))
+        if retained is None or any(
+            retained.get(key) != value for key, value in attempt.items()
+            if key != "delivery_attempt_id"
+        ):
+            raise AuditRetentionError("retired projection detail differs from retained authority")
+        conn.execute("INSERT INTO _audit_projection_candidates VALUES (?)", (attempt["delivery_attempt_id"],))
+        count += 1
+    return count
+
+
+def _protected_projection_details(conn: sqlite3.Connection) -> dict[str, object]:
+    digest = hashlib.sha256()
+    count = 0
+    for row in conn.execute(
+        "SELECT * FROM projection_delivery_attempts WHERE delivery_attempt_id NOT IN "
+        "(SELECT id FROM _audit_projection_candidates) ORDER BY delivery_attempt_id"
+    ):
+        digest.update(b"r")
+        for value in row:
+            raw = _encoded(value)
+            digest.update(len(raw).to_bytes(8, "big") + raw)
+        count += 1
+    return {"sha256": digest.hexdigest(), "rows": count}
+
+
+def _delete_projection_candidates(conn: sqlite3.Connection) -> int:
+    name = "immutable_projection_delivery_attempt_delete"
+    row = conn.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", (name,)).fetchone()
+    if row is None:
+        raise AuditRetentionError("immutable projection detail delete guard is missing")
+    conn.execute(f"DROP TRIGGER {name}")
+    conn.execute("DELETE FROM projection_delivery_attempts WHERE delivery_attempt_id IN "
+                 "(SELECT id FROM _audit_projection_candidates)")
+    count = conn.execute("SELECT changes()").fetchone()[0]
+    conn.execute(row[0])
+    return count
+
+
 def prune_native_diagnostic_audit(
     data_root: Path, *, apply: bool = False, clock=UtcTimestamp.now,
 ) -> dict[str, object]:
@@ -427,7 +508,8 @@ def prune_native_diagnostic_audit(
             _policies(conn)
             _LOG.info("AUDIT_RETENTION_STAGE retained_authority_references")
             scan_started = time.monotonic_ns()
-            business = _scan_business(conn, tokens=conn, exclude_audit=True)
+            business = _scan_business(conn, tokens=conn, exclude_audit=True, exclude_projection_details=True)
+            _projection_references(conn)
             _LOG.info("AUDIT_RETENTION_STAGE external_references")
             external_reports = {}
             readers = []
@@ -452,6 +534,8 @@ def prune_native_diagnostic_audit(
             _LOG.info("AUDIT_RETENTION_STAGE classify_superseded_reads")
             candidates_started = time.monotonic_ns()
             counts = _candidates(conn, graphiti_cutoff=graphiti_cutoff)
+            counts["prunable_projection_details"] = _projection_candidates(conn, cutoff=graphiti_cutoff)
+            protected_projection_details = _protected_projection_details(conn)
             report: dict[str, object] = {
                 "mode": "apply" if apply else "dry-run", "authority": str(authority),
                 "reference_scan_ms": scan_ms,
@@ -460,6 +544,7 @@ def prune_native_diagnostic_audit(
                 "external_roots": external_reports, "cas": cas_report,
                 "counts": counts, "database_bytes_before": before.st_size,
                 "graphiti_read_expiry_before": graphiti_cutoff,
+                "protected_projection_details": protected_projection_details,
                 "protected_tokens": conn.execute("SELECT count(*) FROM _audit_tokens").fetchone()[0],
                 "committed": False, "compacted": False,
                 "wal_bytes_before": wal_before,
@@ -470,7 +555,10 @@ def prune_native_diagnostic_audit(
                 _LOG.info("AUDIT_RETENTION_STAGE prune_and_verify")
                 prune_started = time.monotonic_ns()
                 report["deleted"] = _delete_candidates(conn)
-                if _schema(conn) != schema or _scan_business(conn, exclude_audit=True) != business:
+                report["projection_details_deleted"] = _delete_projection_candidates(conn)
+                if (_schema(conn) != schema
+                        or _scan_business(conn, exclude_audit=True, exclude_projection_details=True) != business
+                        or _protected_projection_details(conn) != protected_projection_details):
                     raise AuditRetentionError("retained business rows or schema changed; rolling back")
                 if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise AuditRetentionError("retained foreign-key integrity differs; rolling back")
@@ -490,7 +578,8 @@ def prune_native_diagnostic_audit(
                     checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
                     if checkpoint is not None and checkpoint[0]:
                         raise AuditRetentionError("authority WAL checkpoint is busy")
-                    reclaimable = any(report["deleted"].values()) or conn.execute("PRAGMA freelist_count").fetchone()[0] > 0
+                    reclaimable = (any(report["deleted"].values()) or report["projection_details_deleted"]
+                                   or conn.execute("PRAGMA freelist_count").fetchone()[0] > 0)
                     if reclaimable:
                         conn.execute("VACUUM")
                     else:
