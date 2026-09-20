@@ -25,7 +25,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v13"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v14"
 FACTUAL_LOCALISATION_POLICY_VERSION = "newsroom.factual-localisation.v1"
 
 _SOURCE_RECORD_FIELDS = frozenset(
@@ -273,7 +273,7 @@ _ENGLISH_ORGANISATION_ACTION_WORDS = frozenset(
 _ENGLISH_ORGANISATION = re.compile(
     r"\b(?:Department|Ministry|Office)\s+(?:for|of)\s+(?:the\s+)?"
     r"[A-Z][A-Za-z&.-]+(?:\s+(?:and|of|for)\s+(?:the\s+)?"
-    r"[A-Z][A-Za-z&.-]+)*\b|"
+    r"[A-Z][A-Za-z&.-]+)*\b(?!\s+[A-Z])|"
     r"\bNHS(?:\s+(?:England|Scotland|Wales))?\b|"
     r"\bTransport\s+for\s+[A-Z][A-Za-z&.-]+\b|"
     r"\b(?:[A-Z][A-Za-z&.-]+\s+){1,3}"
@@ -284,6 +284,12 @@ _ENGLISH_UNIVERSITY_OF = re.compile(
     r"(?<![A-Za-z0-9_.-])(University of [A-Z][a-z]+)"
     r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9_]|/[A-Za-z0-9_]|"
     r"[ \t]+[A-Z][A-Za-z-]*\b)"
+)
+# A rejected prefix such as "The Department" must not hide an overlapping
+# complete name such as "Department for Education". Selection below still
+# retains only the longest non-overlapping, independently checked spans.
+_ENGLISH_ORGANISATION_CANDIDATES = re.compile(
+    rf"(?=({_ENGLISH_ORGANISATION.pattern}))"
 )
 _ENGLISH_OFFICIAL_TERM = re.compile(
     r"\b(?:[A-Z][A-Za-z-]+(?:\s+(?:and|of|the|for|[A-Z][A-Za-z-]+)){1,7}"
@@ -561,11 +567,11 @@ def bounded_named_entities(
     )
     for match in english_person.finditer(text):
         candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
-    for match in _ENGLISH_ORGANISATION.finditer(text):
-        organisation = match.group(0)
+    for match in _ENGLISH_ORGANISATION_CANDIDATES.finditer(text):
+        organisation = match.group(1)
         if _is_bounded_english_organisation(organisation):
             candidates.append(
-                (match.start(), match.end(), organisation, "ORGANISATION")
+                (match.start(1), match.end(1), organisation, "ORGANISATION")
             )
     for match in _ENGLISH_UNIVERSITY_OF.finditer(text):
         candidates.append(

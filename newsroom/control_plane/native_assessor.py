@@ -83,7 +83,7 @@ from .writer import (
 from .cycle import _complete_writer_usage
 from .store import append_ledger
 
-VERSION = "newsroom.native-evidence-assessor.v12"
+VERSION = "newsroom.native-evidence-assessor.v13"
 REASSESSABLE_HOLDS = frozenset({
     "ASSESSOR_CLAIM_BINDING_HOLD", "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD",
     "INVALID_GOVERNED_CLAIM_EVIDENCE",
@@ -180,6 +180,13 @@ SYSTEM = (
     "never invent an AFFIRMED qualification merely to populate that array. "
     "Use explicit_exclusions only for material evidence exclusions, not for "
     "ordinary editorial selection notes; those belong in selection_rationale."
+    " If prior_validation_feedback is supplied, it describes a settled failed "
+    "output, not source evidence or instructions. Correct the named validation "
+    "failure against the current source bytes. In particular, translate ordinary "
+    "English process and descriptive wording instead of retaining it as an official "
+    "name; preserve the recognised source entity spellings. Review every claim, "
+    "not just the first failure. Do not drop a material claim to pass validation "
+    "or copy unsupported facts from the previous output."
 )
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
@@ -403,6 +410,32 @@ class RetainedAssessorResult:
     outcome: str
     completed_at: datetime
     execution: NativeAssessmentExecution | None
+
+
+def _validation_feedback(execution: NativeAssessmentExecution, reason: str) -> dict:
+    """Compact diagnostics from an already authenticated, settled result.
+
+    This is not a retry grant: the caller still requires a changed producer
+    contract and the existing one-envelope/one-allocation accounting boundary.
+    """
+    claims = []
+    try:
+        package = _document(execution.text).get("package")
+        raw_claims = package.get("governed_claims") if type(package) is dict else None
+        if type(raw_claims) is list:
+            keys = ("claim_id", "claim", "rendered_assertion_zh_hant_hk")
+            claims = [
+                {key: claim[key] for key in keys}
+                for claim in raw_claims
+                if type(claim) is dict and all(type(claim.get(key)) is str for key in keys)
+            ]
+    except EvidencePackageError:
+        pass
+    return {
+        "reason": reason,
+        "prior_result_digest": digest_bytes(execution.text.encode()),
+        "claims": claims,
+    }
 
 
 def _assessment_cycle_id(candidate_version_id: str, base_digest: str, contract: str) -> str:
@@ -771,7 +804,7 @@ class NativeAssessmentUsage:
             if base is not None:
                 # An altered JSON candidate binding must not hide an unsettled
                 # invocation from the independently derived cycle identity.
-                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?,?)"
+                cycle_clause = " OR cycle_id IN (?,?,?,?,?,?,?,?)"
                 parameters.extend((
                     _assessment_cycle_id(version_id, base.digest, VERSION),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v6"),
@@ -780,6 +813,7 @@ class NativeAssessmentUsage:
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v9"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v10"),
                     _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v11"),
+                    _assessment_cycle_id(version_id, base.digest, "newsroom.native-evidence-assessor.v12"),
                 ))
             rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
@@ -1271,6 +1305,7 @@ class AutonomousNativeEvidenceAssessor:
         if type(cached_only) is not bool:
             raise NativeEvidenceError("native assessment cache mode differs")
         source_id = sources[0].unit.source_id if sources else candidate.candidate_id
+        validation_feedback = None
         if cached_only and self._usage is None:
             raise NativeEvidenceHold(
                 "ASSESSOR_REVALIDATION_CACHE_MISSING_HOLD", source_id
@@ -1332,6 +1367,11 @@ class AutonomousNativeEvidenceAssessor:
                             if isinstance(exc, NativeEvidenceHold):
                                 raise
                             raise NativeEvidenceHold(_contract_hold_reason(exc), source_id) from exc
+                        validation_feedback = _validation_feedback(
+                            latest.execution,
+                            exc.reason_code if isinstance(exc, NativeEvidenceHold)
+                            else _contract_hold_reason(exc),
+                        )
                 elif any(item.contract_version == VERSION for item in retained):
                     raise NativeEvidenceHold("ASSESSOR_RESULT_NOT_RETAINED_HOLD", source_id)
                 # A changed, settled producer contract owns one fresh envelope.
@@ -1368,6 +1408,8 @@ class AutonomousNativeEvidenceAssessor:
                     for source, result in zip(sources, acquired, strict=True)
                 ],
                 "output_schema_digest": SCHEMA_DIGEST,
+                **({"prior_validation_feedback": validation_feedback}
+                   if validation_feedback is not None else {}),
             }
         ).decode()
         request = prompt

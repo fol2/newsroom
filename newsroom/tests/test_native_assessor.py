@@ -141,7 +141,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v12"
+    assert VERSION == "newsroom.native-evidence-assessor.v13"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
@@ -166,6 +166,14 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
 @pytest.mark.parametrize(
     ("claim_text", "excerpt", "rendered", "expected_entities"),
     (
+        # Retained result 27257: rejecting "The Department" must not consume
+        # the start of the exact institution name which follows the article.
+        (
+            "The Department for Education will work with the Food Standards Agency on an approach to monitor school food",
+            "The Department for Education will work with the Food Standards Agency on an approach to monitor school food.",
+            "Department for Education 將與 Food Standards Agency 合作制訂監察學校膳食的方法。",
+            ("Department for Education", "Food Standards Agency"),
+        ),
         (
             "The Home Office published changes",
             "The Home Office published changes to the Skilled Worker Visa.",
@@ -1928,6 +1936,7 @@ def test_consumer_only_revalidation_without_retention_never_dispatches(
     "newsroom.native-evidence-assessor.v9",
     "newsroom.native-evidence-assessor.v10",
     "newsroom.native-evidence-assessor.v11",
+    "newsroom.native-evidence-assessor.v12",
 ))
 @pytest.mark.parametrize("settled", (True, False))
 def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settlement(
@@ -1953,12 +1962,17 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
             )(candidate, base, (), ())
     else:
         old_usage.begin(candidate, base, "unknown prior attempt")
-    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v13")
     monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
     _, new_usage = _usage(tmp_path, monkeypatch)
     calls = []
 
     def dispatch(_prompt):
+        assert json.loads(_prompt)["prior_validation_feedback"] == {
+            "reason": "ASSESSOR_OUTPUT_CONTRACT_HOLD",
+            "prior_result_digest": digest_bytes(execution.text.encode()),
+            "claims": [],
+        }
         calls.append("provider")
         return execution
 
@@ -1970,6 +1984,83 @@ def test_superseded_assessor_allows_one_new_contract_attempt_only_after_settleme
     with sqlite3.connect(service.path) as retained:
         assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (2 if settled else 1,)
     connection.close()
+
+
+def test_assessor_feedback_retains_only_failed_output_diagnostics():
+    from newsroom.control_plane.native_assessor import _validation_feedback
+
+    claim = {
+        "claim_id": "gc-withdrawn-fms",
+        "claim": "We have also withdrawn the FMS comparison matrix page.",
+        "rendered_assertion_zh_hant_hk": "我們亦已撤回 FMS comparison matrix 頁面。",
+        "source_ids": ["UK-05"],
+    }
+    execution = NativeAssessmentExecution(
+        json.dumps({"package": {"governed_claims": [claim]}}), {},
+    )
+    assert _validation_feedback(execution, "ASSESSOR_RENDERING_CONTRACT_HOLD") == {
+        "reason": "ASSESSOR_RENDERING_CONTRACT_HOLD",
+        "prior_result_digest": digest_bytes(execution.text.encode()),
+        "claims": [{key: claim[key] for key in (
+            "claim_id", "claim", "rendered_assertion_zh_hant_hk",
+        )}],
+    }
+
+
+@pytest.mark.parametrize("text, organisations", (
+    ("The Department for Education announced funding.", {"Department for Education"}),
+    ("The Department announced funding.", set()),
+    ("Authority Announces New Bank", set()),
+    ("The Ministry of Justice and the Food Standards Agency", {"Ministry of Justice", "Food Standards Agency"}),
+))
+def test_rejected_organisation_prefix_does_not_hide_a_complete_name(text, organisations):
+    assert {name for name, kind in bounded_named_entities(text) if kind == "ORGANISATION"} == organisations
+
+
+def test_settled_rendering_failure_supplies_feedback_once_then_reuses_valid_result(
+    tmp_path, monkeypatch, retained_22589_assessment,
+):
+    from newsroom.control_plane import native_assessor as module
+
+    candidate, base, source, acquired, valid = _qualification_assessor_inputs(
+        retained_22589_assessment, kind="deadline",
+    )
+    invalid = json.loads(canonical_json_bytes(valid))
+    invalid["package"]["governed_claims"][0]["rendered_assertion_zh_hant_hk"] += " deadline changed"
+    execution = NativeAssessmentExecution(canonical_json_bytes(invalid).decode(), {
+        "usage_basis": "PROVIDER_REPORTED", "input_tokens": 1, "output_tokens": 1,
+        "cached_read_tokens": 0, "cached_write_tokens": 0,
+        "reasoning_tokens": 0, "context_tokens": 1, "total_tokens": 2,
+    })
+    current_contract = VERSION
+    monkeypatch.setattr(module, "VERSION", "newsroom.native-evidence-assessor.v12")
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", module.VERSION)
+    service, prior_usage = _usage(tmp_path, monkeypatch)
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_RENDERING_CONTRACT_HOLD"):
+        AutonomousNativeEvidenceAssessor(
+            lambda _: execution, usage=prior_usage, dispatch_fence=nullcontext,
+        )(candidate, base, (source,), (acquired,))
+
+    monkeypatch.setattr(module, "VERSION", current_contract)
+    monkeypatch.setattr(__import__(__name__, fromlist=["VERSION"]), "VERSION", current_contract)
+    _, usage = _usage(tmp_path, monkeypatch)
+    prompts = []
+
+    def dispatch(prompt):
+        prompts.append(json.loads(prompt))
+        return NativeAssessmentExecution(canonical_json_bytes(valid).decode(), execution.usage)
+
+    assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
+    for _ in range(2):
+        result = assessor(candidate, base, (source,), (acquired,))
+        assert result.qualification_evidence
+    assert len(prompts) == 1
+    feedback = prompts[0]["prior_validation_feedback"]
+    assert feedback["reason"] == "ASSESSOR_RENDERING_CONTRACT_HOLD"
+    assert feedback["claims"][0]["rendered_assertion_zh_hant_hk"].endswith(" deadline changed")
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone() == (2,)
+        assert retained.execute("SELECT COUNT(*) FROM ledger WHERE kind='NATIVE_ASSESSMENT_RESULT'").fetchone() == (2,)
 
 
 def test_named_entity_record_identity_binds_immutable_policy(monkeypatch):
