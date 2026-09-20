@@ -141,7 +141,7 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid_geography["geography"] = ["Britain"]
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid_geography})
-    assert VERSION == "newsroom.native-evidence-assessor.v14"
+    assert VERSION == "newsroom.native-evidence-assessor.v15"
     assert "ASSESSOR_CLAIM_BINDING_HOLD" in REASSESSABLE_HOLDS
     assert "whitespace, newlines and country labels exactly" in SYSTEM
     assert "unfamiliar official source-bound literal" in SYSTEM
@@ -248,6 +248,7 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     )
     body = excerpt.encode()
     acquired = SimpleNamespace(
+        currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
         receipt_digest="sha256:" + "b" * 64,
         canonical_url="https://www.gov.uk/example",
         publisher="Home Office",
@@ -920,6 +921,7 @@ def retained_22589_assessment():
         ),
     )
     acquired = SimpleNamespace(
+        currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
         receipt_digest="sha256:" + "b" * 64,
         canonical_url=(
             "https://www.gov.uk/guidance/immigration-rules/"
@@ -2138,7 +2140,7 @@ def test_complete_replacement_object_does_not_lose_source_context(prefix, object
 
 
 def test_hko_base_upgrade_proves_original_bytes_and_rejects_other_changes(tmp_path):
-    from newsroom.control_plane.native_assessor import _legacy_hko_base_digest
+    from newsroom.control_plane.native_assessor import _legacy_hko_base_digests
     from newsroom.control_plane.native_weather_evidence import hko_evidence_body
     from newsroom.tests.test_native_weather_evidence import HKO_WARNING
 
@@ -2150,18 +2152,29 @@ def test_hko_base_upgrade_proves_original_bytes_and_rejects_other_changes(tmp_pa
         body = hko_evidence_body(raw)
         current = replace(old, passages=(body.decode(),), observation_digests=(digest_bytes(body),))
         sources = (SimpleNamespace(unit=SimpleNamespace(source_id="HK-02")),)
-        acquired = (SimpleNamespace(body=body),)
-        assert _legacy_hko_base_digest(current, sources, acquired) == old.digest
-        assert _legacy_hko_base_digest(current, (), ()) is None
-        assert _legacy_hko_base_digest(current, (SimpleNamespace(unit=SimpleNamespace(source_id="UK-01")),), acquired) is None
+        acquired = (SimpleNamespace(body=body, currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"),)
+        assert old.digest in _legacy_hko_base_digests(current, sources, acquired)
+        assert _legacy_hko_base_digests(current, (), ()) == frozenset()
+        assert _legacy_hko_base_digests(current, (SimpleNamespace(unit=SimpleNamespace(source_id="UK-01")),), acquired) == frozenset()
         changed = body + b" Invented information."
-        assert _legacy_hko_base_digest(replace(current, passages=(changed.decode(),)), sources, (SimpleNamespace(body=changed),)) is None
+        assert _legacy_hko_base_digests(replace(current, passages=(changed.decode(),)), sources, (SimpleNamespace(body=changed, currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"),)) == frozenset()
         changed_raw = canonical_json_bytes({"WTS": {**HKO_WARNING, "actionCode": "CANCEL"}})
         changed_body = hko_evidence_body(changed_raw)
-        assert _legacy_hko_base_digest(
-            replace(current, passages=(changed_body.decode(),)), sources,
-            (SimpleNamespace(body=changed_body),),
-        ) != old.digest
+        changed_base = replace(current, passages=(changed_body.decode(),),
+                               observation_digests=(digest_bytes(changed_body),))
+        assert old.digest not in _legacy_hko_base_digests(
+            changed_base, sources,
+            (SimpleNamespace(body=changed_body, currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"),),
+        )
+        from newsroom.control_plane.native_weather_evidence import hko_completed_event_body
+        historical = hko_completed_event_body(changed_raw)
+        historical_base = replace(current, passages=(historical.decode(),),
+                                  observation_digests=(digest_bytes(historical),))
+        raw_base = replace(current, passages=(changed_raw.decode(),),
+                           observation_digests=(digest_bytes(changed_raw),))
+        assert _legacy_hko_base_digests(historical_base, sources, (
+            SimpleNamespace(body=historical, currentness_basis="RETAINED_AUTHORITATIVE_COMPLETED_EVENT"),
+        )) == frozenset({changed_base.digest, raw_base.digest})
     finally:
         connection.close()
 
@@ -2191,7 +2204,7 @@ def test_proved_hko_representation_upgrade_has_one_new_accounted_contract_attemp
         current = replace(base, passages=(base.passages[0] + " Canonical field projection.",))
         # The exact byte-proof helper has its own positive/tamper test above;
         # isolate settlement/accounting behaviour here, not source acquisition.
-        monkeypatch.setattr(module, "_legacy_hko_base_digest", lambda *_: base.digest)
+        monkeypatch.setattr(module, "_legacy_hko_base_digests", lambda *_: frozenset({base.digest}))
         assessor = AutonomousNativeEvidenceAssessor(dispatch, usage=usage, dispatch_fence=nullcontext)
         with pytest.raises(NativeEvidenceHold, match="INPUT_CHANGED"):
             assessor.assess_with_boundary(candidate, current, (), (), before_dispatch=None, cached_only=True)

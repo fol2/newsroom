@@ -619,6 +619,7 @@ def open_native_pipeline(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=proof, rights=licence, transport_policy_digest=TRANSPORT_POLICY,
             dispatch_fence=lambda request: source_fence(request.source_id, request.canonical_url),
+            retained_units=journal.units, observations=journal.observations,
             clock=clock,
         )
 
