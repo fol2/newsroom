@@ -555,13 +555,17 @@ def test_native_pipeline_revalidates_only_repairable_holds_once_per_contract(tmp
         connection.close()
 
 
+@pytest.mark.parametrize("recent_first", (False, True))
 def test_native_pipeline_time_slices_changed_contract_reassessment_without_starving_work(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, recent_first,
 ):
     pipeline, journal, connection, _, calls, dispositions = _open(
         tmp_path, monkeypatch,
     )
     due = tuple(_native(f"due-{index}") for index in range(3))
+    if recent_first:
+        due = tuple(replace(unit, observed_at=f"2026-09-{day:02d}T16:00:00.000000Z")
+                    for unit, day in zip(due, (2, 7, 5), strict=True))
     ordinary = _native("ordinary")
     fresh = _native("fresh")
     now = [0.0]
@@ -623,8 +627,9 @@ def test_native_pipeline_time_slices_changed_contract_reassessment_without_starv
         for cycle in ("first", "second", "third", "unchanged"):
             pipeline.tick(cycle_id=cycle)
             dispositions[0] = ()
+        expected = (due[1], due[2], due[0]) if recent_first else due
         assert [revision_id for kind, revision_id in calls if kind == "revalidate"] == [
-            unit.revision_id for unit in due
+            unit.revision_id for unit in expected
         ]
         assert [revision_id for kind, revision_id in calls if kind == "resume"] == [
             due[0].revision_id

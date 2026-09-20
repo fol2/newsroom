@@ -85,6 +85,148 @@ def _settle(service, envelope, allocation, *, zero):
     )
 
 
+def _recovered_ambiguous_pattern(service, policy, shape, unit):
+    first, allocation = _attempt(service, policy, shape, unit, 1)
+    _settle(service, first, allocation, zero=True)
+    with sqlite3.connect(service.path) as connection:
+        terminal = json.loads(connection.execute(
+            "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+            (allocation.invocation_id,),
+        ).fetchone()[0])
+    invocation = {
+        "model_invocation_id": allocation.invocation_id,
+        "model_invocation_allocation_digest": allocation.canonical_digest,
+        "model_invocation_terminal_digest": terminal["terminal_digest"],
+        "model_work_envelope_id": first.envelope_id,
+        "outcome": terminal["outcome"],
+        "usage": terminal["components"],
+    }
+    original = {
+        "ingest_id": unit.ingest_id, "attempt_number": 1,
+        "provider_attempt_number": 1, "outcome": "FAILED",
+        "failure_code": "PRODUCER_INTERNAL_ERROR",
+        "combined_temporal_failure_code": "PIPELINE_FAILED",
+        "chat_subscription_not_debited": True,
+        "chat_invocations": [invocation], "embedding_usage": {
+            "request_count": 0, "requests": [], "embedding_tokens": 0,
+            "cost_usd_microunits": 0, "usage_basis": "NO_EMBEDDING_CALL",
+        },
+    }
+    connection = connect(service.path)
+    insert_graphiti_attempt_receipt(
+        connection, ingest_id=unit.ingest_id, attempt_number=1,
+        outcome="FAILED", receipt=original,
+    )
+    connection.commit()
+    connection.close()
+    second = WorkEnvelope.create(
+        cycle_id=_graphiti_usage_cycle_id(
+            unit, attempt_number=2, requested_cycle_id=None,
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY, admitted_at=T0,
+        admission_decision_id=None, candidate_id=None, hypothesis_digest=None,
+        evidence_package_digest=None, ingest_id=unit.ingest_id,
+        graphiti_attempt_id=f"{unit.ingest_id}:2",
+    )
+    service.open_envelope(second)
+    connection = connect(service.path)
+    replay = {
+        **original, "attempt_number": 2, "provider_attempt_number": 1,
+        "accounting": {
+            "recovery_classification": "RECOVERED_IMMUTABLE_COMPLETE",
+            "provider_attempt": {
+                "spend_id": f"{unit.ingest_id}:1", "status": "RECONCILED",
+                "retained_attempt_receipt": True, "reconciled_again": False,
+            },
+            "current_attempt": {
+                "spend_id": f"{unit.ingest_id}:2", "status": "RECONCILED",
+                "usage_basis": "NO_EMBEDDING_CALL", "actual_usd_microunits": 0,
+                "actual_gbp_microunits": 0, "unused_reservation_released": True,
+            },
+        },
+    }
+    replay_digest = insert_graphiti_attempt_receipt(
+        connection, ingest_id=unit.ingest_id, attempt_number=2,
+        outcome="FAILED", receipt=replay,
+    )
+    for number in (1, 2):
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_spend VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"{unit.ingest_id}:{number}", unit.ingest_id, number,
+             unit.proving_run_id, None, 500000, 0, 0,
+             "NO_EMBEDDING_CALL", "RECONCILED", None, None, None,
+             T0.isoformat()),
+        )
+    connection.commit()
+    connection.close()
+    service.record_work_outcome(
+        envelope_id=second.envelope_id, outcome="GRAPHITI_FAILED",
+        outcome_record_id=replay_digest, payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=2), retained_proposal_count=0,
+    )
+    third, third_allocation = _attempt(service, policy, shape, unit, 3)
+    third_terminal = _reported(third_allocation, outcome="COMPLETE")
+    service.observe_transport(
+        invocation_id=third_allocation.invocation_id,
+        observed_at=third_terminal.dispatch_at,
+        state="DISPATCH_STARTED",
+        evidence_digest=third_allocation.canonical_digest,
+    )
+    third_terminal = service.complete(
+        third_terminal,
+        provider_telemetry={"invocation": third_allocation.invocation_id},
+    )
+    service.record_work_outcome(
+        envelope_id=third.envelope_id, outcome="GRAPHITI_AMBIGUOUS_EFFECT",
+        outcome_record_id=f"ambiguous:{third_allocation.invocation_id}",
+        payload_digest=None, terminal_at=third_terminal.completed_at,
+        retained_proposal_count=0,
+    )
+    fourth = WorkEnvelope.create(
+        cycle_id=_graphiti_usage_cycle_id(
+            unit, attempt_number=4, requested_cycle_id=None,
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY, admitted_at=T0,
+        admission_decision_id=None, candidate_id=None, hypothesis_digest=None,
+        evidence_package_digest=None, ingest_id=unit.ingest_id,
+        graphiti_attempt_id=f"{unit.ingest_id}:4",
+    )
+    service.open_envelope(fourth)
+    connection = connect(service.path)
+    rejected_digest = insert_graphiti_attempt_receipt(
+        connection, ingest_id=unit.ingest_id, attempt_number=4,
+        outcome="FAILED", receipt={
+            "ingest_id": unit.ingest_id, "attempt_number": 4,
+            "provider_attempt_number": None, "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "GraphitiAdapterVersionConflict",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "chat_invocations": [], "embedding_usage": None,
+            "token_usage": None,
+        },
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_attempt_receipts SET at=? "
+        "WHERE ingest_id=? AND attempt_number=4",
+        ((T0 + timedelta(seconds=3)).isoformat(), unit.ingest_id),
+    )
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_spend VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (f"{unit.ingest_id}:4", unit.ingest_id, 4, unit.proving_run_id,
+         None, 500000, None, None, "UNREPORTED", "UNRECONCILED",
+         None, None, None, T0.isoformat()),
+    )
+    connection.commit()
+    connection.close()
+    service.record_work_outcome(
+        envelope_id=fourth.envelope_id, outcome="GRAPHITI_REJECTED_BINDING",
+        outcome_record_id=rejected_digest, payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=4), retained_proposal_count=0,
+    )
+    return allocation, second, replay_digest, rejected_digest
+
+
 def _failures(connection, unit, count=3):
     for _ in range(count):
         record_graphiti_failure(
@@ -155,7 +297,7 @@ def test_native_retry_rechecks_pending_settlement_without_a_cache(tmp_path):
 
 
 def test_recovered_attempt_reentry_authenticates_settled_leaf_without_outer_outcome(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
     service, _, policy, shape = _service_fixture(tmp_path)
     unit = _native("recovered-reentry-accounting")
@@ -212,6 +354,18 @@ def test_recovered_attempt_reentry_authenticates_settled_leaf_without_outer_outc
             skipped_recorded_at=T0 + timedelta(seconds=5),
             latest_allowed_attempt_number=5,
         )
+    digest_inputs = []
+    original_digest = usage_module.digest_canonical
+
+    def capture_digest(value):
+        if (
+            isinstance(value, dict)
+            and value.get("authoritative_attempt_settled") is True
+        ):
+            digest_inputs.append(dict(value))
+        return original_digest(value)
+
+    monkeypatch.setattr(usage_module, "digest_canonical", capture_digest)
     digest = service.native_recovered_ambiguous_usage_evidence_digest(
         ingest_id=unit.ingest_id,
         authoritative_attempt_number=3,
@@ -222,6 +376,7 @@ def test_recovered_attempt_reentry_authenticates_settled_leaf_without_outer_outc
         retained_reentry_attempt_number=5,
     )
     assert digest.startswith("sha256:")
+    assert "immutable_replay_proofs" not in digest_inputs[-1]
     service.record_work_outcome(
         envelope_id=fifth.envelope_id,
         outcome="GRAPHITI_COMPLETE",
@@ -259,6 +414,137 @@ def test_recovered_attempt_reentry_authenticates_settled_leaf_without_outer_outc
             skipped_recorded_at=T0 + timedelta(seconds=5),
             latest_allowed_attempt_number=5,
             retained_reentry_attempt_number=5,
+        )
+
+
+def test_recovered_ambiguous_usage_accepts_exact_provider_free_immutable_replay(
+    tmp_path,
+):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native("immutable-replay-before-ambiguous")
+    _, _, _, rejected_digest = _recovered_ambiguous_pattern(
+        service, policy, shape, unit
+    )
+
+    digest = service.native_recovered_ambiguous_usage_evidence_digest(
+        ingest_id=unit.ingest_id,
+        authoritative_attempt_number=3,
+        skipped_attempt_number=4,
+        skipped_receipt_digest=rejected_digest,
+        skipped_recorded_at=T0 + timedelta(seconds=3),
+    )
+
+    assert digest.startswith("sha256:")
+    evidence = _proof(service, unit, 4)
+    assert evidence.zero_dispatch_attempts == (1,)
+    assert evidence.settled_provider_attempts == (3,)
+    assert evidence.unresolved_attempts == (2, 4)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "impostor", "wrong-receipt", "unknown-original", "wrong-context",
+        "second-dispatch",
+    ),
+)
+def test_recovered_ambiguous_usage_rejects_unproved_immutable_replay(
+    tmp_path, corruption,
+):
+    service, _, policy, shape = _service_fixture(tmp_path)
+    unit = _native(f"unproved-immutable-replay-{corruption}")
+    _, second, _, rejected_digest = _recovered_ambiguous_pattern(
+        service, policy, shape, unit
+    )
+    with sqlite3.connect(service.path) as connection:
+        if corruption in {"impostor", "unknown-original"}:
+            row = connection.execute(
+                "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts "
+                "WHERE ingest_id=? AND attempt_number=2",
+                (unit.ingest_id,),
+            ).fetchone()
+            receipt = json.loads(row[0])
+            if corruption == "impostor":
+                receipt["chat_invocations"][0]["model_invocation_terminal_digest"] = (
+                    usage_module.digest_canonical({"forged": "terminal"})
+                )
+            else:
+                receipt["provider_attempt_number"] = 99
+            unsigned = dict(receipt)
+            unsigned.pop("receipt_digest")
+            digest = usage_module.digest_bytes(
+                usage_module.canonical_json_bytes(unsigned)
+            )
+            receipt["receipt_digest"] = digest
+            connection.execute(
+                "UPDATE unpublished_graphiti_attempt_receipts "
+                "SET receipt_digest=?,receipt_json=? WHERE ingest_id=? "
+                "AND attempt_number=2",
+                (digest, json.dumps(receipt, sort_keys=True), unit.ingest_id),
+            )
+        elif corruption == "wrong-receipt":
+            connection.execute(
+                "UPDATE unpublished_graphiti_attempt_receipts "
+                "SET receipt_json=json_set(receipt_json,'$.failure_code','CHANGED') "
+                "WHERE ingest_id=? AND attempt_number=2",
+                (unit.ingest_id,),
+            )
+        elif corruption == "wrong-context":
+            other = WorkEnvelope.create(
+                cycle_id="other-replay-context",
+                workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                admitted_at=T0,
+                admission_decision_id=None,
+                candidate_id=None,
+                hypothesis_digest=None,
+                evidence_package_digest=None,
+                ingest_id="other-ingest",
+                graphiti_attempt_id="other-ingest:2",
+            )
+            row = connection.execute(
+                "SELECT record_json FROM model_work_outcomes WHERE envelope_id=?",
+                (second.envelope_id,),
+            ).fetchone()
+            outcome = json.loads(row[0])
+            outcome.pop("outcome_digest")
+            outcome["envelope_id"] = other.envelope_id
+            digest = usage_module.digest_canonical(outcome)
+            outcome["outcome_digest"] = digest
+            connection.execute(
+                "UPDATE model_work_outcomes SET outcome_digest=?,record_json=? "
+                "WHERE envelope_id=?",
+                (digest, json.dumps(outcome, sort_keys=True), second.envelope_id),
+            )
+    if corruption == "second-dispatch":
+        allocation, identity = _bound_request(
+            service=service, envelope=second, policy=policy, shape=shape,
+            ordinal=1, semantic=f"{unit.ingest_id}:second-dispatch",
+            effective_revision_digest=usage_module.digest_canonical(
+                asdict(unit.effective_revision)
+            ),
+        )
+        service.allocate_graphiti_request(
+            allocation, identity=identity,
+            max_distinct_internal_requests=shape.max_distinct_internal_requests,
+        )
+        terminal = _reported(allocation, outcome="FAILED")
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=terminal.dispatch_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=allocation.canonical_digest,
+        )
+        service.complete(
+            terminal, provider_telemetry={"invocation": allocation.invocation_id}
+        )
+
+    with pytest.raises(ModelUsageIntegrityError):
+        service.native_recovered_ambiguous_usage_evidence_digest(
+            ingest_id=unit.ingest_id,
+            authoritative_attempt_number=3,
+            skipped_attempt_number=4,
+            skipped_receipt_digest=rejected_digest,
+            skipped_recorded_at=T0 + timedelta(seconds=5),
         )
 
 

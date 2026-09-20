@@ -2605,6 +2605,259 @@ def _retain_provider_telemetry(
     return provider_telemetry_digest
 
 
+def _native_immutable_replay_proof(
+    connection: sqlite3.Connection,
+    *,
+    ingest_id: str,
+    attempt_number: int,
+    evidence: GraphitiIngestRetryEvidence,
+) -> tuple[bool, dict[str, object] | None]:
+    """Authenticate one provider-free receipt replay before ambiguity recovery."""
+
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='unpublished_graphiti_attempt_receipts'"
+    ).fetchone() is None:
+        return False, None
+    row = connection.execute(
+        "SELECT outcome,receipt_digest,receipt_json FROM "
+        "unpublished_graphiti_attempt_receipts WHERE ingest_id=? "
+        "AND attempt_number=?",
+        (ingest_id, attempt_number),
+    ).fetchone()
+    if row is None:
+        return False, None
+    try:
+        receipt = _object(row[2])
+    except ModelUsageIntegrityError:
+        return False, None
+    accounting = receipt.get("accounting")
+    claimed = bool(
+        isinstance(accounting, Mapping)
+        and accounting.get("recovery_classification")
+        == "RECOVERED_IMMUTABLE_COMPLETE"
+    )
+    if not claimed:
+        return False, None
+
+    unsigned = dict(receipt)
+    supplied_digest = unsigned.pop("receipt_digest", None)
+    receipt_digest = digest_bytes(canonical_json_bytes(unsigned))
+    provider_attempt_number = receipt.get("provider_attempt_number")
+    if (
+        supplied_digest != receipt_digest
+        or row[1] != receipt_digest
+        or receipt.get("ingest_id") != ingest_id
+        or receipt.get("attempt_number") != attempt_number
+        or receipt.get("outcome") != row[0]
+        or row[0] != "FAILED"
+        or receipt.get("failure_code") != "PRODUCER_INTERNAL_ERROR"
+        or receipt.get("combined_temporal_failure_code") != "PIPELINE_FAILED"
+        or receipt.get("chat_subscription_not_debited") is not True
+        or type(provider_attempt_number) is not int
+        or not 0 < provider_attempt_number < attempt_number
+        or provider_attempt_number in evidence.unresolved_attempts
+        or provider_attempt_number
+        not in {
+            *evidence.zero_dispatch_attempts,
+            *evidence.settled_provider_attempts,
+        }
+    ):
+        return True, None
+
+    provider_row = connection.execute(
+        "SELECT outcome,receipt_digest,receipt_json FROM "
+        "unpublished_graphiti_attempt_receipts WHERE ingest_id=? "
+        "AND attempt_number=?",
+        (ingest_id, provider_attempt_number),
+    ).fetchone()
+    if provider_row is None:
+        return True, None
+    try:
+        provider_receipt = _object(provider_row[2])
+    except ModelUsageIntegrityError:
+        return True, None
+    provider_unsigned = dict(provider_receipt)
+    provider_supplied_digest = provider_unsigned.pop("receipt_digest", None)
+    provider_receipt_digest = digest_bytes(canonical_json_bytes(provider_unsigned))
+    replay_invocations = receipt.get("chat_invocations")
+    provider_invocations = provider_receipt.get("chat_invocations")
+    if (
+        provider_supplied_digest != provider_receipt_digest
+        or provider_row[1] != provider_receipt_digest
+        or provider_receipt.get("ingest_id") != ingest_id
+        or provider_receipt.get("attempt_number") != provider_attempt_number
+        or provider_receipt.get("outcome") != provider_row[0]
+        or provider_receipt.get("failure_code") != "PRODUCER_INTERNAL_ERROR"
+        or not isinstance(replay_invocations, list)
+        or not replay_invocations
+        or replay_invocations != provider_invocations
+        or any(not isinstance(item, Mapping) for item in replay_invocations)
+    ):
+        return True, None
+
+    provider_envelope = WorkEnvelope.create(
+        cycle_id=native_graphiti_usage_cycle_id(
+            ingest_id=ingest_id, attempt_number=provider_attempt_number
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=ingest_id,
+        graphiti_attempt_id=f"{ingest_id}:{provider_attempt_number}",
+    )
+    invocation_proof = []
+    for item in replay_invocations:
+        invocation_id = item.get("model_invocation_id")
+        if type(invocation_id) is not str:
+            return True, None
+        try:
+            allocation, terminal = _retained_terminal_allocation(
+                connection, invocation_id
+            )
+        except ModelUsageIntegrityError:
+            return True, None
+        if (
+            allocation.envelope_id != provider_envelope.envelope_id
+            or item.get("model_work_envelope_id") != allocation.envelope_id
+            or item.get("model_invocation_allocation_digest")
+            != allocation.canonical_digest
+            or item.get("model_invocation_terminal_digest")
+            != terminal.terminal_digest
+            or item.get("outcome") != terminal.outcome
+        ):
+            return True, None
+        invocation_proof.append(
+            {
+                "invocation_id": invocation_id,
+                "allocation_digest": allocation.canonical_digest,
+                "terminal_digest": terminal.terminal_digest,
+            }
+        )
+
+    replay_envelope = WorkEnvelope.create(
+        cycle_id=native_graphiti_usage_cycle_id(
+            ingest_id=ingest_id, attempt_number=attempt_number
+        ),
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=datetime(1970, 1, 1, tzinfo=UTC),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=ingest_id,
+        graphiti_attempt_id=f"{ingest_id}:{attempt_number}",
+    )
+    envelope_row = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,canonical_digest,record_json "
+        "FROM model_work_envelopes WHERE envelope_id=?",
+        (replay_envelope.envelope_id,),
+    ).fetchone()
+    outcome_row = connection.execute(
+        "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+        "FROM model_work_outcomes "
+        "WHERE envelope_id=?",
+        (replay_envelope.envelope_id,),
+    ).fetchone()
+    if envelope_row is None or outcome_row is None:
+        return True, None
+    try:
+        retained_envelope = _envelope_from_record(_object(envelope_row[4]))
+        outcome = _object(outcome_row[4])
+    except ModelUsageIntegrityError:
+        return True, None
+    unsigned_outcome = dict(outcome)
+    outcome_digest = unsigned_outcome.pop("outcome_digest", None)
+    leaf_count = connection.execute(
+        "SELECT COUNT(*) FROM model_invocation_allocations WHERE envelope_id=?",
+        (replay_envelope.envelope_id,),
+    ).fetchone()[0]
+    request_count = connection.execute(
+        "SELECT COUNT(*) FROM graphiti_internal_requests WHERE envelope_id=?",
+        (replay_envelope.envelope_id,),
+    ).fetchone()[0]
+    current_attempt = accounting.get("current_attempt")
+    provider_attempt = accounting.get("provider_attempt")
+    current_spend = connection.execute(
+        "SELECT status,usage_basis,actual_usd_microunits,"
+        "actual_gbp_microunits FROM unpublished_graphiti_spend "
+        "WHERE ingest_id=? AND attempt_number=?",
+        (ingest_id, attempt_number),
+    ).fetchone()
+    provider_spend = connection.execute(
+        "SELECT status FROM unpublished_graphiti_spend WHERE ingest_id=? "
+        "AND attempt_number=?",
+        (ingest_id, provider_attempt_number),
+    ).fetchone()
+    embedding = receipt.get("embedding_usage")
+    if (
+        tuple(envelope_row[:4])
+        != (
+            retained_envelope.envelope_id,
+            retained_envelope.cycle_id,
+            retained_envelope.workload_class.value,
+            retained_envelope.canonical_digest,
+        )
+        or retained_envelope.envelope_id != replay_envelope.envelope_id
+        or retained_envelope.cycle_id != replay_envelope.cycle_id
+        or retained_envelope.workload_class is not replay_envelope.workload_class
+        or retained_envelope.ingest_id != ingest_id
+        or retained_envelope.graphiti_attempt_id
+        != f"{ingest_id}:{attempt_number}"
+        or outcome_digest != outcome_row[0]
+        or digest_canonical(unsigned_outcome) != outcome_digest
+        or tuple(outcome_row[1:4])
+        != (
+            outcome.get("envelope_id"),
+            outcome.get("outcome"),
+            outcome.get("terminal_at"),
+        )
+        or outcome.get("envelope_id") != replay_envelope.envelope_id
+        or outcome_row[2] != "GRAPHITI_FAILED"
+        or outcome.get("outcome") != "GRAPHITI_FAILED"
+        or outcome.get("outcome_record_id") != receipt_digest
+        or outcome.get("payload_digest") is not None
+        or outcome.get("retained_proposal_count") != 0
+        or outcome.get("accepted_provider_attempt_id") is not None
+        or any((leaf_count, request_count))
+        or not isinstance(current_attempt, Mapping)
+        or not isinstance(provider_attempt, Mapping)
+        or current_spend is None
+        or tuple(current_spend) != ("RECONCILED", "NO_EMBEDDING_CALL", 0, 0)
+        or provider_spend is None
+        or provider_attempt.get("spend_id")
+        != f"{ingest_id}:{provider_attempt_number}"
+        or provider_attempt.get("status") != provider_spend[0]
+        or provider_attempt.get("retained_attempt_receipt") is not True
+        or provider_attempt.get("reconciled_again") is not False
+        or current_attempt.get("spend_id") != f"{ingest_id}:{attempt_number}"
+        or current_attempt.get("status") != "RECONCILED"
+        or current_attempt.get("usage_basis") != "NO_EMBEDDING_CALL"
+        or current_attempt.get("actual_usd_microunits") != 0
+        or current_attempt.get("actual_gbp_microunits") != 0
+        or current_attempt.get("unused_reservation_released") is not True
+        or not isinstance(embedding, Mapping)
+        or embedding.get("request_count") != 0
+        or embedding.get("requests") != []
+        or embedding.get("embedding_tokens") != 0
+        or embedding.get("cost_usd_microunits") != 0
+        or embedding.get("usage_basis") != "NO_EMBEDDING_CALL"
+    ):
+        return True, None
+    return True, {
+        "attempt_number": attempt_number,
+        "receipt_digest": receipt_digest,
+        "provider_attempt_number": provider_attempt_number,
+        "provider_receipt_digest": provider_receipt_digest,
+        "replay_envelope_id": replay_envelope.envelope_id,
+        "replay_outcome_digest": outcome_digest,
+        "invocations": invocation_proof,
+    }
+
+
 class ModelUsageService:
     """Single SQLite authority for model usage, outcomes and exports."""
 
@@ -3409,7 +3662,6 @@ class ModelUsageService:
         )[ingest_id]
         if (
             authoritative_attempt_number not in evidence.settled_provider_attempts
-            or evidence.unresolved_attempts != (skipped_attempt_number,)
             or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
             or any(number > latest_allowed for number in evidence.attempt_numbers)
         ):
@@ -3434,6 +3686,33 @@ class ModelUsageService:
         connection = self._connection()
         try:
             connection.execute("BEGIN")
+            replay_proofs = []
+            invalid_replay = False
+            for number in evidence.attempt_numbers:
+                if number >= authoritative_attempt_number:
+                    continue
+                claimed, replay_proof = _native_immutable_replay_proof(
+                    connection,
+                    ingest_id=ingest_id,
+                    attempt_number=number,
+                    evidence=evidence,
+                )
+                if claimed and replay_proof is None:
+                    invalid_replay = True
+                elif replay_proof is not None:
+                    replay_proofs.append(replay_proof)
+            authenticated_replays = {
+                int(proof["attempt_number"]) for proof in replay_proofs
+            }
+            unresolved_attempts = tuple(
+                number
+                for number in evidence.unresolved_attempts
+                if number not in authenticated_replays
+            )
+            if invalid_replay or unresolved_attempts != (skipped_attempt_number,):
+                raise ModelUsageIntegrityError(
+                    "recovered ambiguous usage is not exactly settled"
+                )
             retained_envelope = connection.execute(
                 "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
                 (envelope.envelope_id,),
@@ -3508,8 +3787,6 @@ class ModelUsageService:
                 or outcome_record.get("retained_proposal_count") != 0
                 or outcome_record.get("accepted_provider_attempt_id") is not None
                 or outcome_record.get("stable_reason_codes") != []
-                or _instant(str(outcome_record.get("terminal_at")))
-                > skipped_recorded_at.astimezone(UTC)
                 or any((leaf_count, request_count, refusal_count))
             ):
                 raise ModelUsageIntegrityError(
@@ -3549,20 +3826,19 @@ class ModelUsageService:
                 raise ModelUsageIntegrityError(
                     "recovered ambiguous settled usage records are absent"
                 )
-            return digest_canonical(
-                {
-                    "ingest_id": ingest_id,
-                    "authoritative_attempt_number": authoritative_attempt_number,
-                    "skipped_attempt_number": skipped_attempt_number,
-                    "authoritative_attempt_settled": True,
-                    "skipped_attempt_unresolved": True,
-                    "settled_records": sorted(
-                        settled_records, key=digest_canonical
-                    ),
-                    "skipped_envelope": envelope_record,
-                    "skipped_outcome": outcome_record,
-                }
-            )
+            digest_evidence: dict[str, object] = {
+                "ingest_id": ingest_id,
+                "authoritative_attempt_number": authoritative_attempt_number,
+                "skipped_attempt_number": skipped_attempt_number,
+                "authoritative_attempt_settled": True,
+                "skipped_attempt_unresolved": True,
+                "settled_records": sorted(settled_records, key=digest_canonical),
+                "skipped_envelope": envelope_record,
+                "skipped_outcome": outcome_record,
+            }
+            if replay_proofs:
+                digest_evidence["immutable_replay_proofs"] = replay_proofs
+            return digest_canonical(digest_evidence)
         finally:
             connection.close()
 
